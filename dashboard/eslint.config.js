@@ -6,7 +6,8 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'src/components/ui', 'src/hooks']) // shadcn registry code is vendored as-is,
+  // shadcn registry code is vendored as-is
+  globalIgnores(['dist', 'src/components/ui', 'src/hooks']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

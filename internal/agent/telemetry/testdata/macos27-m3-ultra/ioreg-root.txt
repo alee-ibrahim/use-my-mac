@@ -1,0 +1,10 @@
++-o Root  <class IORegistryEntry, id 0x100000100, retain 47>
+    {
+      "IOKitBuildVersion" = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:42 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6031"
+      "OS Build Version" = "26A434"
+      "OSKernelCPUSubtype" = 18446744072635809794
+      "OSKernelCPUType" = 16777228
+      "OSPrelinkKextCount" = 5
+      "IOConsoleLocked" = Yes
+      "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kSCSecuritySessionID"=100017,"kCGSSessionSystemSafeBoot"=No,"kCGSessionLoginDoneKey"=Yes,"kCGSSessionIDKey"=257,"kCGSSessionUserNameKey"="alice","kCGSSessionGroupIDKey"=20,"CGSSessionUniqueSessionUUID"="00000000-0000-4000-8000-000000000001","CGSSessionScreenLockedTime"=1794675110,"kCGSessionLongUserNameKey"="alice","CGSSessionScreenIsLocked"=Yes,"kCGSSessionAuditIDKey"=100017,"kCGSSessionLoginwindowSafeLogin"=No,"kCGSSessionUserIDKey"=501})
+    }
