@@ -95,13 +95,18 @@ cooldown ──(calm for cooldown_seconds)──▶ ready
   actually needs the power.
 - On entering `yielding` the agent sends SIGTERM to every running task's process group, then SIGKILL
   after `stop_grace`. It reports `yielded`, and the router immediately requeues the task without counting
-  a failure. The task is excluded from that Mac for `yield_exclude`.
+  a failure. The task is excluded from that Mac for `yield_exclude` (5 min by default).
 - While not `ready` the agent stops polling for work, and the router withdraws any assignment the agent
   had not yet picked up.
-- **Background priority:** every task runs under `taskpolicy -b` (or `-c utility` + `nice`, configurable),
-  so even before a yield the scheduler on the Mac favours the user's apps. On Apple Silicon, background QoS
-  also keeps CPU work on efficiency cores. That is the most polite choice but it lowers throughput (see
-  open questions).
+- **Adaptive priority** (`priority: adaptive`, the default): when nobody is using the Mac (no console user,
+  screen locked, or no keyboard/mouse input for `priority_idle`, 5 min by default) tasks run at `utility`
+  QoS (`taskpolicy -c utility` + `nice`): all cores, still below the user's apps. While someone is using
+  it they run at `background` QoS, which on Apple Silicon keeps CPU work on the efficiency cores. A running
+  task moves between the two in place: when the user comes back the agent sets darwin background state on
+  every process in the task's group (`setpriority(PRIO_DARWIN_PROCESS)`, what `taskpolicy -b -p` does),
+  and lifts it when they leave. It re-applies it each heartbeat while the user is there so new children
+  are covered. A priority change never stops a task; the yield rules above are unchanged. Fixed
+  `background`, `utility` and `none` are still available.
 - **Local opt-out:** while `pause_file` exists the Mac is `draining` and stops its tasks. Admins can
   also **drain** a Mac from the dashboard (running tasks finish, no new work) or **opt it out** (running
   tasks are stopped and moved now).
@@ -192,7 +197,7 @@ running briefly). Tasks should be idempotent; outputs are overwritten per key.
 | screen locked | the on-console session's `CGSSessionScreenIsLocked`, or `IOConsoleLocked` | |
 | per-process CPU/RSS | `ps -axo pid,pgid,uid,pcpu,rss` | split into user and ours |
 | memory | `sysctl hw.memsize`, `vm_stat` (free + inactive + speculative + purgeable), `kern.memorystatus_vm_pressure_level` | |
-| thermal | `pmset -g therm` | sparse on Apple Silicon (see open questions) |
+| thermal | the worse of `notifyutil -g com.apple.system.thermalpressurelevel` (0 nominal, 1 moderate → fair, 2 heavy → serious, 3+ → critical) and `pmset -g therm` | the notify key is what `ProcessInfo.thermalState` reads and is current on Apple Silicon; no privileges needed. Feeds both the yield policy (`thermal`, default `serious`) and the score. Fan speed is not readable without SMC access, so it is not used |
 | power | `pmset -g batt` | |
 | GPU | `ioreg -r -d 1 -c AGXAccelerator` `PerformanceStatistics` → `Device Utilization %` | also `gpu-core-count` |
 | disk | `df -k <work_dir>` | |
@@ -202,18 +207,15 @@ All parsers are pure functions with tests. Only the choice of collector is build
 
 ## Open questions
 
-- **Background QoS vs throughput.** `taskpolicy -b` confines CPU work to efficiency cores on Apple
-  Silicon. That is safest for users but slow for CPU-heavy tasks on idle Macs. A likely better policy is
-  `utility` when nobody is logged in or the screen is locked, and `background` otherwise. Measured on an
-  M3 Ultra (20 P + 8 E cores), one 30 s 1080p H.264 chunk: `hevc_videotoolbox` 4.1–4.4 s at background vs
-  1.4 s at utility (1.4 s unwrapped; the H.264 decode runs on the CPU); `libx264 -preset medium` 15.4 s vs
-  2.1 s (1.9 s unwrapped). VideoToolbox works at both priorities.
+- **Background QoS vs throughput.** This is why priority is adaptive. Measured on an M3 Ultra (20 P + 8 E
+  cores), one 30 s 1080p H.264 chunk: `hevc_videotoolbox` 4.1–4.4 s at background vs 1.4 s at utility
+  (1.4 s unwrapped; the H.264 decode runs on the CPU); `libx264 -preset medium` 15.4 s vs 2.1 s (1.9 s
+  unwrapped). VideoToolbox works at both priorities. Open: whether a demoted task should also be
+  preferred for reassignment when another Mac is idle.
 - **VideoToolbox's helper process.** Hardware encodes run partly in `VTEncoderXPCService`, a separate
   process launched for the calling user and outside the task's process group. Under `_umm` it counts as
   ours by uid; an agent running as the console user counts it as user load (small: about 13 % of one core
   per encode in the trial).
-- **Thermal on Apple Silicon.** `pmset -g therm` rarely reports anything. A tiny Swift helper reading
-  `ProcessInfo.thermalState` would be accurate.
 - **VideoToolbox/Metal from a LaunchDaemon user** without a GUI session is expected to work for
   compute and hardware encode, but needs confirming on hardware.
 - **User-facing control** beyond `pause_file`, such as a menu-bar item that lets the Mac's owner pause

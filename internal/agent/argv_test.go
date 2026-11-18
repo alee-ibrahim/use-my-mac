@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSubstituteArgs(t *testing.T) {
@@ -77,7 +78,7 @@ func TestConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Server != "https://r.example" || c.Priority != "background" || c.MaxTasks != 1 || c.Yield.UserCPUHigh != 50 {
+	if c.Server != "https://r.example" || c.Priority != "adaptive" || c.PriorityIdle != 5*time.Minute || c.MaxTasks != 1 || c.Yield.UserCPUHigh != 50 {
 		t.Fatalf("defaults: %+v", c)
 	}
 	bad := []string{

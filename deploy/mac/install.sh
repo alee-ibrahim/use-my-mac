@@ -82,7 +82,7 @@ if [ ! -f "$ETC/agent.yaml" ]; then
     echo "credential_file: ${ETC}/credential"
     echo "work_dir: ${VAR}/work"
     echo "max_tasks: 1"
-    echo "priority: background"
+    echo "priority: adaptive"
     echo "pause_file: ${ETC}/paused"
     echo "user_load_scope: console"
     echo "# Only these programs can be run. Tasks pick one by name and add arguments."

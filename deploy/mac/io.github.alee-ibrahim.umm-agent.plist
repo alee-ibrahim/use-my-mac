@@ -3,7 +3,7 @@
 <!--
   LaunchDaemon for the use-my-mac agent. Runs as the dedicated non-admin
   service user _umm. The agent only makes outbound connections; tasks are
-  started at background priority (taskpolicy -b) by the agent itself.
+  started at low priority (taskpolicy) by the agent itself.
 -->
 <plist version="1.0">
 <dict>

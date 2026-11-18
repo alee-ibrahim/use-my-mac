@@ -47,8 +47,12 @@ func BuildArgv(goos, priority string, sandbox bool, workdir string, runtime []st
 	switch {
 	case goos == "darwin" && priority == "background":
 		argv = append(argv, "/usr/sbin/taskpolicy", "-b")
-	case goos == "darwin" && priority == "utility":
+	case goos == "darwin" && (priority == "utility" || priority == "adaptive-utility"):
 		argv = append(argv, "/usr/sbin/taskpolicy", "-c", "utility", "/usr/bin/nice", "-n", "10")
+	case goos == "darwin" && priority == "adaptive-background":
+		// Utility clamp plus darwin background: background wins now, and
+		// lifting it later (setGroupBackground) leaves the task at utility.
+		argv = append(argv, "/usr/sbin/taskpolicy", "-c", "utility", "-b", "/usr/bin/nice", "-n", "10")
 	case goos == "linux" && priority != "none":
 		argv = append(argv, "/usr/bin/nice", "-n", "19")
 	}

@@ -146,23 +146,49 @@ func TestParsers(t *testing.T) {
 	}
 }
 
+func TestThermalPressure(t *testing.T) {
+	cases := map[string]string{
+		"com.apple.system.thermalpressurelevel 0\n": "nominal",
+		"com.apple.system.thermalpressurelevel 1\n": "fair",
+		"com.apple.system.thermalpressurelevel 2\n": "serious",
+		"com.apple.system.thermalpressurelevel 3\n": "critical",
+		"com.apple.system.thermalpressurelevel 4\n": "critical",
+		"":                    "",
+		"notifyutil: unknown": "",
+	}
+	for in, want := range cases {
+		if got := ParseThermalPressure(in); got != want {
+			t.Errorf("ParseThermalPressure(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, c := range [][3]string{
+		{"nominal", "serious", "serious"}, {"critical", "fair", "critical"},
+		{"", "fair", "fair"}, {"nominal", "", "nominal"}, {"", "", ""},
+	} {
+		if got := WorseThermal(c[0], c[1]); got != c[2] {
+			t.Errorf("WorseThermal(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
 func TestMacOSCollectorWithFakeRunner(t *testing.T) {
 	outputs := map[string]string{
-		"sysctl -n hw.ncpu":                             "10\n",
-		"sysctl -n hw.memsize":                          "34359738368\n",
-		"sysctl -n machdep.cpu.brand_string":            "Apple M2 Pro\n",
-		"sysctl -n hw.model":                            "Mac14,12\n",
-		"sw_vers -productVersion":                       "15.1\n",
-		"stat -f %u %Su /dev/console":                   "501 alice\n",
-		"ioreg -c IOHIDSystem -d 4":                     ioregHID,
-		"ioreg -n Root -d1":                             ioregRootLocked,
-		"ps -axo pid=,pgid=,uid=,pcpu=,rss=":            psOut,
-		"vm_stat":                                       vmStat,
-		"sysctl -n kern.memorystatus_vm_pressure_level": "1\n",
-		"pmset -g therm":                                thermAS,
-		"pmset -g batt":                                 battDesktop,
-		"ioreg -r -d 1 -c AGXAccelerator":               agx,
-		"df -k /var/umm":                                dfOut,
+		"sysctl -n hw.ncpu":                                   "10\n",
+		"sysctl -n hw.memsize":                                "34359738368\n",
+		"sysctl -n machdep.cpu.brand_string":                  "Apple M2 Pro\n",
+		"sysctl -n hw.model":                                  "Mac14,12\n",
+		"sw_vers -productVersion":                             "15.1\n",
+		"stat -f %u %Su /dev/console":                         "501 alice\n",
+		"ioreg -c IOHIDSystem -d 4":                           ioregHID,
+		"ioreg -n Root -d1":                                   ioregRootLocked,
+		"ps -axo pid=,pgid=,uid=,pcpu=,rss=":                  psOut,
+		"vm_stat":                                             vmStat,
+		"sysctl -n kern.memorystatus_vm_pressure_level":       "1\n",
+		"pmset -g therm":                                      thermAS,
+		"notifyutil -g com.apple.system.thermalpressurelevel": "com.apple.system.thermalpressurelevel 2\n",
+		"pmset -g batt":                                       battDesktop,
+		"ioreg -r -d 1 -c AGXAccelerator":                     agx,
+		"df -k /var/umm":                                      dfOut,
 	}
 	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
 		k := name + " " + strings.Join(args, " ")
@@ -185,7 +211,7 @@ func TestMacOSCollectorWithFakeRunner(t *testing.T) {
 	if !tl.OnAC || tl.BatteryPercent != -1 || tl.GPUUtilPercent != 37 || tl.GPUCores != 19 {
 		t.Errorf("power/gpu: %+v", tl)
 	}
-	if tl.MemoryPressure != "normal" || tl.Thermal != "nominal" || tl.DiskFreeBytes == 0 {
+	if tl.MemoryPressure != "normal" || tl.Thermal != "serious" || tl.DiskFreeBytes == 0 {
 		t.Errorf("mem/thermal/disk: %+v", tl)
 	}
 	if math.Abs(tl.UserCPUPercent-20) > 0.001 {

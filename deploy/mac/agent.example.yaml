@@ -22,11 +22,15 @@ heartbeat_interval: 5s
 poll_wait: 25s
 stop_grace: 10s
 
+# adaptive:   utility while nobody is using the Mac (no console user, screen
+#             locked, or idle for priority_idle), background while someone
+#             is. A running task is demoted/promoted in place, not stopped.
 # background: taskpolicy -b (lowest CPU/IO priority; on Apple Silicon this
 #             also keeps CPU work on efficiency cores)
 # utility:    taskpolicy -c utility + nice 10 (faster, still polite)
 # none:       no wrapper (testing only)
-priority: background
+priority: adaptive
+priority_idle: 5m
 
 # Optional: run tasks under sandbox-exec so they can only write in their
 # work dir.
