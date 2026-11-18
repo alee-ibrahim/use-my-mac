@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { CopyIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react"
+import { CopyIcon, MoreHorizontalIcon, PlusIcon, Trash2Icon } from "lucide-react"
+
+import { useConfirm } from "@/components/confirm"
+import { useIsMobile } from "@/hooks/use-mobile"
 
 import { StateBadge } from "@/components/state-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -8,6 +11,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -478,27 +482,87 @@ function AuditLog({
 export function InstallLinks({ version }: { version: number }) {
   const { data, error, refresh } = usePolling(api.installTokens, 15000)
   const [log, setLog] = useState<InstallToken>()
+  const [confirm, ask] = useConfirm()
+  const mobile = useIsMobile()
   useEffect(() => {
     if (version) void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version])
   if (!data?.length && !error) return null
-  async function revoke(t: InstallToken) {
-    try {
-      await api.revokeInstallToken(t.id)
-      toast.success("Install link revoked")
-      void refresh()
-    } catch (e) {
-      toast.error(String(e))
-    }
+  const dead = (data ?? []).filter((t) => t.state !== "active").length
+
+  function revoke(t: InstallToken) {
+    ask({
+      title: "Revoke this install link?",
+      description: `${t.prefix}… stops working at once. Macs already installed with it are not affected.`,
+      action: "Revoke link",
+      run: async () => {
+        await api.revokeInstallToken(t.id)
+        void refresh()
+        return "Install link revoked"
+      },
+    })
   }
+  function remove(t: InstallToken) {
+    ask({
+      title: "Delete this install link?",
+      description: `${t.prefix}… and its audit log are removed. Macs installed with it are not affected.`,
+      run: async () => {
+        await api.deleteInstallToken(t.id)
+        void refresh()
+        return "Install link deleted"
+      },
+    })
+  }
+  function purge() {
+    ask({
+      title: `Delete ${dead} used, expired or revoked link${dead === 1 ? "" : "s"}?`,
+      description: "Links that still work are kept. Each deletion is recorded in the activity log.",
+      run: async () => {
+        const r = await api.purgeInstallTokens()
+        void refresh()
+        return `Deleted ${r.deleted} link${r.deleted === 1 ? "" : "s"}`
+      },
+    })
+  }
+
+  const menu = (t: InstallToken) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" className="max-md:size-11" aria-label="Install link actions">
+          <MoreHorizontalIcon />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuGroup>
+          <DropdownMenuItem onSelect={() => setLog(t)}>Audit log</DropdownMenuItem>
+          {t.state === "active" ? (
+            <DropdownMenuItem variant="destructive" onSelect={() => revoke(t)}>
+              Revoke…
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem variant="destructive" onSelect={() => remove(t)}>
+              Delete…
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader>
         <CardTitle>Install links</CardTitle>
-        <CardDescription>
-          One-line install commands. Revoke a link to stop it working at once.
-        </CardDescription>
+        <CardDescription>One-line install commands. Revoke a link to stop it working at once.</CardDescription>
+        {dead > 0 && (
+          <CardAction>
+            <Button variant="outline" size="sm" className="max-md:h-10" onClick={purge}>
+              <Trash2Icon data-icon="inline-start" />
+              Clear {dead} old
+            </Button>
+          </CardAction>
+        )}
       </CardHeader>
       <CardContent>
         {error && (
@@ -506,87 +570,73 @@ export function InstallLinks({ version }: { version: number }) {
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Link</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Profile</TableHead>
-              <TableHead>Used</TableHead>
-              <TableHead>Expires</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="w-10" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        {mobile ? (
+          <ul className="flex flex-col">
             {data?.map((t) => (
-              <TableRow key={t.id}>
-                <TableCell>
-                  <div className="font-mono text-xs">{t.prefix}…</div>
-                  {t.note && (
-                    <div className="text-xs text-muted-foreground">
-                      {t.note}
-                    </div>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <StateBadge state={t.state} />
-                </TableCell>
-                <TableCell className="text-xs">
-                  {t.profile.name}
-                  {t.profile.labels &&
-                    Object.keys(t.profile.labels).length > 0 && (
+              <li key={t.id} className="flex items-center gap-3 border-b py-2 last:border-b-0">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs">{t.prefix}…</span>
+                    <StateBadge state={t.state} />
+                  </div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {t.profile.name} · used {t.uses}/{t.max_uses} · {since(t.created_at)}
+                    {t.note ? ` · ${t.note}` : ""}
+                  </div>
+                </div>
+                {menu(t)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Link</TableHead>
+                <TableHead>State</TableHead>
+                <TableHead>Profile</TableHead>
+                <TableHead>Used</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-10" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data?.map((t) => (
+                <TableRow key={t.id}>
+                  <TableCell>
+                    <div className="font-mono text-xs">{t.prefix}…</div>
+                    {t.note && <div className="text-xs text-muted-foreground">{t.note}</div>}
+                  </TableCell>
+                  <TableCell>
+                    <StateBadge state={t.state} />
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {t.profile.name}
+                    {t.profile.labels && Object.keys(t.profile.labels).length > 0 && (
                       <div className="text-muted-foreground">
                         {Object.entries(t.profile.labels)
                           .map(([k, v]) => `${k}=${v}`)
                           .join(", ")}
                       </div>
                     )}
-                </TableCell>
-                <TableCell className="tabular-nums">
-                  {t.uses}/{t.max_uses}
-                </TableCell>
-                <TableCell className="text-xs whitespace-nowrap">
-                  {new Date(t.expires_at).toLocaleString()}
-                </TableCell>
-                <TableCell className="text-xs whitespace-nowrap">
-                  {since(t.created_at)}
-                  {t.created_by && (
-                    <div className="text-muted-foreground">{t.created_by}</div>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Install link actions"
-                      >
-                        <MoreHorizontalIcon />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuGroup>
-                        <DropdownMenuItem onSelect={() => setLog(t)}>
-                          Audit log
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={t.state !== "active"}
-                          onSelect={() => revoke(t)}
-                        >
-                          Revoke
-                        </DropdownMenuItem>
-                      </DropdownMenuGroup>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+                  </TableCell>
+                  <TableCell className="tabular-nums">
+                    {t.uses}/{t.max_uses}
+                  </TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">{new Date(t.expires_at).toLocaleString()}</TableCell>
+                  <TableCell className="text-xs whitespace-nowrap">
+                    {since(t.created_at)}
+                    {t.created_by && <div className="text-muted-foreground">{t.created_by}</div>}
+                  </TableCell>
+                  <TableCell>{menu(t)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
         <AuditLog token={log} onClose={() => setLog(undefined)} />
+        {confirm}
       </CardContent>
     </Card>
   )

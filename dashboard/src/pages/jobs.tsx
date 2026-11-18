@@ -1,288 +1,326 @@
-import { useEffect, useState } from "react"
-import { toast } from "sonner"
-import { ArrowLeftIcon, ListChecksIcon, RefreshCwIcon } from "lucide-react"
+import { useCallback, useState } from "react"
+import { ListChecksIcon, Trash2Icon } from "lucide-react"
 
+import { useConfirm } from "@/components/confirm"
+import { PageHeader } from "@/components/ops"
 import { StateBadge } from "@/components/state-badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Progress } from "@/components/ui/progress"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
-import { Spinner } from "@/components/ui/spinner"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { api, since, type Job, type Task } from "@/lib/api"
-import { usePolling } from "@/lib/hooks"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { api, since, terminal, type Job } from "@/lib/api"
+import { href, usePolling } from "@/lib/hooks"
 
-function progress(j: Job) {
+export function progress(j: Job) {
   const total = Object.values(j.counts).reduce((a, b) => a + b, 0)
   const done = (j.counts.succeeded ?? 0) + (j.counts.failed ?? 0) + (j.counts.cancelled ?? 0)
   return { total, done, pct: total ? (100 * done) / total : 0 }
 }
 
-function JobsList({ onOpen }: { onOpen: (id: string) => void }) {
-  const { data, error } = usePolling(api.jobs, 3000)
+const filters = [
+  { value: "", label: "All" },
+  { value: "running", label: "Running" },
+  { value: "queued", label: "Queued" },
+  { value: "succeeded", label: "Succeeded" },
+  { value: "failed", label: "Failed" },
+  { value: "cancelled", label: "Cancelled" },
+]
+
+// PurgeDialog deletes finished jobs older than N days (bulk cleanup).
+export function PurgeJobsDialog({ onDone }: { onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [days, setDays] = useState("30")
+  const [state, setState] = useState("all")
+  const [confirm, ask] = useConfirm()
+  const what = state === "all" ? "finished" : state
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Jobs</CardTitle>
-        <CardDescription>Most recent first. Click a job to see its tasks, retries and logs.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {error && (
-          <Alert variant="destructive" className="mb-4">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        {data && data.length === 0 ? (
-          <Empty>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <ListChecksIcon />
-              </EmptyMedia>
-              <EmptyTitle>No jobs yet</EmptyTitle>
-              <EmptyDescription>Submit one with the umm CLI or the REST API.</EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Job</TableHead>
-                <TableHead>State</TableHead>
-                <TableHead>Progress</TableHead>
-                <TableHead>Owner</TableHead>
-                <TableHead>Created</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(data ?? []).map((j) => {
-                const p = progress(j)
-                return (
-                  <TableRow key={j.id} className="cursor-pointer" onClick={() => onOpen(j.id)}>
-                    <TableCell>
-                      <div className="font-medium">{j.name}</div>
-                      <div className="font-mono text-xs text-muted-foreground">{j.id}</div>
-                    </TableCell>
-                    <TableCell>
-                      <StateBadge state={j.state} />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex min-w-40 items-center gap-2">
-                        <Progress value={p.pct} aria-label="job progress" />
-                        <span className="text-xs tabular-nums">
-                          {p.done}/{p.total}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{j.owner}</TableCell>
-                    <TableCell className="text-muted-foreground">{since(j.created_at)}</TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
-    </Card>
+    <>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger asChild>
+          <Button type="button" variant="outline" size="sm" className="max-md:h-10">
+            <Trash2Icon data-icon="inline-start" />
+            Delete old jobs…
+          </Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete old jobs</DialogTitle>
+            <DialogDescription>
+              Deletes finished jobs with their tasks, logs and the outputs kept on the router. Running and queued jobs
+              are never touched. Settings → Data can do this automatically.
+            </DialogDescription>
+          </DialogHeader>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="purge-days">Finished more than</FieldLabel>
+              <Select value={days} onValueChange={setDays}>
+                <SelectTrigger id="purge-days">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {["1", "7", "14", "30", "90", "180", "365"].map((d) => (
+                    <SelectItem key={d} value={d}>
+                      {d} day{d === "1" ? "" : "s"} ago
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="0">any time (all finished jobs)</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="purge-state">Which</FieldLabel>
+              <Select value={state} onValueChange={setState}>
+                <SelectTrigger id="purge-state">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All finished jobs</SelectItem>
+                  <SelectItem value="succeeded">Succeeded only</SelectItem>
+                  <SelectItem value="failed">Failed only</SelectItem>
+                  <SelectItem value="cancelled">Cancelled only</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          </FieldGroup>
+          <DialogFooter>
+            <Button
+              variant="destructive"
+              onClick={() =>
+                ask({
+                  title: `Delete ${what} jobs?`,
+                  description: `Every ${what} job that finished ${days === "0" ? "at any time" : `more than ${days} days ago`} is deleted for good, with its logs and stored outputs.`,
+                  action: "Delete jobs",
+                  run: async () => {
+                    const r = await api.purgeJobs(+days, state === "all" ? undefined : [state])
+                    setOpen(false)
+                    onDone()
+                    return `Deleted ${r.deleted} job${r.deleted === 1 ? "" : "s"}`
+                  },
+                })
+              }
+            >
+              Delete…
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {confirm}
+    </>
   )
 }
 
-function TaskSheet({ id, onClose }: { id?: string; onClose: () => void }) {
-  const [task, setTask] = useState<Task>()
-  const [logs, setLogs] = useState<string>()
+export function JobsPage({ admin }: { admin: boolean }) {
+  const [state, setState] = useState("")
+  const load = useCallback(() => api.jobs(state, 200), [state])
+  const { data, error, refresh } = usePolling(load, 5000)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [confirm, ask] = useConfirm()
+  const mobile = useIsMobile()
 
-  // The parent remounts this component (key=id) for each task, so state
-  // starts empty for every task.
-  useEffect(() => {
-    if (!id) return
-    api.task(id).then(setTask, (e) => toast.error(String(e)))
-    api.logs(id).then(setLogs, () => setLogs(""))
-  }, [id])
+  const jobs = data ?? []
+  const deletable = jobs.filter((j) => terminal(j.state))
+  const sel = deletable.filter((j) => selected.has(j.id))
+  const toggle = (id: string, on: boolean) =>
+    setSelected((s) => {
+      const n = new Set(s)
+      if (on) n.add(id)
+      else n.delete(id)
+      return n
+    })
 
-  return (
-    <Sheet open={!!id} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="w-full sm:max-w-2xl">
-        <SheetHeader>
-          <SheetTitle>Task {task?.key}</SheetTitle>
-          <SheetDescription>
-            {task ? (
-              <>
-                <code>{task.spec.runtime}</code> {task.spec.args?.join(" ")}
-              </>
-            ) : (
-              "Loading…"
-            )}
-          </SheetDescription>
-        </SheetHeader>
-        {!task ? (
-          <div className="flex justify-center p-6">
-            <Spinner />
-          </div>
-        ) : (
-          <Tabs defaultValue="attempts" className="px-4">
-            <TabsList>
-              <TabsTrigger value="attempts">Attempts</TabsTrigger>
-              <TabsTrigger value="logs">Logs</TabsTrigger>
-              <TabsTrigger value="placement">Placement</TabsTrigger>
-            </TabsList>
-            <TabsContent value="attempts">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>#</TableHead>
-                    <TableHead>Mac</TableHead>
-                    <TableHead>Outcome</TableHead>
-                    <TableHead>Score</TableHead>
-                    <TableHead>Detail</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {(task.attempts ?? []).map((a) => (
-                    <TableRow key={a.attempt}>
-                      <TableCell>{a.attempt}</TableCell>
-                      <TableCell>{a.agent_name || a.agent_id}</TableCell>
-                      <TableCell>
-                        <StateBadge state={a.outcome} />
-                      </TableCell>
-                      <TableCell className="tabular-nums">{a.score.toFixed(1)}</TableCell>
-                      <TableCell className="max-w-56 truncate text-muted-foreground">{a.error}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              {task.error && (
-                <Alert className="mt-4">
-                  <AlertDescription>{task.error}</AlertDescription>
-                </Alert>
-              )}
-            </TabsContent>
-            <TabsContent value="logs">
-              <ScrollArea className="h-[60vh] rounded-md border">
-                <pre className="p-3 font-mono text-xs whitespace-pre-wrap">{logs || "No output yet."}</pre>
-              </ScrollArea>
-            </TabsContent>
-            <TabsContent value="placement">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Mac</TableHead>
-                    <TableHead>Score</TableHead>
-                    <TableHead>Why</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {(task.placement ?? []).map((p) => (
-                    <TableRow key={p.id}>
-                      <TableCell className="font-mono text-xs">{p.id}</TableCell>
-                      <TableCell className="tabular-nums">{p.ok ? p.score.toFixed(1) : "–"}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {p.ok
-                          ? Object.entries(p.parts ?? {})
-                              .map(([k, v]) => `${k} ${v.toFixed(2)}`)
-                              .join(" · ")
-                          : p.reason}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TabsContent>
-          </Tabs>
-        )}
-      </SheetContent>
-    </Sheet>
-  )
-}
-
-function JobDetail({ id, onBack, canCancel }: { id: string; onBack: () => void; canCancel: boolean }) {
-  const { data: job, error, refresh } = usePolling(() => api.job(id), 3000)
-  const [taskId, setTaskId] = useState<string>()
-
-  async function cancel() {
-    if (!confirm("Cancel this job? Running tasks are stopped.")) return
-    try {
-      await api.cancelJob(id)
-      toast.success("Job cancelled")
-      void refresh()
-    } catch (e) {
-      toast.error(String(e))
-    }
+  function deleteSelected() {
+    ask({
+      title: `Delete ${sel.length} job${sel.length === 1 ? "" : "s"}?`,
+      description: "Their tasks, logs and stored outputs are deleted for good.",
+      action: "Delete",
+      run: async () => {
+        let n = 0
+        for (const j of sel) {
+          await api.deleteJob(j.id)
+          n++
+        }
+        setSelected(new Set())
+        void refresh()
+        return `Deleted ${n} job${n === 1 ? "" : "s"}`
+      },
+    })
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Button variant="ghost" size="icon-sm" onClick={onBack} aria-label="Back to jobs">
-            <ArrowLeftIcon />
+    <div className="flex flex-col gap-4 md:gap-6">
+      <PageHeader title="Jobs" description="Most recent first. Open a job for its timeline, tasks, retries and logs.">
+        {admin && sel.length > 0 && (
+          <Button variant="destructive" size="sm" className="max-md:h-10" onClick={deleteSelected}>
+            <Trash2Icon data-icon="inline-start" />
+            Delete {sel.length}
           </Button>
-          {job?.name ?? "Job"} {job && <StateBadge state={job.state} />}
-        </CardTitle>
-        <CardDescription className="font-mono">{id}</CardDescription>
-        <CardAction className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => void refresh()}>
-            <RefreshCwIcon data-icon="inline-start" />
-            Refresh
-          </Button>
-          {canCancel && job && !["succeeded", "failed", "cancelled"].includes(job.state) && (
-            <Button variant="destructive" size="sm" onClick={cancel}>
-              Cancel job
-            </Button>
-          )}
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        {error && (
-          <Alert variant="destructive" className="mb-4">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
         )}
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Task</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Runtime</TableHead>
-              <TableHead>Depends on</TableHead>
-              <TableHead>Attempt</TableHead>
-              <TableHead>Failures</TableHead>
-              <TableHead>Mac</TableHead>
-              <TableHead>Last error</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {(job?.tasks ?? []).map((t) => (
-              <TableRow key={t.id} className="cursor-pointer" onClick={() => setTaskId(t.id)}>
-                <TableCell className="font-medium">{t.key}</TableCell>
-                <TableCell>
-                  <StateBadge state={t.state} />
-                </TableCell>
-                <TableCell>
-                  <code className="text-xs">{t.spec.runtime}</code>
-                </TableCell>
-                <TableCell className="text-muted-foreground">{t.spec.depends_on?.join(", ") || "–"}</TableCell>
-                <TableCell className="tabular-nums">{t.attempt}</TableCell>
-                <TableCell className="tabular-nums">{t.failures}</TableCell>
-                <TableCell className="font-mono text-xs">{t.agent_id || "–"}</TableCell>
-                <TableCell className="max-w-64 truncate text-muted-foreground">{t.error || "–"}</TableCell>
-              </TableRow>
+        {admin && <PurgeJobsDialog onDone={() => void refresh()} />}
+      </PageHeader>
+      <Tabs value={state} onValueChange={(v) => (setState(v), setSelected(new Set()))}>
+        <div className="-mx-1 overflow-x-auto px-1">
+          <TabsList>
+            {filters.map((f) => (
+              <TabsTrigger key={f.value} value={f.value} className="max-md:h-9">
+                {f.label}
+              </TabsTrigger>
             ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-      <TaskSheet key={taskId ?? "none"} id={taskId} onClose={() => setTaskId(undefined)} />
-    </Card>
-  )
-}
-
-export function JobsPage({ canCancel }: { canCancel: boolean }) {
-  const [open, setOpen] = useState<string>()
-  return open ? (
-    <JobDetail id={open} onBack={() => setOpen(undefined)} canCancel={canCancel} />
-  ) : (
-    <JobsList onOpen={setOpen} />
+          </TabsList>
+        </div>
+      </Tabs>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {!data ? (
+        <Skeleton className="h-64 w-full rounded-xl" />
+      ) : jobs.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <ListChecksIcon />
+            </EmptyMedia>
+            <EmptyTitle>No jobs{state ? ` ${state}` : " yet"}</EmptyTitle>
+            <EmptyDescription>Submit one with the umm CLI or the REST API.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : mobile ? (
+        <ul className="flex flex-col gap-2">
+          {jobs.map((j) => {
+            const p = progress(j)
+            return (
+              <li key={j.id}>
+                <Card size="sm">
+                  <CardContent className="flex items-center gap-3">
+                    {admin && (
+                      <Checkbox
+                        className="size-5"
+                        aria-label={`Select ${j.name}`}
+                        disabled={!terminal(j.state)}
+                        checked={selected.has(j.id)}
+                        onCheckedChange={(c) => toggle(j.id, c === true)}
+                      />
+                    )}
+                    <a href={href("job", j.id)} className="flex min-h-11 min-w-0 flex-1 flex-col gap-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate font-medium">{j.name || j.id}</span>
+                        <StateBadge state={j.state} />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Progress value={p.pct} aria-label="job progress" />
+                        <span className="shrink-0 text-xs tabular-nums">
+                          {p.done}/{p.total}
+                        </span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        {since(j.created_at)} · {j.owner}
+                      </span>
+                    </a>
+                  </CardContent>
+                </Card>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        <Card size="sm">
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  {admin && (
+                    <TableHead className="w-8">
+                      <Checkbox
+                        aria-label="Select all finished jobs"
+                        checked={sel.length > 0 && sel.length === deletable.length ? true : sel.length > 0 ? "indeterminate" : false}
+                        disabled={deletable.length === 0}
+                        onCheckedChange={(c) => setSelected(c === true ? new Set(deletable.map((j) => j.id)) : new Set())}
+                      />
+                    </TableHead>
+                  )}
+                  <TableHead>Job</TableHead>
+                  <TableHead>State</TableHead>
+                  <TableHead>Progress</TableHead>
+                  <TableHead className="hidden lg:table-cell">Owner</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="hidden lg:table-cell">Finished</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {jobs.map((j) => {
+                  const p = progress(j)
+                  return (
+                    <TableRow
+                      key={j.id}
+                      className="cursor-pointer"
+                      data-state={selected.has(j.id) ? "selected" : undefined}
+                      onClick={() => (location.hash = href("job", j.id))}
+                    >
+                      {admin && (
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            aria-label={`Select ${j.name}`}
+                            disabled={!terminal(j.state)}
+                            checked={selected.has(j.id)}
+                            onCheckedChange={(c) => toggle(j.id, c === true)}
+                          />
+                        </TableCell>
+                      )}
+                      <TableCell>
+                        <a
+                          href={href("job", j.id)}
+                          className="font-medium hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {j.name || j.id}
+                        </a>
+                        <div className="font-mono text-xs text-muted-foreground">{j.id}</div>
+                      </TableCell>
+                      <TableCell>
+                        <StateBadge state={j.state} />
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex min-w-36 items-center gap-2">
+                          <Progress value={p.pct} aria-label="job progress" />
+                          <span className="text-xs tabular-nums">
+                            {p.done}/{p.total}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="hidden max-w-48 truncate text-muted-foreground lg:table-cell">
+                        {j.owner}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{since(j.created_at)}</TableCell>
+                      <TableCell className="hidden text-muted-foreground lg:table-cell">
+                        {since(j.finished_at)}
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+      {confirm}
+    </div>
   )
 }

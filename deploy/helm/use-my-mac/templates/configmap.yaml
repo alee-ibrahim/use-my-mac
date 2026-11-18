@@ -42,6 +42,9 @@ data:
     {{- with .Values.updates }}
     updates: {{- toYaml . | nindent 6 }}
     {{- end }}
+    {{- with .Values.retention }}
+    retention: {{- toYaml . | nindent 6 }}
+    {{- end }}
     {{- with .Values.install }}
     install: {{- toYaml . | nindent 6 }}
     {{- end }}

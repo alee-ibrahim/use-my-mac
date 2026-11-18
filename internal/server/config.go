@@ -40,6 +40,11 @@ type Config struct {
 
 	Install InstallConfig `yaml:"install"`
 
+	// Retention is the default retention policy for metrics history, the
+	// activity log and finished jobs. Admins can change it at runtime
+	// (dashboard Settings or PUT /v1/retention); that choice wins.
+	Retention api.Retention `yaml:"retention"`
+
 	MaxUploadMB   int64  `yaml:"max_upload_mb"`
 	SecureCookies *bool  `yaml:"secure_cookies"`
 	LogLevel      string `yaml:"log_level"`
