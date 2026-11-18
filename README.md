@@ -26,8 +26,9 @@ stops our task within seconds and the router moves it to another Mac.
   ID preset included) with admin and viewer roles mapped from groups.
 
 > Status: early. The router, scheduler and agent are covered by unit and integration tests on Linux, and the
-> agent cross-compiles for `darwin/arm64`. The macOS telemetry collectors parse documented tool output but
-> have **not yet been run on a real Mac**. See [What's verified](#whats-verified).
+> agent cross-compiles for `darwin/arm64`. The agent and router have had a first trial on a real Mac
+> (M3 Ultra, macOS 27) running as the logged-in user; the LaunchDaemon install is still untested. See
+> [What's verified](#whats-verified).
 
 ## How it works
 
@@ -160,8 +161,9 @@ Authenticate with `Authorization: Bearer umm_key_...`.
 | Scorer, yield state machine, retry/backoff, quarantine, DAG + reduce, storage (local + S3 SigV4 against AWS's test vector), OIDC role mapping | unit tests |
 | Router + real agents running real processes, with simulated telemetry: a user goes heavy mid-task and the task moves to another Mac; map/reduce completes across two Macs; a crash retries on another Mac; auth boundaries | integration tests |
 | SQLite and Postgres stores | tests (Postgres in CI) |
-| macOS collectors (`ioreg`, `ps`, `vm_stat`, `pmset`, `sysctl`, `df`) | parsers tested on sample output; **not yet run on a Mac** |
-| `install.sh`, LaunchDaemon, `taskpolicy`, `sandbox-exec`, VideoToolbox from a daemon user | **not yet run on a Mac** |
+| macOS collectors (`ioreg`, `ps`, `vm_stat`, `pmset`, `sysctl`, `df`) | checked field by field against the tools on a Mac Studio (M3 Ultra, macOS 27); real output kept as test fixtures |
+| Agent + router on a Mac as the logged-in user: enrolment, map/reduce video encode with `hevc_videotoolbox` under `taskpolicy -b`, yield on real user CPU load, requeue, cooldown, re-run | trialled on one Mac |
+| `install.sh`, LaunchDaemon, `_umm` user, `sandbox-exec`, VideoToolbox from a daemon user | **not yet run on a Mac** |
 | OIDC login against a live Entra tenant | **not yet tested** |
 
 ## Contributing

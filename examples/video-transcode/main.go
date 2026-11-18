@@ -94,7 +94,13 @@ func main() {
 		concat = append(concat, "{in:"+in+"}")
 	}
 	reduce.Args = []string{"-i", "concat:" + strings.Join(concat, "|"), "-c", "copy",
-		"-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "{out:final.mp4}"}
+		"-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"}
+	if strings.HasPrefix(*codec, "hevc") {
+		// MPEG-TS parts carry no codec tag, so set it again for the MP4:
+		// without hvc1 ffmpeg writes hev1, which QuickTime and Safari refuse.
+		reduce.Args = append(reduce.Args, "-tag:v", "hvc1")
+	}
+	reduce.Args = append(reduce.Args, "{out:final.mp4}")
 	tasks = append(tasks, reduce)
 
 	job, err := c.SubmitJob(ctx, api.JobSpec{Name: "transcode " + filepath.Base(*in), Tasks: tasks})

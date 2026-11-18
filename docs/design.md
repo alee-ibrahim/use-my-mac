@@ -181,9 +181,9 @@ running briefly). Tasks should be idempotent; outputs are overwritten per key.
 
 | Signal | Source | Notes |
 | --- | --- | --- |
-| console user | `stat -f '%u %Su' /dev/console` | root or `_mbsetupuser` = nobody |
+| console user | `ioreg -n Root -d1` `IOConsoleUsers`, the session with `kCGSSessionOnConsoleKey=Yes` | falls back to `stat -f '%u %Su' /dev/console`, which can be owned by root while a user is logged in and locked |
 | HID idle | `ioreg -c IOHIDSystem` `HIDIdleTime` | ns |
-| screen locked | `ioreg -n Root -d1` `CGSSessionScreenIsLocked` / `IOConsoleLocked` | |
+| screen locked | the on-console session's `CGSSessionScreenIsLocked`, or `IOConsoleLocked` | |
 | per-process CPU/RSS | `ps -axo pid,pgid,uid,pcpu,rss` | split into user and ours |
 | memory | `sysctl hw.memsize`, `vm_stat` (free + inactive + speculative + purgeable), `kern.memorystatus_vm_pressure_level` | |
 | thermal | `pmset -g therm` | sparse on Apple Silicon (see open questions) |
@@ -198,7 +198,14 @@ All parsers are pure functions with tests. Only the choice of collector is build
 
 - **Background QoS vs throughput.** `taskpolicy -b` confines CPU work to efficiency cores on Apple
   Silicon. That is safest for users but slow for CPU-heavy tasks on idle Macs. A likely better policy is
-  `utility` when nobody is logged in or the screen is locked, and `background` otherwise.
+  `utility` when nobody is logged in or the screen is locked, and `background` otherwise. Measured on an
+  M3 Ultra (20 P + 8 E cores), one 30 s 1080p H.264 chunk: `hevc_videotoolbox` 4.1–4.4 s at background vs
+  1.4 s at utility (1.4 s unwrapped; the H.264 decode runs on the CPU); `libx264 -preset medium` 15.4 s vs
+  2.1 s (1.9 s unwrapped). VideoToolbox works at both priorities.
+- **VideoToolbox's helper process.** Hardware encodes run partly in `VTEncoderXPCService`, a separate
+  process launched for the calling user and outside the task's process group. Under `_umm` it counts as
+  ours by uid; an agent running as the console user counts it as user load (small: about 13 % of one core
+  per encode in the trial).
 - **Thermal on Apple Silicon.** `pmset -g therm` rarely reports anything. A tiny Swift helper reading
   `ProcessInfo.thermalState` would be accurate.
 - **VideoToolbox/Metal from a LaunchDaemon user** without a GUI session is expected to work for

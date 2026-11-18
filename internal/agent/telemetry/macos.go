@@ -58,13 +58,19 @@ func (m *MacOS) Collect(ctx context.Context) (api.Telemetry, error) {
 		GPUUtilPercent: -1,
 	}
 
-	consoleUID, consoleName := ParseConsoleUser(m.out(ctx, "stat", "-f", "%u %Su", "/dev/console"))
+	root := m.out(ctx, "ioreg", "-n", "Root", "-d1")
+	sess, ok := ParseConsoleSession(root)
+	consoleUID, consoleName := sess.UID, sess.Name
+	if !ok {
+		consoleUID, consoleName = ParseConsoleUser(m.out(ctx, "stat", "-f", "%u %Su", "/dev/console"))
+		sess.Locked = ParseScreenLocked(root)
+	}
 	t.ConsoleUser = consoleName
 	if consoleName != "" {
 		if idle, ok := ParseHIDIdle(m.out(ctx, "ioreg", "-c", "IOHIDSystem", "-d", "4")); ok {
 			t.UserIdleSeconds = idle
 		}
-		t.ScreenLocked = ParseScreenLocked(m.out(ctx, "ioreg", "-n", "Root", "-d1"))
+		t.ScreenLocked = sess.Locked
 	}
 
 	var own map[int]bool

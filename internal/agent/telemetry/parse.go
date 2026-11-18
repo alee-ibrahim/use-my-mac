@@ -11,6 +11,11 @@ var (
 	reHIDIdle      = regexp.MustCompile(`"HIDIdleTime"\s*=\s*(\d+)`)
 	reScreenLocked = regexp.MustCompile(`"CGSSessionScreenIsLocked"\s*=\s*Yes`)
 	reConsoleLock  = regexp.MustCompile(`"IOConsoleLocked"\s*=\s*Yes`)
+	reConsoleUsers = regexp.MustCompile(`"IOConsoleUsers"\s*=\s*\((.*)\)`)
+	reSessionDict  = regexp.MustCompile(`\{[^{}]*\}`)
+	reSessionUID   = regexp.MustCompile(`"kCGSSessionUserIDKey"\s*=\s*(\d+)`)
+	reSessionName  = regexp.MustCompile(`"kCGSSessionUserNameKey"\s*=\s*"([^"]*)"`)
+	reSessionOnCon = regexp.MustCompile(`"kCGSSessionOnConsoleKey"\s*=\s*Yes`)
 	reGPUUtil      = regexp.MustCompile(`"Device Utilization %"\s*=\s*(\d+)`)
 	reGPUCores     = regexp.MustCompile(`"gpu-core-count"\s*=\s*(\d+)`)
 	rePageSize     = regexp.MustCompile(`page size of (\d+) bytes`)
@@ -36,6 +41,48 @@ func ParseHIDIdle(out string) (float64, bool) {
 // ParseScreenLocked parses `ioreg -n Root -d1`.
 func ParseScreenLocked(out string) bool {
 	return reScreenLocked.MatchString(out) || reConsoleLock.MatchString(out)
+}
+
+// ConsoleSession is the GUI session currently on the console, read from the
+// IOConsoleUsers property of `ioreg -n Root -d1`.
+type ConsoleSession struct {
+	UID    int
+	Name   string
+	Locked bool
+}
+
+// ParseConsoleSession finds the session with kCGSSessionOnConsoleKey=Yes in
+// `ioreg -n Root -d1`. ok is false when IOConsoleUsers is missing (the caller
+// should fall back to /dev/console). An IOConsoleUsers list with no on-console
+// session (login window, fast user switching in progress) means nobody.
+//
+// /dev/console is not reliable: on a real Mac (macOS 27) it was owned by root
+// while a user was logged in with the screen locked, which made the agent see
+// nobody and ignore the user's load entirely.
+func ParseConsoleSession(out string) (s ConsoleSession, ok bool) {
+	s.UID = -1
+	m := reConsoleUsers.FindStringSubmatch(out)
+	if m == nil {
+		return s, false
+	}
+	for _, d := range reSessionDict.FindAllString(m[1], -1) {
+		if !reSessionOnCon.MatchString(d) {
+			continue
+		}
+		u := reSessionUID.FindStringSubmatch(d)
+		n := reSessionName.FindStringSubmatch(d)
+		if u == nil || n == nil {
+			continue
+		}
+		uid, err := strconv.Atoi(u[1])
+		if err != nil || uid == 0 || n[1] == "root" || n[1] == "_mbsetupuser" {
+			continue
+		}
+		s.UID, s.Name = uid, n[1]
+		s.Locked = reScreenLocked.MatchString(d) || reConsoleLock.MatchString(out)
+		return s, true
+	}
+	return s, true
 }
 
 // ParseConsoleUser parses `stat -f '%u %Su' /dev/console`. root (uid 0)
