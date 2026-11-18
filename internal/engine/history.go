@@ -424,7 +424,8 @@ const maxPoints = 1500
 func (e *Engine) pickRes(from, to time.Time, step int) (res, outStep int) {
 	r := e.Retention()
 	res = store.ResRollup
-	if !from.Before(e.now().Add(-time.Duration(r.MetricsRawHours) * time.Hour)) {
+	// A minute of slack: "range=24h" is computed a moment before this runs.
+	if !from.Before(e.now().Add(-time.Duration(r.MetricsRawHours)*time.Hour - time.Minute)) {
 		res = store.ResRaw
 	}
 	span := to.Sub(from).Seconds()
@@ -546,7 +547,7 @@ func window(t map[string]float64) api.Window {
 		Assigned: int64(t["assigned"]), ComputeHours: round(t["task_seconds"] / 3600), SuccessRate: -1,
 	}
 	if done := w.Succeeded + w.Failed + w.Timeout; done > 0 {
-		w.SuccessRate = round(float64(w.Succeeded) / float64(done))
+		w.SuccessRate = math.Round(float64(w.Succeeded)/float64(done)*10000) / 10000
 	}
 	return w
 }

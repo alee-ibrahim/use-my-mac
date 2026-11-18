@@ -70,11 +70,12 @@ export function TimeChart({
   const axes = (
     <>
       <CartesianGrid vertical={false} />
+      {/* Bars need a band (category) axis to get a width; lines and areas use a time axis. */}
       <XAxis
         dataKey="t"
-        type="number"
-        scale="time"
-        domain={["dataMin", "dataMax"]}
+        {...(kind.includes("bar")
+          ? { type: "category" as const }
+          : { type: "number" as const, scale: "time" as const, domain: ["dataMin", "dataMax"] })}
         tickFormatter={fmt}
         tickLine={false}
         axisLine={false}
@@ -108,7 +109,7 @@ export function TimeChart({
     const stacked = kind === "stacked-bar"
     return (
       <ChartContainer config={config} className={cls}>
-        <BarChart {...common} barCategoryGap={2}>
+        <BarChart {...common} barCategoryGap="15%">
           {axes}
           {series.map((s, i) => (
             <Bar
@@ -118,7 +119,7 @@ export function TimeChart({
               fill={`var(--color-${s.key})`}
               maxBarSize={24}
               stroke="var(--color-card)"
-              strokeWidth={stacked ? 1 : 0}
+              strokeWidth={stacked && data.length <= 60 ? 1 : 0}
               radius={!stacked || i === series.length - 1 ? [4, 4, 0, 0] : 0}
               isAnimationActive={false}
             />

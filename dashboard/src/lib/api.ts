@@ -422,5 +422,5 @@ export function compact(n: number | undefined): string {
 
 export function percent(ratio: number | undefined): string {
   if (ratio === undefined || ratio < 0) return "–"
-  return `${(ratio * 100).toFixed(ratio >= 0.995 || ratio === 0 ? 0 : 1)}%`
+  return `${(ratio * 100).toFixed(ratio === 1 || ratio === 0 ? 0 : 1)}%`
 }
