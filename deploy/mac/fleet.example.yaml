@@ -1,0 +1,41 @@
+# Fleet inventory for `umm fleet` — kept on the admin workstation, NOT on a Mac
+# and NOT in the router. It holds no secrets: the SSH key is a path (or comes
+# from ssh-agent); the sudo password and router admin key are supplied at run
+# time from a file, a named env var, or a no-echo prompt.
+
+router: https://umm.example.com
+
+# Directory holding the agent bundle to copy to each Mac. Build it with
+# `make agent-darwin` (produces dist/umm-agent-darwin-arm64/umm-agent).
+bundle: ./dist/umm-agent-darwin-arm64
+
+defaults:
+  port: 22
+  user: fleetadmin                 # an admin login on each Mac that can sudo
+  ssh_key: ~/.ssh/umm_fleet_ed25519
+  known_hosts: ~/.ssh/known_hosts
+  max_tasks: 1
+  priority: background             # background | utility | none
+  labels:
+    site: hq
+  # The runtime allowlist written into each Mac's agent.yaml (only used when a
+  # Mac has no agent.yaml yet). A task names a runtime and can only append
+  # arguments; prefer specific scripts over bare interpreters.
+  runtimes:
+    ffmpeg: ["/opt/homebrew/bin/ffmpeg"]
+  # Optional: a neutral LaunchDaemon label for a quiet install. The default is
+  # io.github.alee-ibrahim.umm-agent. See docs/fleet.md on suppressing the
+  # macOS "Background Items Added" notification.
+  # service_label: com.example.helper
+
+hosts:
+  - host: mac-a.example.com
+    labels:
+      chip: m3-ultra
+  - host: mac-b.example.com
+    name: studio-b                 # agent name on the router (defaults to host)
+    labels:
+      chip: m2-pro
+  - host: 10.0.0.42                 # IPs are fine too
+    user: otheradmin               # per-host override
+    ssh_key: ~/.ssh/other_ed25519

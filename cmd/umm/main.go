@@ -41,6 +41,7 @@ Commands:
   drain MAC [-off]               stop sending new work to a Mac (admin)
   enrol [-ttl-hours N]           mint a one-time enrolment token for a new Mac (admin)
   keys list | create NAME [-role app|viewer|admin] | revoke ID   (admin)
+  fleet SUBCMD [flags] [HOST...] install/manage the agent across Macs over SSH (admin)
 `
 
 func main() {
@@ -100,6 +101,11 @@ func parseFlags(fs *flag.FlagSet, args []string) []string {
 }
 
 func run(ctx context.Context, cmd string, args []string) error {
+	// fleet runs on an admin workstation and reads the router URL from the
+	// inventory; it does not need the UMM_SERVER/UMM_API_KEY client up front.
+	if cmd == "fleet" {
+		return fleetCmd(ctx, args)
+	}
 	c, err := newClient()
 	if err != nil {
 		return err
