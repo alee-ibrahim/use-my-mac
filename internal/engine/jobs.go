@@ -403,11 +403,48 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 	return out, nil
 }
 
-// PatchMac drains / opts out a Mac.
+// macNameRE is the installer's rule for Mac names (it strips anything else
+// from the ComputerName and cuts it to 64 characters).
+var macNameRE = regexp.MustCompile(`^[A-Za-z0-9 ._-]{1,64}$`)
+
+// ValidMacName trims s and checks it against the installer's name rule.
+func ValidMacName(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if !macNameRE.MatchString(s) {
+		return "", vErr("name must be 1-64 characters: letters, digits, space, '.', '_' or '-'")
+	}
+	return s, nil
+}
+
+// PatchMac drains / opts out / renames a Mac. Names need not be unique (Macs
+// are identified by ID), as at enrolment.
 func (e *Engine) PatchMac(ctx context.Context, id string, p api.MacPatch) error {
 	a, err := e.st.GetAgent(ctx, id)
 	if err != nil {
 		return err
+	}
+	if p.Name != nil {
+		name, err := ValidMacName(*p.Name)
+		if err != nil {
+			return err
+		}
+		if name != a.Name {
+			// Under e.mu so a concurrent heartbeat cannot re-add the old
+			// name's telemetry series after it is dropped.
+			e.mu.Lock()
+			err := e.st.SetAgentName(ctx, id, name)
+			if err == nil {
+				e.m.ForgetAgent(a.Name)
+			}
+			e.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			e.log.Info("mac renamed", "agent", id, "from", a.Name, "to", name)
+		}
+	}
+	if p.Drain == nil && p.OptedOut == nil {
+		return nil
 	}
 	drain, opt := a.Drain, a.OptedOut
 	if p.Drain != nil {

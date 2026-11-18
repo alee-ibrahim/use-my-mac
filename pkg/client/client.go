@@ -175,7 +175,7 @@ func (c *Client) Macs(ctx context.Context) ([]api.Mac, error) {
 	return ms, c.do(ctx, http.MethodGet, "/v1/macs", nil, &ms)
 }
 
-// PatchMac drains / opts out a Mac (admin).
+// PatchMac drains, opts out or renames a Mac (admin).
 func (c *Client) PatchMac(ctx context.Context, id string, p api.MacPatch) error {
 	return c.do(ctx, http.MethodPatch, "/v1/macs/"+url.PathEscape(id), p, nil)
 }

@@ -96,6 +96,14 @@ func (m *M) SetTasks(counts map[string]int) {
 	}
 }
 
+// ForgetAgent drops a Mac's telemetry series (after a rename or removal).
+func (m *M) ForgetAgent(agent string) {
+	if m == nil {
+		return
+	}
+	m.Telemetry.DeletePartialMatch(prometheus.Labels{"agent": agent})
+}
+
 // SetTelemetry records a Mac's latest signals.
 func (m *M) SetTelemetry(agent string, signals map[string]float64) {
 	if m == nil {

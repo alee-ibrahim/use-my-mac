@@ -39,6 +39,7 @@ Commands:
   cancel JOB                     cancel a job
   macs                           list Macs with live telemetry
   drain MAC [-off]               stop sending new work to a Mac (admin)
+  rename MAC NAME                rename a Mac on the router (admin)
   enrol-command [-profile P] [-label k=v] [-ttl 1h] [-uses N]
                                  one-line install command for new Macs (admin)
   install-tokens list | log ID | revoke ID   one-line install links (admin)
@@ -187,6 +188,12 @@ func run(ctx context.Context, cmd string, args []string) error {
 		}
 		v := !*off
 		return c.PatchMac(ctx, pos[0], api.MacPatch{Drain: &v})
+	case "rename":
+		pos := parseFlags(fs, args)
+		if len(pos) != 2 {
+			return errors.New("usage: umm rename MAC NAME")
+		}
+		return c.PatchMac(ctx, pos[0], api.MacPatch{Name: &pos[1]})
 	case "enrol", "enroll":
 		ttl := fs.Int("ttl-hours", 24, "token lifetime")
 		parseFlags(fs, args)
