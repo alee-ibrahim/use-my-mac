@@ -105,6 +105,7 @@ umm macs                            # quick check
 | `umm cancel JOB` | cancel a job |
 | `umm macs` | Macs with live telemetry |
 | `umm drain MAC [-off]` | stop sending new work to a Mac (admin) |
+| `umm rename MAC NAME` | rename a Mac on the router (admin) |
 | `umm enrol [-ttl-hours N]` | one-time enrolment token for a new Mac (admin) |
 | `umm keys list` / `create NAME [-role R]` / `revoke ID` | API keys (admin) |
 | `umm access rules` / `users` / `set` / `user` / `rm` / `default` / `name` / `log` | dashboard roles for single-sign-on users (admin), see [Dashboard roles](#dashboard-roles) |
@@ -289,7 +290,7 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `PUT /v1/blobs/{key}` | app, admin | upload an input (raw body) |
 | `GET /v1/blobs/{key}` | app, admin | download a blob |
 | `GET /v1/macs` | any | Macs with state and live telemetry |
-| `PATCH /v1/macs/{id}` | admin | `{"drain": true}` or `{"opted_out": true}` |
+| `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}` or `{"name": "Lab Mac 2"}` |
 | `DELETE /v1/macs/{id}` | admin | remove a Mac and revoke its credential |
 | `POST /v1/enrolment-tokens` | admin | one-time token for a new Mac |
 | `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys |
@@ -402,6 +403,11 @@ that needs the sudo password), then `install`, `upgrade`, `status` and `uninstal
   to resume).
 - Admins can **drain** a Mac (running tasks finish, no new work) or **opt it out** (tasks stop and move now)
   from the dashboard or with `umm drain`.
+- Admins can **rename** a Mac from its actions menu in the dashboard or with `umm rename MAC NAME`. A Mac
+  enrols with its ComputerName; after that the router's name is the one that counts (the agent never sends
+  it again, so a rename sticks and `name:` in the Mac's `agent.yaml` is not changed). Names are 1-64
+  characters from `A-Z a-z 0-9`, space, `.`, `_` and `-`, the same rule as the installer. They need not be
+  unique: Macs are identified by ID.
 - `umm-agent telemetry` on a Mac prints what the agent sees: console user, idle time, load, memory, thermal,
   power.
 - Deleting a Mac in the dashboard revokes its credential. Re-enrol it with a new token.

@@ -226,10 +226,14 @@ type Mac struct {
 	Update *MacUpdate `json:"update,omitempty"`
 }
 
-// MacPatch is used by admins to drain or opt a Mac out.
+// MacPatch is used by admins to drain, opt out or rename a Mac.
 type MacPatch struct {
 	Drain    *bool `json:"drain,omitempty"`
 	OptedOut *bool `json:"opted_out,omitempty"`
+	// Name renames the Mac on the router: 1-64 characters from
+	// A-Z a-z 0-9 space . _ - (the installer's rule). The router's name is
+	// authoritative after enrolment; the agent never sends it again.
+	Name *string `json:"name,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
@@ -29,6 +30,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
@@ -166,6 +169,69 @@ function UpdateHistory({ mac, onClose }: { mac?: Mac; onClose: () => void }) {
   )
 }
 
+// Same rule as the installer and the router: 1-64 of A-Z a-z 0-9 space . _ -
+const macName = /^[A-Za-z0-9 ._-]{1,64}$/
+
+function RenameMac({ mac, onClose, onRenamed }: { mac?: Mac; onClose: () => void; onRenamed: () => void }) {
+  // Keyed by the Mac's ID by the caller, so this starts from its current name.
+  const [name, setName] = useState(mac?.name ?? "")
+  const [busy, setBusy] = useState(false)
+  const trimmed = name.trim()
+  const valid = macName.test(trimmed)
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    if (!mac || !valid) return
+    setBusy(true)
+    try {
+      await api.patchMac(mac.id, { name: trimmed })
+      toast.success(`Renamed to ${trimmed}`)
+      onRenamed()
+      onClose()
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={!!mac} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename {mac?.name}</DialogTitle>
+          <DialogDescription>
+            Changes the name shown here and in metrics. The Mac keeps its ID, credential and work; its own
+            agent.yaml is not changed.
+          </DialogDescription>
+        </DialogHeader>
+        <form id="rename-mac" onSubmit={save}>
+          <FieldGroup>
+            <Field data-invalid={!!trimmed && !valid}>
+              <FieldLabel htmlFor="mac-name">Name</FieldLabel>
+              <Input
+                id="mac-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={64}
+                aria-invalid={!!trimmed && !valid}
+                required
+              />
+              <FieldDescription>Up to 64 letters, digits, spaces, dots, underscores or hyphens.</FieldDescription>
+            </Field>
+          </FieldGroup>
+        </form>
+        <DialogFooter>
+          <Button type="submit" form="rename-mac" disabled={!valid || busy || trimmed === mac?.name}>
+            {busy && <Spinner data-icon="inline-start" />}
+            Rename
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 export function MacsPage({ admin }: { admin: boolean }) {
   const [links, setLinks] = useState(0)
   return (
@@ -179,6 +245,7 @@ export function MacsPage({ admin }: { admin: boolean }) {
 function MacsCard({ admin, onLinkCreated }: { admin: boolean; onLinkCreated: () => void }) {
   const { data, error, refresh } = usePolling(api.macs, 5000)
   const [history, setHistory] = useState<Mac>()
+  const [renaming, setRenaming] = useState<Mac>()
 
   async function act(fn: () => Promise<void>, ok: string) {
     try {
@@ -320,6 +387,10 @@ function MacsCard({ admin, onLinkCreated }: { admin: boolean; onLinkCreated: () 
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
                             <DropdownMenuGroup>
+                              <DropdownMenuItem onSelect={() => setRenaming(m)}>Rename</DropdownMenuItem>
+                            </DropdownMenuGroup>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuGroup>
                               <DropdownMenuItem
                                 onSelect={() =>
                                   act(() => api.patchMac(m.id, { drain: !m.drain }), m.drain ? "Undrained" : "Drained: running tasks finish, no new work")
@@ -356,6 +427,7 @@ function MacsCard({ admin, onLinkCreated }: { admin: boolean; onLinkCreated: () 
           </Table>
         )}
         <UpdateHistory mac={history} onClose={() => setHistory(undefined)} />
+        <RenameMac key={renaming?.id} mac={renaming} onClose={() => setRenaming(undefined)} onRenamed={() => void refresh()} />
       </CardContent>
     </Card>
   )

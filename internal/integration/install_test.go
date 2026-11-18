@@ -213,6 +213,12 @@ func TestOneLineInstall(t *testing.T) {
 		t.Fatalf("command %q", tok.Command)
 	}
 
+	// An existing parent that _umm cannot traverse only gets o+x; missing
+	// parents are created 0755 even under the script's umask 077.
+	os.MkdirAll(e.mac.root+"/usr/local", 0o755)
+	os.Mkdir(e.mac.root+"/usr/local/var", 0o700)
+	os.Chmod(e.mac.root+"/usr/local/var", 0o700)
+
 	out, err := e.mac.sh(t, url)
 	if err != nil || !strings.Contains(out, `is online (agent `+installVersion+`)`) {
 		b, _ := os.ReadFile(filepath.Join(e.mac.state, "agent.log"))
@@ -232,6 +238,12 @@ func TestOneLineInstall(t *testing.T) {
 		"/Library/LaunchDaemons/com.example.helper.plist", "/Library/LaunchDaemons/com.example.helper.updater.plist"} {
 		if _, err := os.Stat(r + p); err != nil {
 			t.Errorf("missing %s", p)
+		}
+	}
+	for p, want := range map[string]os.FileMode{"/usr/local/etc": 0o755, "/usr/local/var/log": 0o755,
+		"/usr/local/bin": 0o755, "/usr/local/var": 0o701} {
+		if fi, err := os.Stat(r + p); err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%s: %v %v, want %v", p, fi.Mode().Perm(), err, want)
 		}
 	}
 	if fi, err := os.Stat(r + "/usr/local/etc/umm/credential"); err != nil || fi.Mode().Perm() != 0o600 || fi.Size() == 0 {

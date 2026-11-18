@@ -362,6 +362,18 @@ func (s *Store) UpdateAgentHeartbeat(ctx context.Context, a *Agent) error {
 	return err
 }
 
+// SetAgentName renames an agent.
+func (s *Store) SetAgentName(ctx context.Context, id, name string) error {
+	res, err := s.exec(ctx, `UPDATE agents SET name=? WHERE id=?`, name, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAgentFlags sets drain / opt-out.
 func (s *Store) SetAgentFlags(ctx context.Context, id string, drain, optedOut bool) error {
 	res, err := s.exec(ctx, `UPDATE agents SET drain=?, opted_out=? WHERE id=?`, b2i(drain), b2i(optedOut), id)

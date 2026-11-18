@@ -31,6 +31,21 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# _umm must be able to traverse every parent of its own directories. A missing
+# parent is created 0755 root:wheel (umask 022, so intermediate directories do
+# not inherit a restrictive umask from sudo). An existing one only gets o+x:
+# its owner and other bits stay as they are (Homebrew may own /usr/local on
+# Intel Macs).
+parent_dirs() {
+  for d do
+    if [ -d "$d" ]; then
+      chmod o+x "$d"
+    else
+      (umask 022; install -d -m 0755 -o root -g wheel "$d")
+    fi
+  done
+}
+
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 [ "$(uname -s)" = "Darwin" ] || die "macOS only"
 [ "$(uname -m)" = "arm64" ] || echo "warning: not Apple Silicon; GPU/VideoToolbox telemetry may be missing" >&2
@@ -62,7 +77,7 @@ fi
 # --- binary --------------------------------------------------------------
 SRC="${UMM_AGENT_BINARY:-$HERE/umm-agent}"
 [ -f "$SRC" ] || die "agent binary not found at $SRC (build it with 'make agent-darwin' or set UMM_AGENT_BINARY)"
-mkdir -p /usr/local/bin
+parent_dirs /usr/local /usr/local/bin /usr/local/etc /usr/local/var /usr/local/var/log
 install -m 0755 -o root -g wheel "$SRC" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 
@@ -117,7 +132,6 @@ PLIST_SRC="$HERE/${LABEL}.plist"
 install -m 0644 -o root -g wheel "$PLIST_SRC" "$PLIST"
 UPD_SRC="$HERE/${LABEL}.updater.plist"
 if [ -f "$UPD_SRC" ]; then
-  install -d -m 0755 -o root -g wheel /usr/local/var /usr/local/var/log
   install -d -m 0700 -o root -g wheel "$UPD_STATE"
   install -m 0644 -o root -g wheel "$UPD_SRC" "$UPD_PLIST"
 fi

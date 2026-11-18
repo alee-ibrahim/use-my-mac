@@ -483,6 +483,31 @@ func TestOptOutStopsWorkAndDrainOnlyBlocksNew(t *testing.T) {
 	}
 }
 
+func TestRenameMac(t *testing.T) {
+	h := newHarness(t)
+	a := h.enrol("Lab Mac", 1)
+	h.enrol("other", 1)
+	for _, bad := range []string{"", "   ", "a/b", "émile", "x\ny", strings.Repeat("a", 65)} {
+		var v *ValidationError
+		if err := h.e.PatchMac(h.ctx, a, api.MacPatch{Name: &bad}); !errors.As(err, &v) {
+			t.Errorf("name %q: %v, want validation error", bad, err)
+		}
+	}
+	name := "  other  " // trimmed; duplicates are allowed, as at enrolment
+	if err := h.e.PatchMac(h.ctx, a, api.MacPatch{Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	h.hb(a, goodTel(), "") // a heartbeat must not put the enrolment name back
+	ag, err := h.e.st.GetAgent(h.ctx, a)
+	if err != nil || ag.Name != "other" || ag.Drain {
+		t.Fatalf("after rename: %+v %v", ag, err)
+	}
+	missing := "x"
+	if err := h.e.PatchMac(h.ctx, "mac_missing", api.MacPatch{Name: &missing}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown Mac: %v", err)
+	}
+}
+
 func TestValidateJob(t *testing.T) {
 	bad := []api.JobSpec{
 		{},

@@ -196,7 +196,7 @@ export const api = {
   logout: () => request<void>("POST", "/auth/logout"),
   me: () => request<Me>("GET", "/v1/me"),
   macs: () => request<Mac[]>("GET", "/v1/macs"),
-  patchMac: (id: string, patch: { drain?: boolean; opted_out?: boolean }) =>
+  patchMac: (id: string, patch: { drain?: boolean; opted_out?: boolean; name?: string }) =>
     request<void>("PATCH", `/v1/macs/${id}`, patch),
   deleteMac: (id: string) => request<void>("DELETE", `/v1/macs/${id}`),
   enrolToken: (ttl_hours: number) =>
