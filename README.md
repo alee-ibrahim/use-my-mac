@@ -95,6 +95,17 @@ export UMM_API_KEY=umm_key_...           # the admin key (or create an app key: 
 
 ### Add a Mac
 
+With an https router, the quickest way is one command. In the dashboard open **Macs → Add Mac → One
+command** (or run `umm enrol-command`), copy the line and run it in Terminal on the Mac:
+
+```sh
+curl -fsSL https://umm.example.com/i/umm_ins_... | sudo sh
+```
+
+It verifies the signed agent release, installs and enrols the agent and waits for its first heartbeat. The
+link is short-lived, single use by default and revocable. See
+[Add a Mac with one command](docs/usage.md#add-a-mac-with-one-command). By hand instead:
+
 ```sh
 make dist-mac                            # dist/umm-agent-darwin-arm64.tar.gz
 # copy it to the Mac, unpack, then on the Mac:

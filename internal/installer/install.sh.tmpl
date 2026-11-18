@@ -1,0 +1,215 @@
+#!/bin/sh
+# use-my-mac one-line installer for {{.RouterPlain}} (profile {{.Profile}}; runtimes: {{.Runtimes}}).
+# Run it on the Mac exactly as the dashboard shows:  curl -fsSL <link> | sudo sh
+# Running it again upgrades or repairs the agent. Uninstall:
+#   curl -fsSL {{.RouterPlain}}/i/uninstall | sudo sh
+#
+# What it does: checks this is an Apple Silicon Mac; downloads the agent
+# release through the router; verifies its minisign signature with the pinned
+# key below and the bundle's SHA-256 (any failure stops here, nothing is
+# installed); then installs like deploy/mac/install.sh: hidden non-admin
+# _umm user, /usr/local/bin/umm-agent, agent.yaml, the agent LaunchDaemon and
+# the root updater LaunchDaemon; enrols with the token in this script (handed
+# to the agent from a root-only file over stdin, never in argv); and waits for
+# the first heartbeat. Nothing is shown to the Mac's user.
+set -eu
+umask 077
+
+main() {
+ROUTER={{.Router}}
+TOKEN={{.Token}}
+VERSION={{.Version}}
+LABEL={{.Label}}
+PUBKEY={{.PubKey}}
+SRC={{.Src}}
+PROTO={{.Proto}}
+BUNDLE={{.Bundle}}
+R={{.Root}}
+
+SVC_USER=_umm
+BIN="$R/usr/local/bin/umm-agent"
+ETC="$R/usr/local/etc/umm"
+VAR="$R/usr/local/var/umm"
+LOG="$R/usr/local/var/log/umm"
+PLIST="$R/Library/LaunchDaemons/$LABEL.plist"
+UPD_LABEL="$LABEL.updater"
+UPD_PLIST="$R/Library/LaunchDaemons/$UPD_LABEL.plist"
+
+say() { printf 'use-my-mac: %s\n' "$*"; }
+die() { printf 'use-my-mac: error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run it with sudo: curl -fsSL <link> | sudo sh"
+[ "$(uname -s)" = Darwin ] || die "this installs the macOS agent; run it on a Mac"
+[ "$(uname -m)" = arm64 ] || die "Apple Silicon (arm64) Macs only"
+major="$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)"
+[ "${major:-0}" -ge 12 ] 2>/dev/null || die "macOS 12 or later is required"
+
+T="$(mktemp -d /tmp/umm-install.XXXXXX)" || die "cannot create a temp dir"
+trap 'rm -rf "$T"' EXIT
+trap 'exit 130' INT TERM
+
+# URLs (they carry the token) go to curl through a config on stdin, not argv.
+fetch() {
+  printf 'url = "%s"
+' "$1" | curl -fsSL --proto "$PROTO" --proto-redir "$PROTO" --retry 3 --connect-timeout 20 -K - -o "$2"
+}
+
+# --- download and verify (fail closed) ------------------------------------
+say "downloading agent $VERSION"
+for f in SHA256SUMS SHA256SUMS.minisig "$BUNDLE.tar.gz"; do
+  fetch "$SRC/$f" "$T/$f" || die "could not download $f (the install link may have expired; create a new one in the dashboard)"
+done
+
+cat > "$T/verify.js" <<'{{.EOF}}'
+{{.VerifyJS}}{{.EOF}}
+hex() { od -An -v -tx1 "$1" | tr -d ' \n'; }
+out="$(osascript -l JavaScript "$T/verify.js" "$PUBKEY" "use-my-mac release $VERSION file:SHA256SUMS" \
+  "$(hex "$T/SHA256SUMS")" "$(hex "$T/SHA256SUMS.minisig")" 2>&1 </dev/null)" || die "release signature is not valid: $out"
+[ "$out" = ok ] || die "release signature is not valid: $out"
+want="$(awk -v f="$BUNDLE.tar.gz" '$2 == f || $2 == "*" f { print $1 }' "$T/SHA256SUMS")"
+got="$(shasum -a 256 "$T/$BUNDLE.tar.gz" | awk '{ print $1 }')"
+[ -n "$want" ] && [ "$want" = "$got" ] || die "SHA-256 of $BUNDLE.tar.gz does not match the signed SHA256SUMS"
+mkdir "$T/x"
+tar -xzf "$T/$BUNDLE.tar.gz" -C "$T/x" "$BUNDLE/umm-agent" 2>/dev/null || die "the release bundle has no umm-agent"
+NEW="$T/x/$BUNDLE/umm-agent"
+[ -f "$NEW" ] && [ ! -L "$NEW" ] || die "the release bundle has no umm-agent"
+chmod 0755 "$NEW"
+v="$("$NEW" version 2>/dev/null </dev/null || true)"
+[ "$v" = "$VERSION" ] || die "the bundle reports version '$v', expected $VERSION"
+say "signature and checksum verified"
+
+# --- hidden, non-admin service user ----------------------------------------
+if ! dscl . -read "/Users/$SVC_USER" >/dev/null 2>&1; then
+  uid=""
+  for candidate in $(seq 450 499); do
+    if ! dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$candidate" &&
+       ! dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$candidate"; then
+      uid=$candidate; break
+    fi
+  done
+  [ -n "$uid" ] || die "no free uid in 450-499 for the service user"
+  dscl . -create "/Groups/$SVC_USER"
+  dscl . -create "/Groups/$SVC_USER" PrimaryGroupID "$uid"
+  dscl . -create "/Groups/$SVC_USER" RealName "use-my-mac agent"
+  dscl . -create "/Users/$SVC_USER"
+  dscl . -create "/Users/$SVC_USER" UniqueID "$uid"
+  dscl . -create "/Users/$SVC_USER" PrimaryGroupID "$uid"
+  dscl . -create "/Users/$SVC_USER" UserShell /usr/bin/false
+  dscl . -create "/Users/$SVC_USER" NFSHomeDirectory /usr/local/var/umm
+  dscl . -create "/Users/$SVC_USER" RealName "use-my-mac agent"
+  dscl . -create "/Users/$SVC_USER" IsHidden 1
+  dscl . -create "/Users/$SVC_USER" Password "*"
+fi
+
+# --- binary (atomic swap; a running agent keeps its file) ------------------
+install -d -m 0755 -o root -g wheel "$R/usr/local/bin"
+install -m 0755 -o root -g wheel "$NEW" "$R/usr/local/bin/.umm-agent.install"
+mv -f "$R/usr/local/bin/.umm-agent.install" "$BIN"
+xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
+
+# --- directories -----------------------------------------------------------
+install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
+install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$VAR" "$VAR/work"
+install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$LOG"
+if [ ! -f "$ETC/credential" ]; then
+  : > "$ETC/credential"
+  chown "$SVC_USER:$SVC_USER" "$ETC/credential"
+  chmod 0600 "$ETC/credential"
+fi
+
+# --- config ----------------------------------------------------------------
+cat > "$T/agent.yaml" <<'{{.EOF}}'
+{{.AgentYAML}}{{.EOF}}
+name="$(scutil --get ComputerName 2>/dev/null || hostname -s 2>/dev/null || true)"
+name="$(printf '%s' "$name" | LC_ALL=C tr -cd 'A-Za-z0-9 ._-' | cut -c1-64)"
+[ -n "$name" ] || name=mac
+printf 'name: "%s"\n' "$name" >> "$T/agent.yaml"
+
+# Same rule as `umm fleet` (and the same checksum file): replace agent.yaml
+# only if it is still the one a tool wrote; never clobber a local edit.
+SUM="$ETC/agent.yaml.fleet-sha256"
+sha() { shasum -a 256 "$1" | awk '{ print $1 }'; }
+write_config() {
+  install -m 0640 -o root -g "$SVC_USER" "$T/agent.yaml" "$ETC/agent.yaml"
+  sha "$ETC/agent.yaml" > "$SUM"
+  chmod 0644 "$SUM"
+}
+if [ ! -f "$ETC/agent.yaml" ]; then
+  write_config
+elif [ "$(sha "$ETC/agent.yaml")" = "$(sha "$T/agent.yaml")" ]; then
+  [ -f "$SUM" ] || { sha "$ETC/agent.yaml" > "$SUM"; chmod 0644 "$SUM"; }
+elif [ -f "$SUM" ] && [ "$(cat "$SUM")" = "$(sha "$ETC/agent.yaml")" ]; then
+  write_config
+  say "updated $ETC/agent.yaml"
+else
+  say "kept $ETC/agent.yaml (edited on this Mac)"
+fi
+
+# --- LaunchDaemons: the agent (as _umm) and the root updater ----------------
+cat > "$T/agent.plist" <<'{{.EOF}}'
+{{.Plist}}{{.EOF}}
+cat > "$T/updater.plist" <<'{{.EOF}}'
+{{.UpdaterPlist}}{{.EOF}}
+install -d -m 0755 -o root -g wheel "$R/Library/LaunchDaemons" "$R/usr/local/var" "$R/usr/local/var/log"
+install -d -m 0700 -o root -g wheel "$R/usr/local/var/umm-updater"
+install -m 0644 -o root -g wheel "$T/agent.plist" "$PLIST"
+install -m 0644 -o root -g wheel "$T/updater.plist" "$UPD_PLIST"
+
+# --- enrol (token from a root-only file, over stdin) -------------------------
+if [ ! -s "$ETC/credential" ]; then
+  printf '%s\n' "$TOKEN" > "$T/token"
+  if ! out="$(sudo -u "$SVC_USER" "$BIN" enrol -config "$ETC/agent.yaml" < "$T/token" 2>&1)"; then
+    rm -f "$T/token"
+    case "$out" in
+      *403*|*orbidden*) die "enrolment refused: this install link has expired, was revoked or is used up. Create a new one in the dashboard (Macs > Add a Mac)." ;;
+    esac
+    die "enrolment failed: $out"
+  fi
+  rm -f "$T/token"
+  say "enrolled as \"$name\""
+else
+  say "already enrolled; upgrading and repairing"
+fi
+
+# --- (re)load ----------------------------------------------------------------
+self() {
+  { printf 'header = "Authorization: Bearer %s"\n' "$(tr -d '\r\n' < "$ETC/credential")"
+    printf 'url = "%s/v1/agent/self"\n' "$ROUTER"; } |
+    curl -fsS --proto "$PROTO" --connect-timeout 10 -K - 2>/dev/null || true
+}
+num() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p"; }
+
+launchctl bootout "system/$UPD_LABEL" 2>/dev/null || true
+launchctl bootout "system/$LABEL" 2>/dev/null || true
+i=0
+while launchctl print "system/$LABEL" >/dev/null 2>&1; do
+  i=$((i + 1)); [ "$i" -le 100 ] || die "the previous agent did not stop"
+  sleep 0.2
+done
+t0="$(self | num now_ms)"
+[ -n "$t0" ] || die "the router does not accept this Mac's credential (was it deleted in the dashboard? run the uninstall command with --purge, then install again)"
+n=0
+until launchctl bootstrap system "$PLIST" 2>/dev/null; do
+  n=$((n + 1)); [ "$n" -lt 5 ] || die "could not start the agent (launchctl bootstrap $LABEL)"
+  sleep 1
+done
+n=0
+until launchctl bootstrap system "$UPD_PLIST" 2>/dev/null; do
+  n=$((n + 1)); [ "$n" -lt 5 ] || { say "warning: could not load the updater daemon"; break; }
+  sleep 1
+done
+
+# --- wait for the first heartbeat from the new agent --------------------------
+i=0
+while :; do
+  s="$(self)"
+  seen="$(printf '%s' "$s" | num last_seen_ms)"
+  case "$s" in *"\"version\":\"$VERSION\""*) ver=1 ;; *) ver=0 ;; esac
+  if [ "${seen:-0}" -gt "$t0" ] && [ "$ver" = 1 ]; then break; fi
+  i=$((i + 1)); [ "$i" -le 45 ] || die "the agent did not report in within 90 s; see $LOG/agent.log"
+  sleep 2
+done
+say "done: \"$name\" is online (agent $VERSION). Pause it any time with: sudo touch /usr/local/etc/umm/paused"
+}
+
+main "$@"

@@ -10,7 +10,9 @@ import (
 
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/internal/engine"
+	"github.com/alee-ibrahim/use-my-mac/internal/installer"
 	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
+	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
 
 // Config is the router's configuration file. Secrets never live here: they
@@ -35,6 +37,8 @@ type Config struct {
 	Scheduler engine.Config `yaml:"scheduler"`
 
 	Updates UpdatesConfig `yaml:"updates"`
+
+	Install InstallConfig `yaml:"install"`
 
 	MaxUploadMB   int64  `yaml:"max_upload_mb"`
 	SecureCookies *bool  `yaml:"secure_cookies"`
@@ -86,6 +90,51 @@ type UpdatesConfig struct {
 	// Offline: never fetch; serve only artifacts an admin uploaded
 	// (PUT /v1/updates/artifacts/<version>/<file>).
 	Offline bool `yaml:"offline"`
+}
+
+// InstallConfig controls the one-line Mac install (/i/<token>).
+type InstallConfig struct {
+	// AllowHTTP serves install scripts for a plain-http public_url. Dev only.
+	AllowHTTP bool `yaml:"allow_http"`
+	// ServiceLabel is the LaunchDaemon label for profiles that set none
+	// (default io.github.alee-ibrahim.umm-agent). Use a neutral one, e.g.
+	// com.example.helper, for a quiet install.
+	ServiceLabel string `yaml:"service_label"`
+	// Profiles admins pick from when creating an install link. Without any,
+	// a "default" profile allowlists /opt/homebrew/bin/ffmpeg.
+	Profiles map[string]InstallProfileConfig `yaml:"profiles"`
+
+	// Resolved by LoadConfig.
+	Resolved map[string]api.InstallProfile `yaml:"-"`
+}
+
+// InstallProfileConfig is one install profile.
+type InstallProfileConfig struct {
+	Labels       map[string]string   `yaml:"labels"`
+	Runtimes     map[string][]string `yaml:"runtimes"`
+	MaxTasks     int                 `yaml:"max_tasks"`
+	Priority     string              `yaml:"priority"`
+	ServiceLabel string              `yaml:"service_label"`
+}
+
+func (c *InstallConfig) resolve() error {
+	profiles := c.Profiles
+	if len(profiles) == 0 {
+		profiles = map[string]InstallProfileConfig{"default": {Runtimes: map[string][]string{"ffmpeg": {"/opt/homebrew/bin/ffmpeg"}}}}
+	}
+	c.Resolved = map[string]api.InstallProfile{}
+	for name, pc := range profiles {
+		p := api.InstallProfile{Name: name, Labels: pc.Labels, Runtimes: pc.Runtimes, MaxTasks: pc.MaxTasks,
+			Priority: pc.Priority, ServiceLabel: pc.ServiceLabel}
+		if p.ServiceLabel == "" {
+			p.ServiceLabel = c.ServiceLabel
+		}
+		if err := installer.NormalizeProfile(&p); err != nil {
+			return fmt.Errorf("install.profiles: %w", err)
+		}
+		c.Resolved[name] = p
+	}
+	return nil
 }
 
 // RelayEnabled resolves Relay.
@@ -195,6 +244,9 @@ func (c *Config) validate() error {
 		c.Updates.ReleaseURL = selfupdate.DefaultReleaseURL
 	}
 	c.Updates.ReleaseURL = strings.TrimRight(c.Updates.ReleaseURL, "/")
+	if err := c.Install.resolve(); err != nil {
+		return err
+	}
 	if c.MaxUploadMB <= 0 {
 		c.MaxUploadMB = 20 * 1024
 	}

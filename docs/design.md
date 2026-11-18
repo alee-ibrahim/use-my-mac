@@ -133,6 +133,16 @@ inputs `from: {task, output}` resolve to the producing task's output URL at disp
   atomically). The agent exchanges it for a per-Mac credential (`umm_agt_…`, 256-bit). Only its SHA-256 is
   stored server-side. On the Mac it lives in a 0600 file owned by `_umm`. Deleting the Mac in the dashboard
   revokes it.
+- **One-line install** (`curl -fsSL <router>/i/<token> | sudo sh`): install tokens (`umm_ins_…`) are
+  enrolment secrets bound to an install profile, stored hashed, short-lived (1 h by default, 7 days at most),
+  good for 1 to N enrolments and revocable. The script is rendered per request; every embedded value is
+  checked against a strict pattern and single-quoted, or yaml-encoded inside a quoted heredoc with a random
+  delimiter. It verifies the release with the pinned minisign key (pure JavaScript under `osascript`, as
+  stock macOS has no Ed25519/BLAKE2b tool) and the SHA-256 before installing anything. The token reaches the
+  agent over stdin and `curl` through a config on stdin, never argv. Served only for an https `public_url`,
+  rate-limited per client address and audited (fetch, download, enrolment, refusal, revocation). Trust: the
+  script comes from the router, so this protects against a tampered cache or release host, not against a
+  compromised router (as with any `curl | sh`).
 - **API keys** (`umm_key_…`) are hashed at rest and have a role: `app` (submit, and see only its own
   jobs), `viewer` (read everything) or `admin`.
 - **Dashboard:** OIDC authorization-code flow with PKCE and nonce. Roles come from a groups claim and/or

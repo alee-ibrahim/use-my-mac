@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -277,11 +278,27 @@ func (e *Engine) CreateEnrolToken(ctx context.Context, by string, ttl time.Durat
 
 // Enrol exchanges a one-time token for a long-lived agent credential.
 func (e *Engine) Enrol(ctx context.Context, req api.EnrolRequest) (api.EnrolResponse, error) {
+	return e.EnrolFrom(ctx, req, "")
+}
+
+// EnrolFrom is Enrol with the caller's IP for the install audit log. It
+// accepts one-time enrolment tokens and install tokens (one use each).
+func (e *Engine) EnrolFrom(ctx context.Context, req api.EnrolRequest, ip string) (api.EnrolResponse, error) {
 	if req.Name == "" || len(req.Name) > 128 {
 		return api.EnrolResponse{}, &ValidationError{"name is required (max 128 chars)"}
 	}
 	now := e.now()
-	if err := e.st.ConsumeEnrolToken(ctx, auth.Hash(req.Token), ms(now)); err != nil {
+	installID := ""
+	if strings.HasPrefix(req.Token, auth.PrefixInstall) {
+		t, err := e.st.ConsumeInstallToken(ctx, auth.Hash(req.Token), ms(now))
+		if err != nil {
+			if old, lerr := e.st.InstallTokenByHash(ctx, auth.Hash(req.Token)); lerr == nil {
+				e.RecordInstallEvent(ctx, old.ID, InstallEventDenied, ip, "", "enrol refused: link expired, revoked or used up")
+			}
+			return api.EnrolResponse{}, ErrForbidden
+		}
+		installID = t.ID
+	} else if err := e.st.ConsumeEnrolToken(ctx, auth.Hash(req.Token), ms(now)); err != nil {
 		return api.EnrolResponse{}, ErrForbidden
 	}
 	cred := auth.NewSecret(auth.PrefixAgent)
@@ -296,7 +313,8 @@ func (e *Engine) Enrol(ctx context.Context, req api.EnrolRequest) (api.EnrolResp
 	if err := e.st.CreateAgent(ctx, a); err != nil {
 		return api.EnrolResponse{}, err
 	}
-	e.log.Info("agent enrolled", "agent", a.ID, "name", a.Name)
+	e.log.Info("agent enrolled", "agent", a.ID, "name", a.Name, "install_token", installID)
+	e.RecordInstallEvent(ctx, installID, InstallEventEnrol, ip, a.ID, "enrolled "+truncate(a.Name, 128))
 	return api.EnrolResponse{AgentID: a.ID, Credential: cred}, nil
 }
 

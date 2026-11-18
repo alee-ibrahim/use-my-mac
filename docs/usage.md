@@ -258,6 +258,12 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/updates` | viewer, admin | agent update policy, router version, relay status |
 | `PUT /v1/updates` | admin | change the agent update policy (see [Agent updates](#agent-updates)) |
 | `GET /v1/macs/{id}/updates` | viewer, admin | a Mac's update history, newest first |
+| `GET /v1/install/profiles` | admin | install profiles configured on the router |
+| `POST /v1/install-tokens` | admin | one-line install link: `{profile, labels, ttl_minutes, max_uses, note}` → `{id, token, command, ...}` |
+| `GET /v1/install-tokens` | admin | install links, newest first (no secrets) |
+| `DELETE /v1/install-tokens/{id}` | admin | revoke an install link |
+| `GET /v1/install-tokens/{id}/events` | admin | an install link's audit log |
+| `GET /i/{token}`, `GET /i/uninstall` | the token / public | one-line install and uninstall scripts |
 | `PUT /v1/updates/artifacts/{version}/{file}` | admin | seed the relay cache (routers without internet) |
 | `GET /v1/docs`, `GET /v1/docs/{slug}` | public | these docs (index, raw Markdown) |
 | `GET /healthz` | public | liveness |
@@ -270,6 +276,63 @@ Apps that can see a job can also read its tasks, logs and outputs. Errors come b
 
 Requirements: Apple Silicon, a recent macOS, outbound HTTPS to the router, and an admin account on the Mac.
 
+### Add a Mac with one command
+
+In the dashboard open **Macs**, then **Add Mac**, **One command** (admins only). Pick a profile (labels and
+runtimes, defined in the router config under `install.profiles`), optional extra labels, how long the link
+lives (1 hour by default) and whether it is single use (default) or good for a batch of N Macs. Copy the
+command and run it in Terminal on the Mac:
+
+```sh
+curl -fsSL https://umm.example.com/i/umm_ins_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX | sudo sh
+```
+
+From the CLI, `umm enrol-command [-profile lab] [-label room=lab-2] [-ttl 1h] [-uses 10]` prints the same
+command, and `umm install-tokens list|log ID|revoke ID` manages links. REST: `POST /v1/install-tokens`.
+
+The script asks for the Mac admin's password (sudo) and then:
+
+1. checks it is an Apple Silicon Mac on macOS 12 or later;
+2. downloads the agent release the router wants (the Settings → Agent updates target, else the router's own
+   version) from the router's signed-release cache;
+3. verifies the minisign signature of `SHA256SUMS` with the release public key pinned in the script
+   (including the version in the trusted comment) and the bundle's SHA-256. Any failure stops it before
+   anything is installed. Stock macOS has no minisign, so the check runs in JavaScriptCore through
+   `osascript -l JavaScript` (no UI);
+4. installs exactly like `install.sh`: hidden non-admin `_umm` user, `/usr/local/bin/umm-agent`,
+   `agent.yaml` with the profile's labels and runtimes allowlist, the agent LaunchDaemon and the root updater
+   LaunchDaemon, under the profile's service label (set a neutral one such as `com.example.helper` with
+   `install.service_label`);
+5. enrols: the token is written to a root-only temp file and handed to `umm-agent enrol` over stdin, never
+   in argv. Download URLs, which carry the token, reach `curl` through a config on stdin;
+6. starts the daemons, waits for the new agent's first heartbeat and prints one success line.
+
+Running it again (with a link that is still valid) upgrades or repairs the agent without enrolling it again
+and without using up the link. To remove the agent:
+
+```sh
+curl -fsSL https://umm.example.com/i/uninstall | sudo sh                 # keep config and credential
+curl -fsSL https://umm.example.com/i/uninstall | sudo sh -s -- --purge   # remove everything
+```
+
+Then delete the Mac in the dashboard.
+
+**Link security.** The token is a 256-bit secret, stored only as a SHA-256. A link expires (1 hour by
+default, 7 days at most), works for 1 to 1000 enrolments, and can be revoked at once under **Install
+links** on the Macs page. Fetching the script does not use it up; a successful enrolment does. An expired,
+used or revoked link answers with a script that prints a clear error and exits non-zero. `/i/` allows 30
+requests a minute per client address. The router serves it only when `public_url` is https
+(`install.allow_http: true` is for development). Every script fetch, bundle download, enrolment, refusal
+and revocation is recorded with its time and client address (**Install links → Audit log**). The token is
+part of the URL, so it can end up in proxy access logs and the admin's shell history: keep links
+short-lived.
+
+**Quiet.** Nothing is shown on the Mac beyond the Terminal output. macOS 13+ still posts a "Background Items
+Added" notification for new LaunchDaemons unless an MDM profile marks them as managed; see
+[Fleet install: Quiet install](fleet.md#quiet-install).
+
+### Other ways
+
 **One Mac by hand.** Download `umm-agent-darwin-arm64.tar.gz` from the release, copy it to the Mac, unpack
 it and run:
 
@@ -277,7 +340,7 @@ it and run:
 sudo UMM_SERVER=https://umm.example.com sh install.sh
 ```
 
-Paste the one-time token when asked. Get it from the dashboard (**Macs**, then **Add a Mac**) or with
+Paste the one-time token when asked. Get it from the dashboard (**Macs**, **Add Mac**, **Manual**) or with
 `umm enrol`. The script creates the `_umm` user, installs the agent, writes `/usr/local/etc/umm/agent.yaml`
 and loads a LaunchDaemon. Edit `runtimes` in `agent.yaml`, then restart the daemon.
 

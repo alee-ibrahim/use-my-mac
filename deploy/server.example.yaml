@@ -68,3 +68,18 @@ updates:
   relay: true              # serve signed agent releases to Macs (cached in storage)
   release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
   offline: false           # true: never fetch; serve only uploaded artifacts
+
+# One-line Mac install: Macs > Add Mac > One command, or `umm enrol-command`.
+# The Mac runs `curl -fsSL <public_url>/i/<token> | sudo sh`. Served only when
+# public_url is https (allow_http: true is for development).
+install:
+  # service_label: com.example.helper   # neutral LaunchDaemon label for all profiles
+  profiles:
+    default:
+      runtimes:
+        ffmpeg: ["/opt/homebrew/bin/ffmpeg"]
+    # lab:
+    #   labels: {site: lab}
+    #   runtimes: {ffmpeg: ["/opt/homebrew/bin/ffmpeg"]}
+    #   max_tasks: 2
+    #   priority: adaptive

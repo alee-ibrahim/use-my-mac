@@ -6,11 +6,10 @@ import {
   LockIcon,
   MoreHorizontalIcon,
   PlugIcon,
-  PlusIcon,
 } from "lucide-react"
 
 import { StateBadge } from "@/components/state-badge"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -18,10 +17,8 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -36,10 +33,10 @@ import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, bytes, duration, since, type Mac, type UpdateEvent } from "@/lib/api"
 import { usePolling } from "@/lib/hooks"
+import { AddMac, InstallLinks } from "@/pages/install"
 
 function Meter({ value, label }: { value: number; label: string }) {
   if (value < 0) return <span className="text-muted-foreground">–</span>
@@ -169,67 +166,17 @@ function UpdateHistory({ mac, onClose }: { mac?: Mac; onClose: () => void }) {
   )
 }
 
-function AddMac() {
-  const [token, setToken] = useState<string>()
-  const [busy, setBusy] = useState(false)
-  async function mint() {
-    setBusy(true)
-    try {
-      setToken((await api.enrolToken(24)).token)
-    } catch (e) {
-      toast.error(String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+export function MacsPage({ admin }: { admin: boolean }) {
+  const [links, setLinks] = useState(0)
   return (
-    <Dialog onOpenChange={(o) => !o && setToken(undefined)}>
-      <DialogTrigger asChild>
-        <Button size="sm">
-          <PlusIcon data-icon="inline-start" />
-          Add a Mac
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Add a Mac</DialogTitle>
-          <DialogDescription>
-            Install the agent on the Mac, then enrol it with a one-time token. The agent runs as a dedicated
-            non-admin user and only connects outbound.
-          </DialogDescription>
-        </DialogHeader>
-        <Textarea
-          readOnly
-          className="font-mono text-xs"
-          rows={4}
-          value={`# on the Mac, inside the unpacked umm-agent-darwin-arm64 folder\n# (build it with: make dist-mac)\nsudo UMM_SERVER=${location.origin} sh install.sh\n# paste the token below when asked`}
-        />
-        {token ? (
-          <Alert>
-            <AlertTitle>Enrolment token (valid 24h, single use)</AlertTitle>
-            <AlertDescription>
-              <code className="break-all">{token}</code>
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        <DialogFooter>
-          {token ? (
-            <Button variant="outline" onClick={() => navigator.clipboard.writeText(token).then(() => toast.success("Copied"))}>
-              Copy token
-            </Button>
-          ) : (
-            <Button onClick={mint} disabled={busy}>
-              {busy && <Spinner data-icon="inline-start" />}
-              Create enrolment token
-            </Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <div className="flex flex-col gap-4">
+      <MacsCard admin={admin} onLinkCreated={() => setLinks((n) => n + 1)} />
+      {admin && <InstallLinks version={links} />}
+    </div>
   )
 }
 
-export function MacsPage({ admin }: { admin: boolean }) {
+function MacsCard({ admin, onLinkCreated }: { admin: boolean; onLinkCreated: () => void }) {
   const { data, error, refresh } = usePolling(api.macs, 5000)
   const [history, setHistory] = useState<Mac>()
 
@@ -256,7 +203,7 @@ export function MacsPage({ admin }: { admin: boolean }) {
         </CardDescription>
         {admin && (
           <CardAction>
-            <AddMac />
+            <AddMac onCreated={onLinkCreated} />
           </CardAction>
         )}
       </CardHeader>

@@ -140,7 +140,7 @@ if %[2]q run > %[1]q.tmp 2>/dev/null; then mv %[1]q.tmp %[1]q; else rm -f %[1]q 
 		for ctx.Err() == nil {
 			if b, err := os.ReadFile(running); err == nil {
 				hb := api.Heartbeat{State: api.AgentReady, Version: strings.TrimSpace(string(b)), Running: []string{}, MaxTasks: 1}
-				if _, err := eng.Heartbeat(ctx, enr.AgentID, hb); err != nil {
+				if _, err := eng.Heartbeat(ctx, enr.AgentID, hb); err != nil && ctx.Err() == nil {
 					t.Log(err)
 				}
 			}
