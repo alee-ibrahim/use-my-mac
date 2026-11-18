@@ -67,7 +67,8 @@ flowchart LR
    backoff on a different Mac, and lost heartbeats trigger reassignment.
 5. When all map tasks succeed, the reduce task runs with their outputs as inputs.
 
-Details: [docs/design.md](docs/design.md).
+Details: [docs/design.md](docs/design.md). A user guide (submitting jobs, runtimes, storage, API reference,
+troubleshooting) is in [docs/usage.md](docs/usage.md); the router also serves all of these docs at `/docs`.
 
 ## Quickstart (local)
 
@@ -172,6 +173,7 @@ More examples, including map/reduce video encoding with the Go SDK and batched O
 | `GET/POST/DELETE /v1/api-keys` | app keys (admin) |
 | `GET/PUT /v1/settings` | scheduler weights and limits |
 | `GET /metrics` | Prometheus |
+| `/docs` | these docs, rendered in the dashboard (no login); raw Markdown at `GET /v1/docs/{slug}` |
 
 Authenticate with `Authorization: Bearer umm_key_...`.
 

@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react"
-import { CpuIcon, KeyRoundIcon, ListChecksIcon, LogOutIcon, MoonIcon, SettingsIcon, SunIcon } from "lucide-react"
+import {
+  BookOpenIcon,
+  CpuIcon,
+  KeyRoundIcon,
+  ListChecksIcon,
+  LogOutIcon,
+  SettingsIcon,
+} from "lucide-react"
 
-import { useTheme } from "@/components/theme-provider"
-import { Button } from "@/components/ui/button"
+import { ThemeToggle } from "@/components/theme-toggle"
 import {
   Sidebar,
   SidebarContent,
@@ -30,22 +36,17 @@ import { SettingsPage } from "@/pages/settings"
 
 type Page = "macs" | "jobs" | "keys" | "settings"
 
-const pages: { id: Page; title: string; icon: React.ComponentType; admin?: boolean }[] = [
+const pages: {
+  id: Page
+  title: string
+  icon: React.ComponentType
+  admin?: boolean
+}[] = [
   { id: "macs", title: "Macs", icon: CpuIcon },
   { id: "jobs", title: "Jobs", icon: ListChecksIcon },
   { id: "keys", title: "API keys", icon: KeyRoundIcon, admin: true },
   { id: "settings", title: "Settings", icon: SettingsIcon },
 ]
-
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
-  const dark = theme === "dark"
-  return (
-    <Button variant="ghost" size="icon-sm" aria-label="Toggle theme" onClick={() => setTheme(dark ? "light" : "dark")}>
-      {dark ? <SunIcon /> : <MoonIcon />}
-    </Button>
-  )
-}
 
 export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined)
@@ -106,7 +107,9 @@ export function App() {
                   <CpuIcon />
                   <div className="flex flex-col leading-tight">
                     <span className="font-semibold">use-my-mac</span>
-                    <span className="text-xs text-muted-foreground">Mac compute pool</span>
+                    <span className="text-xs text-muted-foreground">
+                      Mac compute pool
+                    </span>
                   </div>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -120,7 +123,11 @@ export function App() {
                     .filter((p) => !p.admin || admin)
                     .map((p) => (
                       <SidebarMenuItem key={p.id}>
-                        <SidebarMenuButton isActive={p.id === page} tooltip={p.title} onClick={() => setPage(p.id)}>
+                        <SidebarMenuButton
+                          isActive={p.id === page}
+                          tooltip={p.title}
+                          onClick={() => setPage(p.id)}
+                        >
                           <p.icon />
                           <span>{p.title}</span>
                         </SidebarMenuButton>
@@ -132,6 +139,14 @@ export function App() {
           </SidebarContent>
           <SidebarFooter>
             <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild tooltip="Documentation">
+                  <a href="/docs">
+                    <BookOpenIcon />
+                    <span>Documentation</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton
                   tooltip="Sign out"

@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { CircleAlertIcon, KeyRoundIcon, LogInIcon, RotateCwIcon } from "lucide-react"
+import { BookOpenIcon, CircleAlertIcon, KeyRoundIcon, LogInIcon, RotateCwIcon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,7 @@ import { api, ssoURL, type AuthConfig, type Me } from "@/lib/api"
 
 function AuthCard({ description, children }: { description: string; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh items-center justify-center p-6">
+    <div className="flex min-h-svh flex-col items-center justify-center gap-2 p-6">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>use-my-mac</CardTitle>
@@ -19,6 +19,12 @@ function AuthCard({ description, children }: { description: string; children: Re
         </CardHeader>
         {children}
       </Card>
+      <Button variant="link" size="sm" asChild>
+        <a href="/docs">
+          <BookOpenIcon data-icon="inline-start" />
+          Documentation
+        </a>
+      </Button>
     </div>
   )
 }
