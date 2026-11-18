@@ -3,7 +3,11 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ include "umm.fullname" . }}
-  labels: {{- include "umm.labels" . | nindent 4 }}
+  labels:
+    {{- include "umm.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   selector:
     matchLabels: {{- include "umm.selector" . | nindent 6 }}

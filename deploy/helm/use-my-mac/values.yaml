@@ -77,6 +77,13 @@ httpRoute:
 serviceMonitor:
   enabled: false
   interval: 30s
+  # Extra labels, e.g. the label your Prometheus selects monitors by.
+  labels: {}
+
+# Annotations on the Deployment (e.g. for a tool that restarts it when its
+# Secret changes) and on the pod template.
+annotations: {}
+podAnnotations: {}
 
 resources:
   requests: {cpu: 100m, memory: 128Mi}
