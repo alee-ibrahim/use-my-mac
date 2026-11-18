@@ -273,6 +273,40 @@ Inputs and outputs never go through the agent's connection to the router. Agents
 
 Blob keys are relative paths: no leading `/`, no `..`. Outputs are overwritten per key, so re-runs are safe.
 
+## The dashboard
+
+The router serves the dashboard at its root URL. It works on a phone: the sidebar becomes a menu, tables
+become lists and buttons are big enough to tap. Light and dark mode follow the switch at the top right.
+Viewers see everything read-only; only admins get the buttons that change or delete things.
+
+- **Overview** (the home page): tiles for Macs online, idle, busy and yielded to their user, tasks running and
+  queued, the success rate of the last 24 hours and the compute harvested (task time on Macs, 24 hours and 7
+  days). Below them, charts of fleet utilisation, throughput (succeeded and failed attempts), queue depth and
+  yields over 1 hour to 30 days, a live card per Mac (CPU of our tasks and of the Mac's user over the last
+  hour, GPU, memory, who is at the Mac, thermal state, power, agent version and update state), the latest
+  jobs and the latest events. It refreshes every few seconds while the tab is visible; **Live** pauses it.
+  Every chart has a **Table** view with the same numbers.
+- **Macs**: the fleet with live telemetry. Open a Mac for its charts (CPU split between our tasks and its
+  user, GPU and memory, tasks running, availability), its task history, events and update history. Admins
+  can rename, drain, opt out or delete it (delete asks first; deleting revokes the Mac's credential and removes its
+  history). Install links are listed below the Macs; used, expired and revoked ones can be deleted one by one
+  or with **Clear old**.
+- **Jobs**: filter by state; open a job for its timeline (every attempt of every task on the Mac that ran it,
+  by task or by Mac, coloured by outcome), its tasks, and a task's attempts, logs and placement scores. Admins
+  can cancel a job and delete finished jobs (tick several, or **Delete old jobs** for everything finished more
+  than N days ago).
+- **Activity**: enrolments, yields, quarantines, failed jobs, agent update results and every admin change
+  (created, revoked and deleted keys, deleted Macs, jobs and install links, retention changes), with who did
+  it.
+- **API keys** (admins): create and revoke keys; delete revoked ones (one by one or all at once).
+- **Settings**: scheduler weights and limits, agent updates, and **Data and retention**: how long 1-minute
+  and 15-minute metrics and the activity log are kept, whether finished jobs are deleted automatically, and
+  one-off cleanup buttons.
+
+The CLI has the same cleanup: `umm keys delete ID` / `umm keys purge`, `umm install-tokens delete ID` /
+`umm install-tokens purge`, `umm macs delete MAC`, `umm jobs delete JOB` / `umm jobs purge -older-than 30d
+[-state failed]`, plus `umm metrics`, `umm events [-kind mac.]` and `umm retention [set -jobs-days 90]`.
+
 ## API reference
 
 All endpoints take and return JSON unless noted. Authenticate with `Authorization: Bearer umm_key_...`.
@@ -291,9 +325,9 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/blobs/{key}` | app, admin | download a blob |
 | `GET /v1/macs` | any | Macs with state and live telemetry |
 | `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}` or `{"name": "Lab Mac 2"}` |
-| `DELETE /v1/macs/{id}` | admin | remove a Mac and revoke its credential |
+| `DELETE /v1/macs/{id}` | admin | delete a Mac: revokes its credential and removes its metrics history |
 | `POST /v1/enrolment-tokens` | admin | one-time token for a new Mac |
-| `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys |
+| `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys (`purge` below deletes them) |
 | `GET /v1/settings` | viewer, admin | scheduler weights and limits |
 | `PUT /v1/settings` | admin | change them at runtime |
 | `GET /v1/updates` | viewer, admin | agent update policy, router version, relay status |
@@ -302,7 +336,7 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/install/profiles` | admin | install profiles configured on the router |
 | `POST /v1/install-tokens` | admin | one-line install link: `{profile, labels, ttl_minutes, max_uses, note}` → `{id, token, command, ...}` |
 | `GET /v1/install-tokens` | admin | install links, newest first (no secrets) |
-| `DELETE /v1/install-tokens/{id}` | admin | revoke an install link |
+| `DELETE /v1/install-tokens/{id}` | admin | revoke an install link (`purge` below deletes it) |
 | `GET /v1/install-tokens/{id}/events` | admin | an install link's audit log |
 | `GET /v1/access` | admin | dashboard role rules (config rules `locked`), default role, group names |
 | `POST /v1/access/rules` | admin | add or change a rule: `{kind: group\|user, value, role: admin\|viewer, name?}` |
@@ -314,6 +348,20 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/access/audit?limit=` | admin | role-change audit log, newest first |
 | `GET /i/{token}`, `GET /i/uninstall` | the token / public | one-line install and uninstall scripts |
 | `PUT /v1/updates/artifacts/{version}/{file}` | admin | seed the relay cache (routers without internet) |
+| `GET /v1/metrics/summary` | viewer, admin | headline numbers: Macs by state, tasks, success rate and compute hours (24 h, 7 d) |
+| `GET /v1/metrics/fleet?range=24h&step=` | viewer, admin | fleet time series (also `from`/`to` as RFC 3339 or Unix ms; `step` in seconds, default about 120 points) |
+| `GET /v1/metrics/macs?window=1h` | viewer, admin | a short series per Mac (sparklines) |
+| `GET /v1/metrics/macs/{id}?range=7d` | viewer, admin | one Mac's time series |
+| `GET /v1/macs/{id}/attempts?limit=` | viewer, admin | a Mac's task history, newest first |
+| `GET /v1/jobs/{id}/timeline` | any | every attempt of a job's tasks, with Mac and times |
+| `DELETE /v1/jobs/{id}` | admin | delete a finished job with its tasks, logs and stored outputs (`409` while it runs) |
+| `POST /v1/jobs/purge` | admin | `{"older_than_days": 30, "states": ["failed"]}` → `{"deleted": n}` |
+| `POST /v1/api-keys/{id}/purge` | admin | delete a revoked key (`409` while active) |
+| `POST /v1/api-keys/purge` | admin | delete every revoked key |
+| `POST /v1/install-tokens/{id}/purge` | admin | delete a used, expired or revoked install link and its audit log |
+| `POST /v1/install-tokens/purge` | admin | delete every install link that can no longer enrol |
+| `GET /v1/events?kind=mac.,key.&target=&before=&limit=` | viewer, admin | activity and audit log, newest first (a kind ending in `.` matches a prefix) |
+| `GET` / `PUT /v1/retention` | viewer / admin | how long metrics, events and finished jobs are kept |
 | `GET /v1/docs`, `GET /v1/docs/{slug}` | public | these docs (index, raw Markdown) |
 | `GET /healthz` | public | liveness |
 | `GET /metrics` | public | Prometheus metrics |

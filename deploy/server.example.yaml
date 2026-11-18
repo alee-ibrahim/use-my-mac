@@ -84,3 +84,11 @@ install:
     #   runtimes: {ffmpeg: ["/opt/homebrew/bin/ffmpeg"]}
     #   max_tasks: 2
     #   priority: adaptive
+
+# History kept by the router for the dashboard (admins can change it at runtime
+# in Settings > Data and retention). Zero or unset = the default shown.
+retention:
+  jobs_days: 0              # delete finished jobs after N days; 0 = keep them
+  events_days: 90           # activity and audit log
+  metrics_raw_hours: 24     # 1-minute metrics, 24..168
+  metrics_rollup_days: 30   # 15-minute metrics

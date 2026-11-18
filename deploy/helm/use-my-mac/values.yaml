@@ -82,6 +82,15 @@ install: {}
 #      runtimes: {ffmpeg: ["/opt/homebrew/bin/ffmpeg"], ocr: ["/usr/bin/python3", "/opt/ocr/run.py"]}
 #      max_tasks: 2
 
+# How long the router keeps metrics history, the activity log and finished
+# jobs (see docs/design.md "Metrics history"). Admins can change it at runtime
+# in Settings; that wins over these defaults.
+retention: {}
+#  jobs_days: 0              # delete finished jobs after N days; 0 = keep
+#  events_days: 90
+#  metrics_raw_hours: 24     # 1-minute resolution, 24..168
+#  metrics_rollup_days: 30   # 15-minute resolution
+
 service:
   type: ClusterIP
   port: 80

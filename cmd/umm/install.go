@@ -71,6 +71,15 @@ func installTokens(ctx context.Context, c *client.Client, args []string) error {
 		return w.Flush()
 	case args[0] == "revoke" && len(args) == 2:
 		return c.RevokeInstallToken(ctx, args[1])
+	case args[0] == "delete" && len(args) == 2:
+		return c.DeleteInstallToken(ctx, args[1])
+	case args[0] == "purge":
+		n, err := c.PurgeInstallTokens(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("deleted %d expired, used or revoked links\n", n)
+		return nil
 	case args[0] == "log" && len(args) == 2:
 		evs, err := c.InstallTokenEvents(ctx, args[1])
 		if err != nil {
@@ -83,5 +92,5 @@ func installTokens(ctx context.Context, c *client.Client, args []string) error {
 		}
 		return w.Flush()
 	}
-	return errors.New("usage: umm install-tokens list | log ID | revoke ID")
+	return errors.New("usage: umm install-tokens list | log ID | revoke ID | delete ID | purge")
 }

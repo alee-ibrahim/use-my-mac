@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +108,11 @@ type Engine struct {
 	// version is the router's own version; updates is the agent update policy.
 	version string
 	updates api.UpdateSettings
+	// h accumulates metrics history between samples; retention is the
+	// effective retention policy (retentionDefault comes from the config).
+	h                hist
+	retention        api.Retention
+	retentionDefault api.Retention
 }
 
 // Options for New.
@@ -119,6 +125,9 @@ type Options struct {
 	Config  Config
 	// Version is the router's version, the default target for agent updates.
 	Version string
+	// Retention is the default retention policy (zero fields: built-in
+	// defaults). Admins can change it at runtime.
+	Retention api.Retention
 }
 
 const settingScheduler = "scheduler"
@@ -135,12 +144,14 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 	e := &Engine{
 		st: o.Store, blobs: o.Blobs, m: o.Metrics, log: o.Logger, now: o.Now, cfg: o.Config,
 		live: map[string]*live{}, placement: map[string][]sched.Result{}, kick: make(chan struct{}, 1),
-		version: o.Version,
+		version: o.Version, retentionDefault: o.Retention,
 	}
+	e.h.last = o.Now()
 	if e.version == "" {
 		e.version = "dev"
 	}
 	e.loadUpdateSettings(ctx)
+	e.loadRetention(ctx)
 	e.started = e.now()
 	if v, err := e.st.GetSetting(ctx, settingScheduler); err == nil {
 		var s SchedulerSettings
@@ -315,6 +326,11 @@ func (e *Engine) EnrolFrom(ctx context.Context, req api.EnrolRequest, ip string)
 	}
 	e.log.Info("agent enrolled", "agent", a.ID, "name", a.Name, "install_token", installID)
 	e.RecordInstallEvent(ctx, installID, InstallEventEnrol, ip, a.ID, "enrolled "+truncate(a.Name, 128))
+	how := "with a one-time token"
+	if installID != "" {
+		how = "with install link " + installID
+	}
+	e.Audit(ctx, api.EventMacEnrolled, "", a.ID, a.Name+" enrolled "+how)
 	return api.EnrolResponse{AgentID: a.ID, Credential: cred}, nil
 }
 
@@ -367,6 +383,7 @@ func (e *Engine) Heartbeat(ctx context.Context, agentID string, hb api.Heartbeat
 	if err := e.st.UpdateAgentHeartbeat(ctx, a); err != nil {
 		return api.HeartbeatResponse{}, err
 	}
+	e.h.telemetry(agentID, hb.Telemetry)
 	e.m.SetTelemetry(a.Name, map[string]float64{
 		"user_cpu": hb.Telemetry.UserCPUPercent, "our_cpu": hb.Telemetry.OurCPUPercent,
 		"gpu": hb.Telemetry.GPUUtilPercent, "mem_available_bytes": float64(hb.Telemetry.MemAvailableBytes),
@@ -599,7 +616,7 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		if a, err := e.st.GetAgent(ctx, agentID); err == nil && a.ConsecFailures > 0 {
 			_ = e.st.SetAgentHealth(ctx, agentID, 0, a.QuarantinedUntil)
 		}
-		e.m.Outcome(api.OutcomeSucceeded, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
+		e.outcome(api.OutcomeSucceeded, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
 	case api.OutcomeFailed, api.OutcomeTimeout:
 		msg := u.Error
 		if msg == "" {
@@ -635,7 +652,7 @@ func excludedMap(t *store.Task) map[string]int64 {
 func (e *Engine) requeueLocked(ctx context.Context, t *store.Task, outcome, msg string, exclude time.Duration, now time.Time) {
 	if t.State == api.StateRunning && t.Attempt > 0 {
 		_ = e.st.FinishAttempt(ctx, t.ID, t.Attempt, outcome, msg, ms(now))
-		e.m.Outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
+		e.outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
 	}
 	if exclude > 0 && t.AgentID != "" {
 		ex := excludedMap(t)
@@ -643,6 +660,13 @@ func (e *Engine) requeueLocked(ctx context.Context, t *store.Task, outcome, msg 
 		t.Excluded = jsonStr(ex)
 	}
 	prev := t.AgentID
+	if outcome == api.OutcomeYielded && prev != "" {
+		name := prev
+		if a, err := e.st.GetAgent(ctx, prev); err == nil {
+			name = a.Name
+		}
+		e.Audit(ctx, api.EventTaskYielded, "", prev, "task "+t.Key+" yielded on "+name+": "+msg)
+	}
 	t.State, t.AgentID, t.AssignedAt, t.StartedAt, t.DeadlineAt, t.NotBefore = api.StatePending, "", 0, 0, 0, 0
 	t.Error = outcome + ": " + msg
 	if err := e.st.UpdateTask(ctx, t); err != nil {
@@ -655,7 +679,7 @@ func (e *Engine) requeueLocked(ctx context.Context, t *store.Task, outcome, msg 
 func (e *Engine) failLocked(ctx context.Context, t *store.Task, outcome, msg string, exit *int, now time.Time) {
 	if t.State == api.StateRunning && t.Attempt > 0 {
 		_ = e.st.FinishAttempt(ctx, t.ID, t.Attempt, outcome, msg, ms(now))
-		e.m.Outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
+		e.outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
 	}
 	if t.AgentID != "" {
 		ex := excludedMap(t)
@@ -668,6 +692,8 @@ func (e *Engine) failLocked(ctx context.Context, t *store.Task, outcome, msg str
 				q = ms(now.Add(e.cfg.QuarantineFor))
 				consec = 0
 				e.log.Warn("agent quarantined after consecutive failures", "agent", a.ID, "until", tptr(q))
+				e.Audit(ctx, api.EventMacQuarantined, "", a.ID, a.Name+" quarantined for "+e.cfg.QuarantineFor.String()+
+					" after "+strconv.Itoa(e.cfg.QuarantineAfter)+" failures in a row")
 			}
 			_ = e.st.SetAgentHealth(ctx, a.ID, consec, q)
 		}
@@ -924,6 +950,7 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 		c.ReservedMB += spec.Resources.RAMMB
 		jobs[t.JobID] = true
 		e.m.Assigned(best.ID)
+		e.h.count("assigned", 1)
 		e.wakeAgent(best.ID)
 	}
 	return nil
@@ -954,6 +981,9 @@ func (e *Engine) updateJobLocked(ctx context.Context, jobID string, now time.Tim
 			e.log.Error("update job", "job", jobID, "err", err)
 		}
 		e.log.Info("job state", "job", jobID, "state", state)
+		if state == api.StateFailed || state == api.StateCancelled {
+			e.Audit(ctx, api.EventJobFinished, "", jobID, "job "+j.Name+" "+state)
+		}
 	}
 }
 

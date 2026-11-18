@@ -136,7 +136,8 @@ func serve(args []string) error {
 	}
 
 	m := metrics.New()
-	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Metrics: m, Logger: log, Config: cfg.Scheduler, Version: version})
+	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Metrics: m, Logger: log, Config: cfg.Scheduler, Version: version,
+		Retention: cfg.Retention})
 	if err != nil {
 		return err
 	}
@@ -168,6 +169,7 @@ func serve(args []string) error {
 	log.Info("dashboard auth", "oidc", srv.OIDC != nil, "api_key_login", srv.APIKeyLogin, "auto_sign_in", srv.AutoSignIn)
 
 	go eng.Run(ctx)
+	go eng.RunHistory(ctx)
 	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

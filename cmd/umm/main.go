@@ -37,14 +37,20 @@ Commands:
   logs TASK [-attempt N]         print a task's logs
   download TASK OUTPUT [-o F]    download a task output
   cancel JOB                     cancel a job
-  macs                           list Macs with live telemetry
+  macs [list | delete MAC...]    list Macs with live telemetry; delete removed Macs (admin)
+  jobs [list | delete JOB... | purge -older-than 30d [-state failed]]
+                                 list jobs; delete finished jobs (admin)
+  metrics                        fleet summary: Macs, tasks, success rate, compute hours
+  events [-kind mac.,key.] [-limit N]   activity and audit log
+  retention [show | set -jobs-days N -events-days N -raw-hours N -rollup-days N]
+                                 how long history is kept (set: admin)
   drain MAC [-off]               stop sending new work to a Mac (admin)
   rename MAC NAME                rename a Mac on the router (admin)
   enrol-command [-profile P] [-label k=v] [-ttl 1h] [-uses N]
                                  one-line install command for new Macs (admin)
-  install-tokens list | log ID | revoke ID   one-line install links (admin)
+  install-tokens list | log ID | revoke ID | delete ID | purge   one-line install links (admin)
   enrol [-ttl-hours N]           mint a one-time enrolment token for a new Mac (admin)
-  keys list | create NAME [-role app|viewer|admin] | revoke ID   (admin)
+  keys list | create NAME [-role app|viewer|admin] | revoke ID | delete ID | purge   (admin)
   access rules | users | set group|user VALUE ROLE | user SUBJECT ROLE|none | rm ID | default deny|viewer | name GROUP NAME | log
                                  dashboard roles for single-sign-on users (admin)
   fleet SUBCMD [flags] [HOST...] install/manage the agent across Macs over SSH (admin)
@@ -179,7 +185,15 @@ func run(ctx context.Context, cmd string, args []string) error {
 		fmt.Println(j.ID, j.State)
 		return nil
 	case "macs":
-		return listMacs(ctx, c)
+		return macsCmd(ctx, c, args)
+	case "jobs":
+		return jobsCmd(ctx, c, args)
+	case "metrics":
+		return metricsCmd(ctx, c, args)
+	case "events":
+		return eventsCmd(ctx, c, args)
+	case "retention":
+		return retentionCmd(ctx, c, args)
 	case "drain":
 		off := fs.Bool("off", false, "undrain")
 		pos := parseFlags(fs, args)
@@ -433,6 +447,18 @@ func keys(ctx context.Context, c *client.Client, args []string) error {
 			return errors.New("usage: umm keys revoke ID")
 		}
 		return c.RevokeAPIKey(ctx, pos[0])
+	case "delete":
+		if len(pos) != 1 {
+			return errors.New("usage: umm keys delete ID (revoke it first)")
+		}
+		return c.DeleteAPIKey(ctx, pos[0])
+	case "purge":
+		n, err := c.PurgeAPIKeys(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("deleted %d revoked keys\n", n)
+		return nil
 	}
-	return errors.New("usage: umm keys list|create|revoke")
+	return errors.New("usage: umm keys list|create|revoke|delete|purge")
 }

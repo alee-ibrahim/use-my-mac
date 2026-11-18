@@ -9,8 +9,10 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { PageHeader } from "@/components/ops"
 import { api, type Mac, type Me, type Settings, type UpdatesInfo } from "@/lib/api"
 import { AccessPanel } from "@/pages/access"
+import { DataCard } from "@/pages/data-settings"
 
 const weightHelp: Record<string, string> = {
   presence: "Prefer Macs with nobody logged in, a locked screen or an idle user.",
@@ -177,26 +179,36 @@ function UpdatesCard({ admin }: { admin: boolean }) {
 // (dashboard roles for single-sign-on users).
 export function SettingsPage({ me }: { me: Me }) {
   const [tab, setTab] = useState(() => (sessionStorage.getItem("settings-tab") === "access" ? "access" : "general"))
-  if (me.role !== "admin") return <GeneralSettings me={me} />
-  return (
-    <Tabs
-      value={tab}
-      onValueChange={(v) => {
-        setTab(v)
-        sessionStorage.setItem("settings-tab", v)
-      }}
-    >
-      <TabsList>
-        <TabsTrigger value="general">General</TabsTrigger>
-        <TabsTrigger value="access">Access</TabsTrigger>
-      </TabsList>
-      <TabsContent value="general">
+  const header = <PageHeader title="Settings" description="Scheduling, agent updates, data retention and access." />
+  if (me.role !== "admin")
+    return (
+      <div className="flex flex-col gap-4 md:gap-6">
+        {header}
         <GeneralSettings me={me} />
-      </TabsContent>
-      <TabsContent value="access">
-        <AccessPanel me={me} />
-      </TabsContent>
-    </Tabs>
+      </div>
+    )
+  return (
+    <div className="flex flex-col gap-4 md:gap-6">
+      {header}
+      <Tabs
+        value={tab}
+        onValueChange={(v) => {
+          setTab(v)
+          sessionStorage.setItem("settings-tab", v)
+        }}
+      >
+        <TabsList>
+          <TabsTrigger value="general">General</TabsTrigger>
+          <TabsTrigger value="access">Access</TabsTrigger>
+        </TabsList>
+        <TabsContent value="general">
+          <GeneralSettings me={me} />
+        </TabsContent>
+        <TabsContent value="access">
+          <AccessPanel me={me} />
+        </TabsContent>
+      </Tabs>
+    </div>
   )
 }
 
@@ -338,6 +350,7 @@ function GeneralSettings({ me }: { me: Me }) {
         </form>
       </Card>
       <UpdatesCard admin={admin} />
+      <DataCard admin={admin} />
     </div>
   )
 }

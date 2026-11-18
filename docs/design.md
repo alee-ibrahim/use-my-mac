@@ -265,6 +265,42 @@ A compromised router can hold updates back, or (only by pinning) roll Macs back 
 it cannot make them run unsigned code. The signing key lives only in the Actions secret and an offline
 backup.
 
+## Metrics history
+
+The Prometheus endpoint (`/metrics`) has the live gauges and counters for an external Prometheus. The
+dashboard's charts need history without one, so the router keeps its own, in the same database (SQLite or
+Postgres):
+
+- **Sampling.** Once a minute the router writes one row to `fleet_samples` (Macs by class, tasks running and
+  queued, and the counters since the last sample: assignments, attempt outcomes, task-seconds) and one row
+  per Mac to `mac_samples` (user CPU, our CPU, GPU, memory used, tasks running, online, yielded). Telemetry is
+  averaged over the heartbeats of that minute. Each Mac is in exactly one class: offline, draining (admin,
+  local opt-out or updating), yielded (yielding or cooldown), busy (running a task) or idle. Task-seconds are
+  tasks running × the time since the previous sample; "compute hours" is their sum.
+- **Rollup.** Rows are keyed by `(res, ts)` (plus the Mac): resolution 60 s and 900 s. After each sample the
+  15-minute bucket it falls in is recomputed from its 1-minute rows (gauges `AVG`, counters `SUM`, `n` = rows
+  merged), so rollups are always complete and recomputing one is harmless.
+- **Queries.** `GET /v1/metrics/fleet` and `/v1/metrics/macs/{id}` read 1-minute rows while the range starts
+  inside the 1-minute retention, else 15-minute rows, and merge buckets in SQL to the requested `step`
+  (default about 120 points, at most 1,500). Missing buckets come back as points with only `t`, so charts show
+  gaps where the router was down. `GET /v1/metrics/summary` sums the counters for 24 hours and 7 days, plus
+  what has not been sampled yet.
+- **Retention.** Defaults: 1-minute rows 24 hours (24 to 168), 15-minute rows 30 days, activity log 90 days,
+  finished jobs kept. The config file's `retention:` section sets the defaults; admins override them at
+  runtime (Settings or `PUT /v1/retention`). An hourly pass prunes metrics and events, deletes spent one-time
+  enrolment tokens and, when `jobs_days` is set, deletes jobs that finished longer ago (tasks, attempts, logs
+  and outputs in router storage). Size: one fleet row plus one row per Mac per minute; 100 Macs is about
+  145,000 rows a day at 1 minute (pruned to 24 hours) and about 290,000 rollup rows for 30 days.
+
+## Activity log and cleanup
+
+`events` holds notable fleet events (enrolments, yields, quarantines, failed or cancelled jobs, update
+results) and an audit trail of admin changes: keys created, revoked and deleted; Macs, jobs and install links
+deleted; bulk purges and retention changes, each with the acting subject. Deletes only remove leftovers: a
+key must be revoked first, an install link must be revoked, expired or used up, and a job must be finished
+(`409` otherwise). Deleting a Mac revokes its credential (the row with the credential hash is gone) and
+removes its metrics; its past attempts stay with their jobs.
+
 ## Failure modes
 
 | Failure | Detection | Handling |
@@ -289,8 +325,8 @@ running briefly). Tasks should be idempotent; outputs are overwritten per key.
 ## Scale and limits
 
 - One router replica (`Recreate` strategy). Live agent state is in memory and the database is the source of
-  truth. The tick reads all active tasks, which is fine for thousands of active tasks and tens to hundreds
-  of Macs.
+  truth. Metrics history adds one write transaction a minute. The tick reads all active tasks, which is fine
+  for thousands of active tasks and tens to hundreds of Macs.
 - SQLite uses one connection (WAL). Use Postgres for heavier use.
 - Long-poll requests hold for up to 30 s, so proxies need a longer timeout (the example HTTPRoute sets
   120 s for `/v1/agent/`).

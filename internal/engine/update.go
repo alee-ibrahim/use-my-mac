@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
@@ -121,6 +122,10 @@ func (e *Engine) UpdateReport(ctx context.Context, agentID string, r api.UpdateR
 		l.updDrainUntil = time.Time{}
 	}
 	e.mu.Unlock()
+	if event && (r.State == api.UpdateSucceeded || r.State == api.UpdateRolledBack || r.State == api.UpdateFailed) {
+		e.Audit(ctx, api.EventUpdate, "", agentID, "update "+r.FromVersion+" → "+r.ToVersion+": "+r.State+
+			strings.TrimSuffix(" ("+r.Message+")", " ()"))
+	}
 	if event {
 		e.log.Info("agent update", "agent", agentID, "state", r.State, "from", r.FromVersion, "to", r.ToVersion, "msg", r.Message)
 	}

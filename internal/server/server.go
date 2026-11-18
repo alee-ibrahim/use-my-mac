@@ -147,6 +147,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/install-tokens/{id}", s.need(roleAdmin, s.revokeInstallToken))
 	mux.HandleFunc("GET /v1/install-tokens/{id}/events", s.need(roleAdmin, s.installTokenEvents))
 
+	s.opsRoutes(mux)
+
 	// One-line install (no auth header: the token in the path is the secret).
 	mux.HandleFunc("GET /i/uninstall", s.uninstallScript)
 	mux.HandleFunc("GET /i/{token}", s.installScript)
@@ -205,6 +207,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, engine.ErrForbidden):
 		writeErr(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, engine.ErrActive):
+		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, engine.ErrStale):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, storage.ErrBadKey):
@@ -494,7 +498,7 @@ func (s *Server) patchMac(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteMac(w http.ResponseWriter, r *http.Request) {
-	if err := s.E.DeleteMac(r.Context(), r.PathValue("id")); err != nil {
+	if err := s.E.DeleteMacBy(r.Context(), r.PathValue("id"), actor(r)); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -538,6 +542,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.E.Audit(r.Context(), api.EventKeyCreated, actor(r), k.ID, "created "+k.Role+" API key "+k.Name)
 	writeJSON(w, http.StatusCreated, k)
 }
 
@@ -546,6 +551,7 @@ func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.E.Audit(r.Context(), api.EventKeyRevoked, actor(r), r.PathValue("id"), "revoked API key "+r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

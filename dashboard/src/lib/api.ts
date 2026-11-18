@@ -42,6 +42,7 @@ export type Mac = {
   telemetry?: Telemetry
   version?: string
   update?: MacUpdate
+  created_at?: string
 }
 
 export type MacUpdate = {
@@ -201,7 +202,8 @@ export const api = {
   deleteMac: (id: string) => request<void>("DELETE", `/v1/macs/${id}`),
   enrolToken: (ttl_hours: number) =>
     request<{ token: string; expires_at: string }>("POST", "/v1/enrolment-tokens", { ttl_hours }),
-  jobs: () => request<Job[]>("GET", "/v1/jobs?limit=200"),
+  jobs: (state = "", limit = 200) =>
+    request<Job[]>("GET", `/v1/jobs?limit=${limit}${state ? `&state=${state}` : ""}`),
   job: (id: string) => request<Job>("GET", `/v1/jobs/${id}`),
   cancelJob: (id: string) => request<Job>("POST", `/v1/jobs/${id}/cancel`),
   task: (id: string) => request<Task>("GET", `/v1/tasks/${id}`),
@@ -230,6 +232,33 @@ export const api = {
     request<void>("PUT", `/v1/access/users/${encodeURIComponent(subject)}/role`, { role }),
   accessAudit: () => request<AccessEvent[]>("GET", "/v1/access/audit?limit=200"),
   docs: () => request<DocInfo[]>("GET", "/v1/docs"),
+  // Operations: metrics history, activity log, retention, cleanup.
+  summary: () => request<Summary>("GET", "/v1/metrics/summary"),
+  fleetSeries: (range: string, step = 0) =>
+    request<Series>("GET", `/v1/metrics/fleet?range=${range}${step ? `&step=${step}` : ""}`),
+  macSeries: (id: string, range: string) =>
+    request<Series>("GET", `/v1/metrics/macs/${encodeURIComponent(id)}?range=${range}`),
+  macSparks: (window = "1h") => request<MacSparks>("GET", `/v1/metrics/macs?window=${window}`),
+  macAttempts: (id: string, limit = 100) =>
+    request<MacAttempt[]>("GET", `/v1/macs/${encodeURIComponent(id)}/attempts?limit=${limit}`),
+  jobTimeline: (id: string) => request<TimelineAttempt[]>("GET", `/v1/jobs/${encodeURIComponent(id)}/timeline`),
+  events: (q: { kind?: string; target?: string; limit?: number; before?: string } = {}) => {
+    const p = new URLSearchParams()
+    if (q.kind) p.set("kind", q.kind)
+    if (q.target) p.set("target", q.target)
+    if (q.before) p.set("before", q.before)
+    p.set("limit", String(q.limit ?? 50))
+    return request<OpsEvent[]>("GET", `/v1/events?${p}`)
+  },
+  retention: () => request<Retention>("GET", "/v1/retention"),
+  saveRetention: (r: Retention) => request<Retention>("PUT", "/v1/retention", r),
+  deleteKey: (id: string) => request<void>("POST", `/v1/api-keys/${id}/purge`),
+  purgeKeys: () => request<PurgeResult>("POST", "/v1/api-keys/purge"),
+  deleteInstallToken: (id: string) => request<void>("POST", `/v1/install-tokens/${id}/purge`),
+  purgeInstallTokens: () => request<PurgeResult>("POST", "/v1/install-tokens/purge"),
+  deleteJob: (id: string) => request<void>("DELETE", `/v1/jobs/${id}`),
+  purgeJobs: (older_than_days: number, states?: string[]) =>
+    request<PurgeResult>("POST", "/v1/jobs/purge", { older_than_days, states }),
   doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }
 
@@ -328,3 +357,70 @@ export type AccessUser = {
   source?: string
 }
 export type AccessEvent = { at: string; actor: string; action: string; detail: string }
+
+// Metrics history. Points carry "t" (bucket start, Unix ms) and, when the
+// bucket has data, the fields below.
+export type Point = { t: number } & Partial<Record<string, number>>
+export type Series = {
+  from: string
+  to: string
+  step_seconds: number
+  resolution_seconds: number
+  points: Point[]
+}
+export type MacSparks = { from: string; to: string; step_seconds: number; macs: Record<string, Point[]> }
+export type Window = {
+  succeeded: number
+  failed: number
+  timeout: number
+  yielded: number
+  lost: number
+  cancelled: number
+  assigned: number
+  compute_hours: number
+  success_rate: number // -1 when nothing finished
+}
+export type Summary = {
+  at: string
+  macs: Record<"total" | "online" | "busy" | "idle" | "yielded" | "draining" | "offline", number>
+  tasks: Record<"running" | "queued" | "blocked", number>
+  jobs: Record<"queued" | "running", number>
+  last_24h: Window
+  last_7d: Window
+  router_version: string
+  history_start?: string
+}
+export type OpsEvent = { id: string; at: string; kind: string; actor?: string; target?: string; message: string }
+export type Retention = {
+  jobs_days: number
+  events_days: number
+  metrics_raw_hours: number
+  metrics_rollup_days: number
+}
+export type PurgeResult = { deleted: number }
+export type TimelineAttempt = {
+  task_id: string
+  task_key: string
+  attempt: number
+  agent_id: string
+  agent_name?: string
+  started_at: string
+  finished_at?: string
+  outcome: string
+  error?: string
+  score: number
+}
+export type MacAttempt = TimelineAttempt & { job_id: string; job_name: string }
+
+export const terminal = (state: string) => ["succeeded", "failed", "cancelled"].includes(state)
+
+// compact formats 1,284 / 12.9K / 4.2M.
+export function compact(n: number | undefined): string {
+  if (n === undefined || Number.isNaN(n)) return "–"
+  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)
+}
+
+export function percent(ratio: number | undefined): string {
+  if (ratio === undefined || ratio < 0) return "–"
+  return `${(ratio * 100).toFixed(ratio >= 0.995 || ratio === 0 ? 0 : 1)}%`
+}
