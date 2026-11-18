@@ -1,8 +1,8 @@
 #!/bin/sh
 # umm fleet install (root-owned; run via `sudo -n .../install <stage>`).
-# Idempotent: safe to re-run. Installs/updates the agent, writes config only if
-# absent, enrols with a one-time token read from a staged root-only file (never
-# argv/env), and (re)loads the LaunchDaemon.
+# Idempotent: safe to re-run. Installs/updates the agent, writes or updates the
+# config (never over a local edit), enrols with a one-time token read from a
+# staged root-only file (never argv/env), and (re)loads the LaunchDaemon.
 set -eu
 
 STAGE="${1:?usage: install <stage-dir>}"
@@ -58,11 +58,31 @@ if [ ! -f "$ETC/credential" ]; then
   chmod 0600 "$ETC/credential"
 fi
 
-# --- config (only if absent, so a local edit is never clobbered) ----------
+# --- config ----------------------------------------------------------------
+# fleet records the checksum of every agent.yaml it writes. A re-run replaces
+# the config when the inventory changed AND the file on the Mac is still the
+# one fleet wrote; a local edit is never clobbered unless -replace-config.
+SUM="$ETC/agent.yaml.fleet-sha256"
+sha() { shasum -a 256 "$1" | awk '{print $1}'; }
+write_config() {
+  install -m 0640 -o root -g "$SVC_USER" "$STAGE/agent.yaml" "$ETC/agent.yaml"
+  sha "$ETC/agent.yaml" > "$SUM"
+  chmod 0644 "$SUM"
+}
 if [ ! -f "$ETC/agent.yaml" ]; then
   [ -f "$STAGE/agent.yaml" ] || die "no $ETC/agent.yaml and none staged"
-  install -m 0640 -o root -g "$SVC_USER" "$STAGE/agent.yaml" "$ETC/agent.yaml"
+  write_config
   echo "wrote $ETC/agent.yaml"
+elif [ -f "$STAGE/agent.yaml" ]; then
+  cur="$(sha "$ETC/agent.yaml")"
+  if [ "$cur" = "$(sha "$STAGE/agent.yaml")" ]; then
+    [ -f "$SUM" ] || sha "$ETC/agent.yaml" > "$SUM"   # adopt an identical file
+  elif [ -f "$STAGE/replace-config" ] || { [ -f "$SUM" ] && [ "$(cat "$SUM")" = "$cur" ]; }; then
+    write_config
+    echo "updated $ETC/agent.yaml"
+  else
+    echo "warning: kept $ETC/agent.yaml (edited on this Mac, or written before fleet tracked it); re-run install with -replace-config to apply the inventory" >&2
+  fi
 fi
 
 # --- launchd plist --------------------------------------------------------
@@ -79,9 +99,23 @@ if [ ! -s "$ETC/credential" ]; then
 fi
 
 # --- (re)load -------------------------------------------------------------
+# Re-running against a loaded daemon: bootout can return before launchd has
+# torn the job down, and Background Task Management may briefly reject the
+# re-registration ("invalid record generation"). Either makes bootstrap fail
+# with "5: Input/output error", leaving the agent stopped. Wait for the old job
+# to go, then retry bootstrap a few times.
 launchctl bootout "system/${LABEL}" 2>/dev/null || true
+i=0
+while launchctl print "system/${LABEL}" >/dev/null 2>&1; do
+  i=$((i + 1)); [ "$i" -le 100 ] || die "previous ${LABEL} did not stop"
+  sleep 0.2
+done
 if [ -s "$ETC/credential" ]; then
-  launchctl bootstrap system "$PLIST"
+  n=0
+  until launchctl bootstrap system "$PLIST"; do
+    n=$((n + 1)); [ "$n" -lt 5 ] || die "launchctl bootstrap ${LABEL} failed"
+    sleep 1
+  done
   echo "installed: ${LABEL} running"
 else
   echo "installed: ${LABEL} NOT started (no credential)"

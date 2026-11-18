@@ -36,6 +36,7 @@ Flags:
   -admin-key-env NAME        env var NAME holding the router admin API key
   -ttl-hours N               enrolment token lifetime (default 24)
   -purge                     uninstall: also remove config, credential, user, sudoers
+  -replace-config            install: overwrite agent.yaml even if it was edited on the Mac
 
 Secrets are never passed on the command line. The SSH key is a path (or ssh-agent);
 the sudo password and admin key come from a file, a named env var, or a no-echo prompt.
@@ -71,6 +72,7 @@ func fleetCmd(ctx context.Context, args []string) error {
 	adminKeyEnv := fs.String("admin-key-env", "", "env var NAME with the router admin API key")
 	ttl := fs.Int("ttl-hours", 24, "enrolment token lifetime")
 	purge := fs.Bool("purge", false, "uninstall: also remove config/credential/user/sudoers")
+	replaceConfig := fs.Bool("replace-config", false, "install: overwrite agent.yaml even if edited on the Mac")
 	only := parseFlags(fs, args[1:])
 
 	inv, err := fleet.LoadInventory(*invPath)
@@ -111,6 +113,7 @@ func fleetCmd(ctx context.Context, args []string) error {
 		Bundle:        bundleDir,
 		EnrolTTLHours: *ttl,
 		Purge:         *purge,
+		ReplaceConfig: *replaceConfig,
 		Concurrency:   *conc,
 		SSH:           fleet.SSHOptions{Signers: signers, HostKey: hostKey, Timeout: 20 * time.Second},
 	}
