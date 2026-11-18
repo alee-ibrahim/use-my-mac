@@ -102,6 +102,23 @@ sudo UMM_SERVER=https://umm.example.com sh install.sh
 admin rights on the Mac can pause it with `sudo touch /usr/local/etc/umm/paused`. Check what the agent sees
 with `umm-agent telemetry`.
 
+### Add many Macs (`umm fleet`)
+
+To roll out across a fleet from an admin workstation (Windows, macOS or Linux) over SSH, without touching
+each Mac by hand, use `umm fleet`. It reads a YAML inventory, installs a narrowly-scoped sudoers drop-in once
+per Mac (`bootstrap`), then installs/enrols/upgrades/removes agents in parallel. Agents never get SSH keys,
+and no secret is ever passed on the command line.
+
+```sh
+make agent-darwin                                           # build the bundle
+umm fleet bootstrap -inventory fleet.yaml -sudo-password-file ~/.umm/sudo.txt   # one-time, per Mac
+umm fleet install   -inventory fleet.yaml -admin-key-file ~/.umm/admin.key      # install + enrol + verify
+umm fleet status    -inventory fleet.yaml
+```
+
+Details, security model and the quiet-install notes are in [docs/fleet.md](docs/fleet.md). Example inventory:
+[`deploy/mac/fleet.example.yaml`](deploy/mac/fleet.example.yaml).
+
 ### Submit work
 
 ```yaml
@@ -163,7 +180,8 @@ Authenticate with `Authorization: Bearer umm_key_...`.
 | SQLite and Postgres stores | tests (Postgres in CI) |
 | macOS collectors (`ioreg`, `ps`, `vm_stat`, `pmset`, `sysctl`, `df`) | checked field by field against the tools on a Mac Studio (M3 Ultra, macOS 27); real output kept as test fixtures |
 | Agent + router on a Mac as the logged-in user: enrolment, map/reduce video encode with `hevc_videotoolbox` under `taskpolicy -b`, yield on real user CPU load, requeue, cooldown, re-run | trialled on one Mac |
-| `install.sh`, LaunchDaemon, `_umm` user, `sandbox-exec`, VideoToolbox from a daemon user | **not yet run on a Mac** |
+| `umm fleet`: inventory parsing, sudoers rendering, secret handling (no secrets in argv/logs); SSH transport, sftp staging, sudo-over-stdin, real `visudo -cf` validation and NOPASSWD scoping against an OpenSSH container | unit + integration tests (Docker) |
+| `install.sh`, `umm fleet` on a real Mac, LaunchDaemon, `_umm` user, `sandbox-exec`, VideoToolbox from a daemon user | **not yet run on a Mac** |
 | OIDC login against a live Entra tenant | **not yet tested** |
 
 ## Contributing

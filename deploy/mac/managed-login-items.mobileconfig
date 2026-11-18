@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  EXAMPLE MDM profile: suppress the "Background Items Added" notification for
+  the use-my-mac agent's LaunchDaemon.
+
+  macOS 13+ shows every logged-in user a "Background Items Added" notification
+  (and a Login Items / Background Task Management entry) the first time a new
+  LaunchDaemon appears. Nothing a daemon does from its own side can prevent
+  that. Only an MDM-delivered managed-login-items profile
+  (com.apple.servicemanagement) reliably marks the item as managed and
+  suppresses the notification.
+
+  Deliver this with your MDM (Jamf, Kandji, Intune, etc.). It has NO effect if
+  merely double-clicked or installed by hand on a modern, supervised Mac.
+
+  Edit before use:
+    * PayloadUUID / PayloadIdentifier: generate fresh UUIDs and your own
+      reverse-DNS identifiers.
+    * TeamIdentifier: the Apple Developer Team ID the umm-agent binary is
+      signed and notarised with (`codesign -dvvv` -> "TeamIdentifier").
+    * LabelPrefix: match the LaunchDaemon label you deploy. The default is
+      "io.github.alee-ibrahim.umm-agent"; if you set a neutral service_label
+      in the inventory (e.g. "com.example.helper"), use that prefix instead.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadDisplayName</key>
+  <string>use-my-mac agent (managed login items)</string>
+  <key>PayloadIdentifier</key>
+  <string>com.example.umm.managed-login-items</string>
+  <key>PayloadUUID</key>
+  <string>REPLACE-WITH-A-FRESH-UUID-0001</string>
+  <key>PayloadScope</key>
+  <string>System</string>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key>
+      <string>com.apple.servicemanagement</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadIdentifier</key>
+      <string>com.example.umm.managed-login-items.service</string>
+      <key>PayloadUUID</key>
+      <string>REPLACE-WITH-A-FRESH-UUID-0002</string>
+      <key>PayloadDisplayName</key>
+      <string>Allowed background items</string>
+      <key>Rules</key>
+      <array>
+        <dict>
+          <key>RuleType</key>
+          <string>LabelPrefix</string>
+          <key>RuleValue</key>
+          <string>io.github.alee-ibrahim.umm-agent</string>
+          <key>Comment</key>
+          <string>use-my-mac agent LaunchDaemon</string>
+        </dict>
+        <dict>
+          <key>RuleType</key>
+          <string>TeamIdentifier</string>
+          <key>RuleValue</key>
+          <string>REPLACEME10</string>
+          <key>Comment</key>
+          <string>Signing team for the umm-agent binary</string>
+        </dict>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>
