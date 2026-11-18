@@ -44,6 +44,8 @@ Commands:
   install-tokens list | log ID | revoke ID   one-line install links (admin)
   enrol [-ttl-hours N]           mint a one-time enrolment token for a new Mac (admin)
   keys list | create NAME [-role app|viewer|admin] | revoke ID   (admin)
+  access rules | users | set group|user VALUE ROLE | user SUBJECT ROLE|none | rm ID | default deny|viewer | name GROUP NAME | log
+                                 dashboard roles for single-sign-on users (admin)
   fleet SUBCMD [flags] [HOST...] install/manage the agent across Macs over SSH (admin)
 `
 
@@ -202,6 +204,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		return enrolCommand(ctx, c, args)
 	case "install-tokens":
 		return installTokens(ctx, c, args)
+	case "access":
+		return accessCmd(ctx, c, args)
 	}
 	fmt.Fprint(os.Stderr, usage)
 	return fmt.Errorf("unknown command %q", cmd)

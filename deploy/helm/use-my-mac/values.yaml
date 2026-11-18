@@ -42,9 +42,10 @@ oidc:
   tenantID: ""
   issuer: "" # required when preset is ""
   clientID: ""
+  # Config rules: locked in the dashboard; admins add more under Settings > Access (stored in the database).
   adminGroups: []
   viewerGroups: []
-  defaultRole: ""
+  defaultRole: "" # "" = deny users no rule matches; "viewer" = read-only for everyone who can sign in
   domainHint: "" # sent as domain_hint on the authorize request
   prompt: "" # e.g. select_account
 

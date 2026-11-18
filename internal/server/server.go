@@ -20,6 +20,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/alee-ibrahim/use-my-mac/internal/access"
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/internal/engine"
 	"github.com/alee-ibrahim/use-my-mac/internal/metrics"
@@ -34,6 +35,9 @@ type Server struct {
 	Metrics    *metrics.M
 	SessionKey []byte
 	OIDC       *auth.OIDC // nil when SSO is not configured
+	// Access decides SSO users' roles (config rules + dashboard rules).
+	// Built from the OIDC config when nil.
+	Access *access.Manager
 	// APIKeyLogin allows exchanging an API key for a dashboard session
 	// (POST /auth/apikey). Bearer API keys work regardless.
 	APIKeyLogin bool
@@ -81,6 +85,13 @@ func (s *Server) Handler() http.Handler {
 	if s.MaxUploadBytes == 0 {
 		s.MaxUploadBytes = 20 << 30
 	}
+	if s.Access == nil && s.E != nil {
+		var cfg access.Config
+		if s.OIDC != nil {
+			cfg = access.ConfigFromOIDC(s.OIDC.Cfg)
+		}
+		s.Access = access.New(s.E.Store(), cfg, s.Now, s.Log)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	if s.Metrics != nil {
@@ -122,6 +133,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/updates", s.need(roleAdmin, s.putUpdates))
 	mux.HandleFunc("PUT /v1/updates/artifacts/{version}/{file}", s.need(roleAdmin, s.putArtifact))
 	mux.HandleFunc("GET /v1/macs/{id}/updates", s.need(roleRead, s.macUpdateEvents))
+	mux.HandleFunc("GET /v1/access", s.need(roleAdmin, s.getAccess))
+	mux.HandleFunc("POST /v1/access/rules", s.need(roleAdmin, s.putAccessRule))
+	mux.HandleFunc("DELETE /v1/access/rules/{id}", s.need(roleAdmin, s.deleteAccessRule))
+	mux.HandleFunc("PUT /v1/access/default", s.need(roleAdmin, s.putAccessDefault))
+	mux.HandleFunc("PUT /v1/access/groups/{id}", s.need(roleAdmin, s.putAccessGroupName))
+	mux.HandleFunc("GET /v1/access/users", s.need(roleAdmin, s.accessUsers))
+	mux.HandleFunc("PUT /v1/access/users/{sub}/role", s.need(roleAdmin, s.putAccessUserRole))
+	mux.HandleFunc("GET /v1/access/audit", s.need(roleAdmin, s.accessAudit))
 	mux.HandleFunc("GET /v1/install/profiles", s.need(roleAdmin, s.installProfiles))
 	mux.HandleFunc("GET /v1/install-tokens", s.need(roleAdmin, s.listInstallTokens))
 	mux.HandleFunc("POST /v1/install-tokens", s.need(roleAdmin, s.createInstallToken))
@@ -265,7 +284,23 @@ func (s *Server) identify(r *http.Request) (*identity, int) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("X-UMM-CSRF") != "1" {
 		return nil, http.StatusForbidden
 	}
-	return &identity{Subject: sess.Subject, Name: sess.Name, Role: sess.Role, Via: sess.Via}, 0
+	role := sess.Role
+	if sess.Via == "oidc" && s.Access != nil {
+		// Re-evaluate on every request so role changes apply at once. A
+		// session from before roles were tracked has no user record: sign in
+		// again (auto sign-in makes that seamless).
+		sub, _ := strings.CutPrefix(sess.Subject, "user:")
+		d, known, err := s.Access.Resolve(r.Context(), sub)
+		if err != nil {
+			s.Log.Error("access resolve", "err", err)
+			return nil, http.StatusServiceUnavailable
+		}
+		if !known || d.Denied() {
+			return nil, http.StatusUnauthorized
+		}
+		role = d.Role
+	}
+	return &identity{Subject: sess.Subject, Name: sess.Name, Role: role, Via: sess.Via}, 0
 }
 
 func (s *Server) need(check roleCheck, h http.HandlerFunc) http.HandlerFunc {

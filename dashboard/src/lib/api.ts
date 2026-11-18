@@ -219,6 +219,16 @@ export const api = {
   createInstallToken: (r: InstallTokenRequest) => request<InstallToken>("POST", "/v1/install-tokens", r),
   revokeInstallToken: (id: string) => request<void>("DELETE", `/v1/install-tokens/${id}`),
   installEvents: (id: string) => request<InstallEvent[]>("GET", `/v1/install-tokens/${id}/events`),
+  access: () => request<AccessPolicy>("GET", "/v1/access"),
+  putAccessRule: (r: AccessRuleRequest) => request<AccessRule>("POST", "/v1/access/rules", r),
+  deleteAccessRule: (id: string) => request<void>("DELETE", `/v1/access/rules/${encodeURIComponent(id)}`),
+  setAccessDefault: (role: string) => request<AccessPolicy>("PUT", "/v1/access/default", { role }),
+  setGroupName: (id: string, name: string) =>
+    request<void>("PUT", `/v1/access/groups/${encodeURIComponent(id)}`, { name }),
+  accessUsers: () => request<AccessUser[]>("GET", "/v1/access/users"),
+  setUserRole: (subject: string, role: string) =>
+    request<void>("PUT", `/v1/access/users/${encodeURIComponent(subject)}/role`, { role }),
+  accessAudit: () => request<AccessEvent[]>("GET", "/v1/access/audit?limit=200"),
   docs: () => request<DocInfo[]>("GET", "/v1/docs"),
   doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }
@@ -280,3 +290,41 @@ export type InstallEvent = { at: string; kind: string; ip?: string; agent_id?: s
 
 // An embedded documentation page (public, served at /docs).
 export type DocInfo = { slug: string; title: string; path: string }
+
+// Dashboard access: role rules for single-sign-on users.
+export type AccessRule = {
+  id: string
+  kind: "group" | "user"
+  value: string
+  role: "admin" | "viewer"
+  name?: string
+  source: "config" | "ui"
+  locked: boolean
+  created_by?: string
+  created_at?: string
+  updated_at?: string
+}
+export type AccessRuleRequest = { kind: string; value: string; role: string; name?: string }
+export type AccessPolicy = {
+  default_role: string
+  config_default_role: string
+  ui_default_role: string
+  rules: AccessRule[]
+  group_names: Record<string, string>
+  oidc: boolean
+}
+export type AccessUser = {
+  subject: string
+  name: string
+  email?: string
+  upn?: string
+  oid?: string
+  groups: string[]
+  first_login: string
+  last_login: string
+  role: string
+  reason: string
+  rule_id?: string
+  source?: string
+}
+export type AccessEvent = { at: string; actor: string; action: string; detail: string }

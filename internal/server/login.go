@@ -1,13 +1,13 @@
 package server
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/alee-ibrahim/use-my-mac/internal/access"
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
@@ -144,18 +144,31 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		s.loginFailed(w, r, http.StatusUnauthorized, "exchange", st.Return)
 		return
 	}
-	role, err := s.OIDC.Cfg.MapRole(claims)
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		s.loginFailed(w, r, http.StatusUnauthorized, "exchange", st.Return)
+		return
+	}
+	groups, overage := s.OIDC.Cfg.GroupValues(claims)
+	name := s.OIDC.Cfg.DisplayName(claims)
+	d, err := s.Access.RecordLogin(r.Context(), access.User{Sub: sub, Name: name,
+		Email: auth.ClaimString(claims, "email"), UPN: auth.ClaimString(claims, "upn", "preferred_username"),
+		OID: auth.ClaimString(claims, "oid"), Groups: groups, Overage: overage})
 	if err != nil {
+		s.Log.Error("record login", "err", err)
+		s.loginFailed(w, r, http.StatusInternalServerError, "exchange", st.Return)
+		return
+	}
+	if d.Denied() {
 		reason := "forbidden"
-		if errors.Is(err, auth.ErrGroupOverage) {
-			s.Log.Warn("oidc groups overage", "sub", claims["sub"])
+		if overage {
+			s.Log.Warn("oidc groups overage", "sub", sub)
 			reason = "overage"
 		}
 		s.loginFailed(w, r, http.StatusForbidden, reason, st.Return)
 		return
 	}
-	sub, _ := claims["sub"].(string)
-	sess := auth.Session{Subject: "user:" + sub, Name: s.OIDC.Cfg.DisplayName(claims), Role: role, Via: "oidc",
+	sess := auth.Session{Subject: "user:" + sub, Name: name, Role: d.Role, Via: "oidc",
 		Expires: s.Now().Add(sessionTTL).Unix()}
 	s.setCookie(w, sessionCookie, auth.SignSession(s.SessionKey, sess), sessionTTL)
 	s.setCookie(w, autoCookie, "", -time.Second)

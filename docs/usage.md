@@ -40,7 +40,46 @@ umm keys create reporting -role viewer
 The key is shown once. Keep it in a secret store or a file, never on a command line or in a repo.
 
 The dashboard uses single sign-on (OIDC) when the router has it configured; admin and viewer roles come
-from your groups. Admin and viewer API keys can also sign in to the dashboard. App keys cannot.
+from your groups and the rules admins manage under **Settings > Access** (see
+[Dashboard roles](#dashboard-roles)). Admin and viewer API keys can also sign in to the dashboard when
+API-key sign-in is allowed. App keys cannot.
+
+### Dashboard roles
+
+Who gets which role after single sign-on comes from two sets of rules:
+
+- **Config rules** (`oidc.admin_groups`, `oidc.viewer_groups`, `oidc.default_role` in the router config or
+  Helm values). They are shown as locked "from config" and cannot be changed or removed in the dashboard.
+  A config group's role is a floor: no dashboard rule can lower it, so the configured admins can never be
+  locked out.
+- **Dashboard rules**, added by admins under **Settings > Access** or with `umm access`. They map a group
+  ID (or app-role value) or a user (subject, object ID, email or UPN) to `admin` or `viewer`, and set the
+  default role for everyone else (`deny` or `viewer`).
+
+Precedence: a **user rule** beats **group rules** (the highest role among matching groups wins), which beat
+the **default role**. The default is the higher of the config and dashboard defaults. Config group roles
+are applied last as a floor.
+
+Roles are re-evaluated on every request, so a change applies on the user's next click; no sign-out is
+needed. Group membership is as of the user's last sign-in. The **Users** list shows everyone who signed in
+(including people who were turned away), when, their effective role and which rule decided it; pick a role
+there to give that person their own user rule. An admin cannot remove their own admin role if no other
+signed-in user would still be admin. Every change is written to an audit log (who, when, what).
+
+With `default_role: viewer` everyone who can sign in sees the dashboard read-only. To limit who can sign in
+at all, require assignment on the identity provider's app (Microsoft Entra ID: Enterprise applications >
+the app > Properties > **Assignment required** = Yes, then assign the users or groups).
+
+```sh
+umm access rules                                  # config (locked) and dashboard rules, default role
+umm access users                                  # who signed in: role and why
+umm access set group 0000aaaa-... admin -name Ops # group rule (with a display name)
+umm access set user someone@example.com viewer    # user rule by email/UPN/subject/object ID
+umm access user SUBJECT admin|viewer|none         # a signed-in user's own rule (none removes it)
+umm access default deny|viewer
+umm access rm RULE_ID
+umm access log                                    # audit log
+```
 
 ## Install the CLI
 
@@ -68,6 +107,7 @@ umm macs                            # quick check
 | `umm drain MAC [-off]` | stop sending new work to a Mac (admin) |
 | `umm enrol [-ttl-hours N]` | one-time enrolment token for a new Mac (admin) |
 | `umm keys list` / `create NAME [-role R]` / `revoke ID` | API keys (admin) |
+| `umm access rules` / `users` / `set` / `user` / `rm` / `default` / `name` / `log` | dashboard roles for single-sign-on users (admin), see [Dashboard roles](#dashboard-roles) |
 | `umm fleet ...` | install and manage agents over SSH (admin), see [Fleet install](fleet.md) |
 
 ## Submit a job
@@ -263,6 +303,14 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/install-tokens` | admin | install links, newest first (no secrets) |
 | `DELETE /v1/install-tokens/{id}` | admin | revoke an install link |
 | `GET /v1/install-tokens/{id}/events` | admin | an install link's audit log |
+| `GET /v1/access` | admin | dashboard role rules (config rules `locked`), default role, group names |
+| `POST /v1/access/rules` | admin | add or change a rule: `{kind: group\|user, value, role: admin\|viewer, name?}` |
+| `DELETE /v1/access/rules/{id}` | admin | remove a dashboard rule (`403` for config rules) |
+| `PUT /v1/access/default` | admin | `{"role": "deny"\|"viewer"}` for users no rule matches |
+| `PUT /v1/access/groups/{id}` | admin | `{"name": "..."}` display name for a group ID (`""` removes it) |
+| `GET /v1/access/users` | admin | people who signed in: last sign-in, effective role, reason, deciding rule |
+| `PUT /v1/access/users/{subject}/role` | admin | `{"role": "admin"\|"viewer"\|""}` a user's own rule (`""` removes it) |
+| `GET /v1/access/audit?limit=` | admin | role-change audit log, newest first |
 | `GET /i/{token}`, `GET /i/uninstall` | the token / public | one-line install and uninstall scripts |
 | `PUT /v1/updates/artifacts/{version}/{file}` | admin | seed the relay cache (routers without internet) |
 | `GET /v1/docs`, `GET /v1/docs/{slug}` | public | these docs (index, raw Markdown) |
@@ -419,6 +467,8 @@ the Macs check the signature themselves.
 | Task keeps moving between Macs | attempts with outcome `yielded` | the Macs' users are busy. Normal; it runs when a Mac is quiet. Long tasks prefer idle Macs if you set `expected_seconds` |
 | Task `failed` | `umm logs TASK` (all attempts) | the program exited non-zero, timed out, or did not write a declared output to `out/NAME` |
 | `401 Unauthorized` | the key | missing, mistyped or revoked key; the header must be `Authorization: Bearer umm_key_...` |
+| Signed in but sent back to sign-in, or "not allowed" | **Settings > Access > Users** (an admin) | no rule gives you a role and the default is `deny`, or a rule was just removed; roles apply on the next request |
+| `409` changing a role | the error text | the change would remove your own admin role with no other admin left |
 | `403` | the error text names your role | an app key used for an admin call, or a viewer trying to change something |
 | `400` on submit | the error text | unknown field, duplicate task key, cycle, an input with no or several sources, or a disallowed `env` name |
 | Mac shows offline | `umm-agent telemetry` and the agent log on the Mac | network or proxy to the router, a revoked credential, or the daemon is not loaded |

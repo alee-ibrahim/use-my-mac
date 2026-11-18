@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alee-ibrahim/use-my-mac/internal/access"
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/internal/engine"
 	"github.com/alee-ibrahim/use-my-mac/internal/storage"
@@ -259,6 +260,12 @@ func TestAutoSignIn(t *testing.T) {
 		t.Fatalf("guarded /: %d", w.Code)
 	}
 	// Signed in: the dashboard is served.
+	if _, err := e.srv.Access.PutRule(context.Background(), "key:test", "", api.AccessRuleRequest{Kind: "user", Value: "u", Role: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.srv.Access.RecordLogin(context.Background(), access.User{Sub: "u", Name: "U"}); err != nil {
+		t.Fatal(err)
+	}
 	sess := auth.SignSession(e.srv.SessionKey, auth.Session{Subject: "user:u", Role: api.RoleViewer, Via: "oidc",
 		Expires: time.Now().Add(time.Hour).Unix()})
 	w = e.do("GET", "/", "", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess}) })
