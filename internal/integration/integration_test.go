@@ -142,7 +142,8 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &server.Server{E: eng, Log: logger, Metrics: m, SessionKey: []byte("session-key-session-key-session!"), PollWaitMax: time.Second}
+	srv := &server.Server{E: eng, Log: logger, Metrics: m, SessionKey: []byte("session-key-session-key-session!"), PollWaitMax: time.Second,
+		APIKeyLogin: true}
 	h = srv.Handler()
 	go eng.Run(ctx)
 

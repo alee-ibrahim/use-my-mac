@@ -30,7 +30,12 @@ data:
       admin_groups: {{ .Values.oidc.adminGroups | toJson }}
       viewer_groups: {{ .Values.oidc.viewerGroups | toJson }}
       default_role: {{ .Values.oidc.defaultRole | quote }}
+      domain_hint: {{ .Values.oidc.domainHint | default "" | quote }}
+      prompt: {{ .Values.oidc.prompt | default "" | quote }}
     {{- end }}
+    auth:
+      dashboard_api_key_login: {{ .Values.auth.dashboardAPIKeyLogin | default "auto" | toString | quote }}
+      auto_sign_in: {{ ne (toString .Values.auth.autoSignIn) "false" }}
     {{- with .Values.scheduler }}
     scheduler: {{- toYaml . | nindent 6 }}
     {{- end }}

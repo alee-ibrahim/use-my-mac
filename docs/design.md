@@ -135,8 +135,14 @@ inputs `from: {task, output}` resolve to the producing task's output URL at disp
   `default_role: viewer`. Microsoft Entra ID **groups overage** (no groups in the token) is detected and
   refused with a clear error. Use app roles, or "groups assigned to the application". Sessions are
   HMAC-signed, HttpOnly, SameSite=Lax cookies (Secure behind HTTPS). Cookie-authenticated writes require an
-  `X-UMM-CSRF` header. API-key sign-in exists for setups without SSO and as break-glass access (admin and
-  viewer keys only).
+  `X-UMM-CSRF` header. With OIDC configured, a signed-out browser on any dashboard route goes straight to
+  the provider (optional `domain_hint`/`prompt`) and returns to the page it asked for; return targets are
+  same-origin paths only. A short guard cookie stops redirect loops, a failed callback lands on an error
+  page with "Try again", and sign-out lands on a signed-out page. `/docs` stays public.
+- **Dashboard API-key sign-in** (`auth.dashboard_api_key_login`): `auto` (default) allows it only when OIDC
+  is not configured; `true` keeps it alongside OIDC as break-glass (at `/login`); `false` never. Admin and
+  viewer keys only. Turning it off also invalidates existing API-key browser sessions. Bearer API keys for
+  the REST API, the CLI and apps are not affected. `GET /auth/config` reports the effective setting.
 - **Secrets are never in argv or config files.** The server reads `UMM_SECRET_KEY`,
   `UMM_DATABASE_URL`, `UMM_OIDC_CLIENT_SECRET`, `UMM_S3_*` and `UMM_BOOTSTRAP_ADMIN_KEY` from the
   environment. The agent reads its credential from a file or `UMM_AGENT_CREDENTIAL`, and the enrolment

@@ -21,10 +21,10 @@ import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { api, ApiError, type Me } from "@/lib/api"
+import { api, type AuthConfig, type Me } from "@/lib/api"
 import { JobsPage } from "@/pages/jobs"
 import { KeysPage } from "@/pages/keys"
-import { Login } from "@/pages/login"
+import { Login, SignedOut, SigninError } from "@/pages/login"
 import { MacsPage } from "@/pages/macs"
 import { SettingsPage } from "@/pages/settings"
 
@@ -49,23 +49,29 @@ function ThemeToggle() {
 
 export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined)
+  const [cfg, setCfg] = useState<AuthConfig>()
   const [page, setPage] = useState<Page>(() => {
     const h = location.hash.slice(1) as Page
     return pages.some((p) => p.id === h) ? h : "macs"
   })
 
   useEffect(() => {
-    api.me().then(setMe, (e) => {
-      if (e instanceof ApiError && e.status === 401) setMe(null)
-      else setMe(null)
-    })
+    api.me().then(setMe, () => setMe(null))
+    api.authConfig().then(setCfg, () => setCfg({ oidc: false, apikey: true, auto_sign_in: false }))
   }, [])
+
+  // Signed in on one of the sign-in pages (e.g. after "back"): go home.
+  useEffect(() => {
+    if (me && me.role !== "app" && ["/login", "/signed-out", "/signin-error"].includes(location.pathname)) {
+      history.replaceState(null, "", "/" + location.hash)
+    }
+  }, [me])
 
   useEffect(() => {
     location.hash = page
   }, [page])
 
-  if (me === undefined) {
+  if (me === undefined || (!me && !cfg)) {
     return (
       <div className="flex min-h-svh items-center justify-center">
         <Spinner />
@@ -75,7 +81,13 @@ export function App() {
   if (me === null || me.role === "app") {
     return (
       <>
-        <Login onLogin={setMe} />
+        {location.pathname === "/signin-error" ? (
+          <SigninError cfg={cfg!} />
+        ) : location.pathname === "/signed-out" && cfg!.oidc ? (
+          <SignedOut cfg={cfg!} />
+        ) : (
+          <Login cfg={cfg!} onLogin={setMe} />
+        )}
         <Toaster />
       </>
     )
@@ -123,7 +135,7 @@ export function App() {
               <SidebarMenuItem>
                 <SidebarMenuButton
                   tooltip="Sign out"
-                  onClick={() => api.logout().finally(() => setMe(null))}
+                  onClick={() => api.logout().finally(() => location.assign("/signed-out"))}
                 >
                   <LogOutIcon />
                   <span className="truncate">Sign out {me.name}</span>

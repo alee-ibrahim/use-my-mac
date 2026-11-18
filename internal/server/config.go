@@ -29,6 +29,7 @@ type Config struct {
 
 	Storage StorageConfig   `yaml:"storage"`
 	OIDC    auth.OIDCConfig `yaml:"oidc"`
+	Auth    AuthConfig      `yaml:"auth"`
 
 	Scheduler engine.Config `yaml:"scheduler"`
 
@@ -39,6 +40,35 @@ type Config struct {
 	// Filled from the environment.
 	SecretKey         string `yaml:"-"`
 	BootstrapAdminKey string `yaml:"-"`
+}
+
+// AuthConfig controls how people sign in to the dashboard. API keys always
+// work as Bearer tokens for the REST API, the CLI and agents; these settings
+// only affect browser sessions.
+type AuthConfig struct {
+	// DashboardAPIKeyLogin allows exchanging an API key for a dashboard
+	// session: "auto" (default) = only when OIDC is not configured, "true" =
+	// always (break-glass alongside OIDC), "false" = never.
+	DashboardAPIKeyLogin string `yaml:"dashboard_api_key_login"`
+	// AutoSignIn sends signed-out browsers straight to the OIDC provider
+	// instead of showing a login page. Default true; ignored without OIDC.
+	AutoSignIn *bool `yaml:"auto_sign_in"`
+}
+
+// APIKeyLoginAllowed resolves DashboardAPIKeyLogin for the given OIDC state.
+func (a AuthConfig) APIKeyLoginAllowed(oidc bool) bool {
+	switch strings.ToLower(strings.TrimSpace(a.DashboardAPIKeyLogin)) {
+	case "true", "yes", "on":
+		return true
+	case "false", "no", "off":
+		return false
+	}
+	return !oidc
+}
+
+// AutoSignInEnabled resolves AutoSignIn for the given OIDC state.
+func (a AuthConfig) AutoSignInEnabled(oidc bool) bool {
+	return oidc && (a.AutoSignIn == nil || *a.AutoSignIn)
 }
 
 // StorageConfig selects the blob backend.
@@ -106,6 +136,11 @@ func (c *Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("unknown storage backend %q", c.Storage.Backend)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Auth.DashboardAPIKeyLogin)) {
+	case "", "auto", "true", "false", "yes", "no", "on", "off":
+	default:
+		return fmt.Errorf("auth.dashboard_api_key_login must be auto, true or false, not %q", c.Auth.DashboardAPIKeyLogin)
 	}
 	if c.OIDC.Enabled() && c.OIDC.RedirectURL == "" {
 		c.OIDC.RedirectURL = c.PublicURL + "/auth/callback"

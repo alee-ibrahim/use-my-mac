@@ -162,6 +162,9 @@ func serve(args []string) error {
 		srv.OIDC = o
 		log.Info("oidc enabled", "issuer", o.Cfg.Issuer)
 	}
+	srv.APIKeyLogin = cfg.Auth.APIKeyLoginAllowed(srv.OIDC != nil)
+	srv.AutoSignIn = cfg.Auth.AutoSignInEnabled(srv.OIDC != nil)
+	log.Info("dashboard auth", "oidc", srv.OIDC != nil, "api_key_login", srv.APIKeyLogin, "auto_sign_in", srv.AutoSignIn)
 
 	go eng.Run(ctx)
 	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}

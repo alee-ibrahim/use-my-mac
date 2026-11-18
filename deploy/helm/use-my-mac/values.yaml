@@ -45,6 +45,16 @@ oidc:
   adminGroups: []
   viewerGroups: []
   defaultRole: ""
+  domainHint: "" # sent as domain_hint on the authorize request
+  prompt: "" # e.g. select_account
+
+auth:
+  # API-key sign-in to the dashboard: auto (on only without OIDC) | "true"
+  # (break-glass alongside OIDC, at /login) | "false". Bearer API keys for the
+  # REST API, CLI and apps always work.
+  dashboardAPIKeyLogin: auto
+  # With OIDC, send signed-out browsers straight to the provider.
+  autoSignIn: true
 
 # Extra scheduler settings merged into server.yaml (see deploy/server.example.yaml).
 scheduler: {}
