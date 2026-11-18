@@ -56,7 +56,7 @@ scheduler:
   backoff_base: 5s
   backoff_max: 5m
   fail_exclude: 1h         # a Mac that failed a task is skipped for that task
-  yield_exclude: 15m       # a Mac that yielded a task is skipped for that task
+  yield_exclude: 5m        # a Mac that yielded a task is skipped for that task
   quarantine_after: 3      # consecutive failures before a Mac is quarantined
   quarantine_for: 10m
   weights: {presence: 3, load: 2, spread: 1.5, memory: 1, power: 1, thermal: 1, gpu: 1.5, capacity: 0.5}

@@ -83,7 +83,9 @@ func (m *MacOS) Collect(ctx context.Context) (api.Telemetry, error) {
 
 	t.MemAvailableBytes = ParseVMStat(m.out(ctx, "vm_stat"))
 	t.MemoryPressure = ParsePressureLevel(m.out(ctx, "sysctl", "-n", "kern.memorystatus_vm_pressure_level"))
-	t.Thermal = ParseThermal(m.out(ctx, "pmset", "-g", "therm"))
+	t.Thermal = WorseThermal(
+		ParseThermal(m.out(ctx, "pmset", "-g", "therm")),
+		ParseThermalPressure(m.out(ctx, "notifyutil", "-g", "com.apple.system.thermalpressurelevel")))
 	t.OnAC, t.BatteryPercent = ParsePower(m.out(ctx, "pmset", "-g", "batt"))
 	t.GPUUtilPercent, t.GPUCores = ParseGPU(m.out(ctx, "ioreg", "-r", "-d", "1", "-c", "AGXAccelerator"))
 	if m.Opts.WorkDir != "" {

@@ -61,7 +61,7 @@ func DefaultConfig() Config {
 		BackoffBase:       5 * time.Second,
 		BackoffMax:        5 * time.Minute,
 		FailExclude:       time.Hour,
-		YieldExclude:      15 * time.Minute,
+		YieldExclude:      5 * time.Minute,
 		QuarantineAfter:   3,
 		QuarantineFor:     10 * time.Minute,
 		MaxLogBytes:       1 << 20,

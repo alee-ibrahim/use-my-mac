@@ -12,8 +12,8 @@ stops our task within seconds and the router moves it to another Mac.
   hints. A job is a set of tasks with optional dependencies (map, then reduce). The core has no video, OCR
   or ML code.
 - **Native, not containers.** Tasks run as plain macOS processes, so they keep Metal, VideoToolbox and the
-  Neural Engine. They run at background priority (`taskpolicy -b`) in a private work dir as a dedicated
-  non-admin user.
+  Neural Engine. They run at utility QoS while nobody is using the Mac and at background QoS (efficiency
+  cores) while someone is, switching in place, in a private work dir as a dedicated non-admin user.
 - **Polite.** The agent watches the console user, HID idle time, screen lock, the user's own CPU (our
   processes excluded), memory pressure, thermal state and power source. Being logged in doesn't stop work.
   Sustained heavy use by the user does.
@@ -61,7 +61,7 @@ flowchart LR
 2. The scheduler scores every Mac for every runnable task and assigns the best one. Hard filters cover
    offline, draining, quarantined, wrong runtime, not enough RAM or disk, critical thermal state and battery.
 3. The agent picks up the task on its next long-poll. It downloads inputs into `in/` and runs
-   `taskpolicy -b <allowlisted program> <args>`, streaming logs as it goes. Then it uploads `out/*`.
+   `<allowlisted program> <args>` under `taskpolicy` (see adaptive priority), streaming logs as it goes. Then it uploads `out/*`.
 4. If the Mac's user goes heavy, the agent stops the task (SIGTERM, then SIGKILL) and reports `yielded`. The
    router reassigns it straight away. A yield doesn't count as a failure. Failures are retried with
    backoff on a different Mac, and lost heartbeats trigger reassignment.

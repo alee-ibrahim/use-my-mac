@@ -215,6 +215,41 @@ func ParseThermal(out string) string {
 	return ""
 }
 
+// ParseThermalPressure parses `notifyutil -g com.apple.system.thermalpressurelevel`,
+// the level behind ProcessInfo.thermalState. Unlike `pmset -g therm` it is
+// kept up to date on Apple Silicon and needs no privileges. Levels: 0 nominal,
+// 1 moderate, 2 heavy, 3 trapping, 4 sleeping.
+func ParseThermalPressure(out string) string {
+	f := strings.Fields(out)
+	if len(f) == 0 {
+		return ""
+	}
+	v, err := strconv.Atoi(f[len(f)-1])
+	if err != nil || v < 0 {
+		return ""
+	}
+	switch v {
+	case 0:
+		return "nominal"
+	case 1:
+		return "fair"
+	case 2:
+		return "serious"
+	default:
+		return "critical"
+	}
+}
+
+var thermalOrder = map[string]int{"nominal": 1, "fair": 2, "serious": 3, "critical": 4}
+
+// WorseThermal returns the more severe of two thermal readings ("" = unknown).
+func WorseThermal(a, b string) string {
+	if thermalOrder[b] > thermalOrder[a] {
+		return b
+	}
+	return a
+}
+
 // ParsePower parses `pmset -g batt`.
 func ParsePower(out string) (onAC bool, batteryPct int) {
 	onAC = strings.Contains(out, "'AC Power'")

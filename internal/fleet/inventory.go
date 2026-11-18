@@ -145,7 +145,7 @@ func (inv *Inventory) Resolve(only ...string) ([]ResolvedHost, error) {
 			KnownHosts:   d.KnownHosts,
 			Name:         firstStr(h.Name, h.Host),
 			MaxTasks:     firstInt(h.MaxTasks, d.MaxTasks, 1),
-			Priority:     firstStr(h.Priority, d.Priority, "background"),
+			Priority:     firstStr(h.Priority, d.Priority, "adaptive"),
 			Labels:       mergeLabels(d.Labels, h.Labels),
 			Runtimes:     mergeRuntimes(d.Runtimes, h.Runtimes),
 			ServiceLabel: firstStr(h.ServiceLabel, d.ServiceLabel, DefaultServiceLabel),

@@ -32,10 +32,16 @@ type Config struct {
 	// StopGrace is how long a task gets after SIGTERM before SIGKILL.
 	StopGrace time.Duration `yaml:"stop_grace"`
 
-	// Priority: "background" (taskpolicy -b: lowest CPU/IO priority; on
-	// Apple Silicon this also keeps work on efficiency cores), "utility"
-	// (taskpolicy -c utility + nice), or "none".
+	// Priority: "adaptive" (default: utility while nobody is using the Mac,
+	// background while someone is; see AdaptiveQoS), "background"
+	// (taskpolicy -b: lowest CPU/IO priority; on Apple Silicon this also
+	// keeps work on efficiency cores), "utility" (taskpolicy -c utility +
+	// nice), or "none".
 	Priority string `yaml:"priority"`
+	// PriorityIdle (adaptive only): a logged-in, unlocked console user who
+	// has not touched the keyboard or mouse for this long counts as away,
+	// so tasks run at utility. Default 5m.
+	PriorityIdle time.Duration `yaml:"priority_idle"`
 	// Sandbox wraps tasks in sandbox-exec so they can only write inside
 	// their work dir (macOS only; optional).
 	Sandbox bool `yaml:"sandbox"`
@@ -104,10 +110,13 @@ func (c *Config) Normalize() error {
 	}
 	switch c.Priority {
 	case "":
-		c.Priority = "background"
-	case "background", "utility", "none":
+		c.Priority = PriorityAdaptive
+	case PriorityAdaptive, "background", "utility", "none":
 	default:
-		return fmt.Errorf("priority must be background, utility or none")
+		return fmt.Errorf("priority must be adaptive, background, utility or none")
+	}
+	if c.PriorityIdle <= 0 {
+		c.PriorityIdle = 5 * time.Minute
 	}
 	if c.UserLoadScope == "" {
 		c.UserLoadScope = "console"

@@ -15,7 +15,7 @@ defaults:
   ssh_key: ~/.ssh/umm_fleet_ed25519
   known_hosts: ~/.ssh/known_hosts
   max_tasks: 1
-  priority: background             # background | utility | none
+  priority: adaptive               # adaptive | background | utility | none
   labels:
     site: hq
   # The runtime allowlist written into each Mac's agent.yaml (only used when a

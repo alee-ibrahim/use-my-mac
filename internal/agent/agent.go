@@ -1,6 +1,6 @@
 // Package agent is the Mac-side worker. It only ever connects outbound to
 // the router: it sends heartbeats with telemetry, long-polls for
-// assignments, runs allowlisted native processes at background priority in a
+// assignments, runs allowlisted native processes at low priority in a
 // private work dir, streams logs, uploads outputs to short-lived URLs, and
 // yields (stops work promptly) when the Mac's own user needs the machine.
 package agent
@@ -46,12 +46,18 @@ type Agent struct {
 	drain    bool
 	running  map[string]*run
 	capacity chan struct{}
+	// lastTel is the latest telemetry (for adaptive priority).
+	lastTel api.Telemetry
+	haveTel bool
+	// applyQoS moves a task's process group into or out of background QoS.
+	applyQoS func(pgid int, background bool) error
 }
 
 type run struct {
 	as     api.Assignment
 	cancel context.CancelCauseFunc
 	pgid   int
+	qos    string // effective QoS under adaptive priority
 }
 
 // Stop causes.
@@ -75,6 +81,7 @@ func New(cfg *Config, cred string, collector telemetry.Collector, log *slog.Logg
 		state:    api.AgentReady,
 		running:  map[string]*run{},
 		capacity: make(chan struct{}, 1),
+		applyQoS: setGroupBackground,
 	}
 	if collector == nil {
 		collector = telemetry.NewDefault(telemetry.Options{
@@ -224,6 +231,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	now := time.Now()
 	a.mu.Lock()
+	a.lastTel, a.haveTel = tel, true
 	state, changed := a.yield.Update(now, tel)
 	_, reason := a.yield.State()
 	paused := false
@@ -256,6 +264,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	if state == api.AgentReady && prev != api.AgentReady {
 		a.signalCapacity()
 	}
+	a.adjustQoS()
 
 	hb := api.Heartbeat{State: state, Reason: reason, Telemetry: tel, Running: nonNilS(running),
 		Runtimes: a.cfg.RuntimeNames(), Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version}
@@ -278,6 +287,59 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	a.mu.Unlock()
 	if wasDrain && !resp.Drain {
 		a.signalCapacity()
+	}
+}
+
+// currentQoS is the QoS a task started now should run at.
+func (a *Agent) currentQoS() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.qosLocked()
+}
+
+func (a *Agent) qosLocked() string {
+	if a.cfg.Priority != PriorityAdaptive {
+		return a.cfg.Priority
+	}
+	if !a.haveTel {
+		return QoSBackground // assume someone is there until we know
+	}
+	return AdaptiveQoS(a.lastTel, a.cfg.PriorityIdle)
+}
+
+// adjustQoS demotes running tasks to background QoS when someone starts
+// using the Mac, and promotes them back to utility when they leave. Tasks
+// keep running either way; stopping them is the yield policy's job. While at
+// background it is re-applied each heartbeat so children forked in between
+// are covered too.
+func (a *Agent) adjustQoS() {
+	if a.cfg.Priority != PriorityAdaptive {
+		return
+	}
+	type change struct {
+		r    *run
+		from string
+	}
+	a.mu.Lock()
+	want := a.qosLocked()
+	var todo []change
+	for _, r := range a.running {
+		if r.pgid > 0 && (r.qos != want || want == QoSBackground) {
+			todo = append(todo, change{r, r.qos})
+		}
+	}
+	a.mu.Unlock()
+	for _, c := range todo {
+		if err := a.applyQoS(c.r.pgid, want == QoSBackground); err != nil {
+			a.log.Warn("set task priority", "task", c.r.as.TaskID, "qos", want, "err", err)
+			continue
+		}
+		a.mu.Lock()
+		c.r.qos = want
+		a.mu.Unlock()
+		if c.from != want {
+			a.log.Info("task priority changed", "task", c.r.as.TaskID, "from", c.from, "to", want)
+		}
 	}
 }
 
@@ -433,7 +495,8 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	}
 	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
 	defer cancelRun()
-	argv := BuildArgv(a.goos, a.cfg.Priority, a.cfg.Sandbox, workdir, prefix, args)
+	qos := a.currentQoS()
+	argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, qos), a.cfg.Sandbox, workdir, prefix, args)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
 	cmd.Env = env
@@ -445,7 +508,7 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		return upd
 	}
 	a.mu.Lock()
-	r.pgid = cmd.Process.Pid
+	r.pgid, r.qos = cmd.Process.Pid, qos
 	a.mu.Unlock()
 	werr := cmd.Wait()
 	killGroup(cmd.Process.Pid)
