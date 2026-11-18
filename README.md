@@ -80,7 +80,8 @@ export UMM_SECRET_KEY=$(openssl rand -hex 32)
 make run-dev                   # http://localhost:8080
 ```
 
-Sign in to the dashboard with the admin key. Then from another shell:
+Sign in to the dashboard with the admin key (API-key sign-in is on when OIDC is not configured; see
+`auth` in `deploy/server.example.yaml`). Then from another shell:
 
 ```sh
 export UMM_SERVER=http://localhost:8080

@@ -147,8 +147,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return (ct.includes("application/json") ? res.json() : res.text()) as Promise<T>
 }
 
+// How the dashboard may be signed in to. apikey = API-key sign-in allowed.
+export type AuthConfig = { oidc: boolean; apikey: boolean; auto_sign_in: boolean }
+
+// Starts single sign-on and returns to `ret` (sanitised again by the server).
+export function ssoURL(ret = "/") {
+  return `/auth/login?return=${encodeURIComponent(ret)}`
+}
+
 export const api = {
-  authConfig: () => request<{ oidc: boolean; apikey: boolean }>("GET", "/auth/config"),
+  authConfig: () => request<AuthConfig>("GET", "/auth/config"),
   loginWithKey: (key: string) => request<Me>("POST", "/auth/apikey", { key }),
   logout: () => request<void>("POST", "/auth/logout"),
   me: () => request<Me>("GET", "/v1/me"),

@@ -28,6 +28,12 @@ type OIDCConfig struct {
 	ClientSecret string   `yaml:"-" json:"-"`
 	RedirectURL  string   `yaml:"redirect_url" json:"redirect_url"`
 	Scopes       []string `yaml:"scopes" json:"scopes"`
+	// DomainHint is sent as domain_hint on the authorize request (Entra:
+	// skips the home-realm/account picker for that domain).
+	DomainHint string `yaml:"domain_hint" json:"domain_hint"`
+	// Prompt is sent as prompt on the authorize request, e.g.
+	// "select_account" or "login". Empty = provider default.
+	Prompt string `yaml:"prompt" json:"prompt"`
 
 	// GroupsClaim holds group IDs/names (Entra: "groups", object IDs).
 	GroupsClaim string `yaml:"groups_claim" json:"groups_claim"`
@@ -190,7 +196,14 @@ func randString() string {
 // AuthURL starts a login.
 func (o *OIDC) AuthURL(ret string, expires int64) (string, LoginState) {
 	st := LoginState{State: randString(), Nonce: randString(), Verifier: oauth2.GenerateVerifier(), Return: ret, Expires: expires}
-	u := o.oauth.AuthCodeURL(st.State, oidc.Nonce(st.Nonce), oauth2.S256ChallengeOption(st.Verifier))
+	opts := []oauth2.AuthCodeOption{oidc.Nonce(st.Nonce), oauth2.S256ChallengeOption(st.Verifier)}
+	if o.Cfg.DomainHint != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("domain_hint", o.Cfg.DomainHint))
+	}
+	if o.Cfg.Prompt != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", o.Cfg.Prompt))
+	}
+	u := o.oauth.AuthCodeURL(st.State, opts...)
 	return u, st
 }
 

@@ -33,7 +33,13 @@ type Server struct {
 	Metrics    *metrics.M
 	SessionKey []byte
 	OIDC       *auth.OIDC // nil when SSO is not configured
-	WebDir     string     // built dashboard; "" disables
+	// APIKeyLogin allows exchanging an API key for a dashboard session
+	// (POST /auth/apikey). Bearer API keys work regardless.
+	APIKeyLogin bool
+	// AutoSignIn sends signed-out browsers on dashboard routes straight to
+	// the OIDC provider. Needs OIDC.
+	AutoSignIn bool
+	WebDir     string // built dashboard; "" disables
 	// MaxUploadBytes bounds app blob uploads and agent output uploads.
 	MaxUploadBytes int64
 	// SecureCookies sets the Secure flag (use behind HTTPS).
@@ -208,6 +214,10 @@ func (s *Server) identify(r *http.Request) (*identity, int) {
 	}
 	sess, err := auth.VerifySession(s.SessionKey, c.Value, s.Now())
 	if err != nil || sess.Via == "login-state" {
+		return nil, http.StatusUnauthorized
+	}
+	// Sessions made from an API key die when that login path is turned off.
+	if sess.Via == "apikey" && !s.APIKeyLogin {
 		return nil, http.StatusUnauthorized
 	}
 	// CSRF: cookie-authenticated writes must carry a custom header, which
@@ -614,8 +624,11 @@ func (s *Server) static() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := path.Clean("/" + r.URL.Path)
 		full := filepath.Join(s.WebDir, filepath.FromSlash(p))
-		if st, err := os.Stat(full); err != nil || st.IsDir() {
-			// SPA fallback.
+		if st, err := os.Stat(full); err != nil || st.IsDir() || p == "/index.html" {
+			// SPA fallback. Signed-out browsers go straight to SSO.
+			if s.autoSignIn(w, r, p) {
+				return
+			}
 			w.Header().Set("Cache-Control", "no-cache")
 			http.ServeFile(w, r, filepath.Join(s.WebDir, "index.html"))
 			return

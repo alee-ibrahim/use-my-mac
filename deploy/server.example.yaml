@@ -35,6 +35,16 @@ oidc:
   admin_groups: []    # Entra group object IDs or app-role values
   viewer_groups: []
   default_role: ""    # "" = deny users in no listed group; "viewer" = allow read-only
+  domain_hint: ""     # optional, sent as domain_hint (Entra: skip the account picker for this domain)
+  prompt: ""          # optional, e.g. select_account or login
+
+auth:
+  # Exchange an API key for a dashboard session. auto (default) = only when OIDC
+  # is not configured; true = also with OIDC (break-glass, at /login); false = never.
+  # Bearer API keys for the REST API, CLI and apps always work.
+  dashboard_api_key_login: auto
+  # With OIDC, send signed-out browsers straight to the provider (no login page).
+  auto_sign_in: true
 
 scheduler:
   tick_interval: 1s
