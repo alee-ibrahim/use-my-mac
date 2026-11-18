@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: umm
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: vet (linux, darwin, windows)
+        run: |
+          go vet ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+          GOOS=windows go vet ./...
+      - name: test
+        env:
+          UMM_TEST_POSTGRES_URL: postgres://postgres:ci-only@localhost:5432/umm?sslmode=disable
+        run: go test -race -count=1 ./...
+      - name: cross-compile darwin/arm64 agent
+        run: make dist-mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umm-agent-darwin-arm64
+          path: dist/umm-agent-darwin-arm64.tar.gz
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/use-my-mac
+      - run: helm template t deploy/helm/use-my-mac --set httpRoute.enabled=true --set oidc.enabled=true --set oidc.tenantID=t --set oidc.clientID=c > /dev/null

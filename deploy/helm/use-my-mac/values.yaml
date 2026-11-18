@@ -1,0 +1,89 @@
+image:
+  repository: ghcr.io/alee-ibrahim/use-my-mac
+  tag: "" # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+# The router keeps live agent state in memory: run exactly one replica.
+replicaCount: 1
+
+# How agents and browsers reach the router.
+publicURL: https://umm.example.com
+
+# Name of an existing Secret holding environment variables:
+#   UMM_SECRET_KEY (required, >= 32 chars), and optionally UMM_DATABASE_URL,
+#   UMM_OIDC_CLIENT_SECRET, UMM_S3_ACCESS_KEY, UMM_S3_SECRET_KEY,
+#   UMM_BOOTSTRAP_ADMIN_KEY.
+# Create it with your secret manager; the chart never renders secret values.
+existingSecret: use-my-mac
+
+database:
+  # SQLite on the data volume by default. For an external Postgres put
+  # UMM_DATABASE_URL (postgres://...) in existingSecret; it overrides SQLite.
+  external: false
+
+storage:
+  backend: local # local | s3
+  s3:
+    endpoint: ""
+    region: us-east-1
+    bucket: ""
+    prefix: umm/
+    pathStyle: true
+
+persistence:
+  enabled: true # SQLite database and local blob storage
+  size: 50Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+oidc:
+  enabled: false
+  preset: entra # Microsoft Entra ID preset; "" for any other OIDC provider
+  tenantID: ""
+  issuer: "" # required when preset is ""
+  clientID: ""
+  adminGroups: []
+  viewerGroups: []
+  defaultRole: ""
+
+# Extra scheduler settings merged into server.yaml (see deploy/server.example.yaml).
+scheduler: {}
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Example Gateway API route. Agents reach /v1/agent/* on the same host as the
+# dashboard and the app API.
+httpRoute:
+  enabled: false
+  parentRefs:
+    - name: gateway
+      namespace: gateway-system
+      sectionName: https
+  hostnames:
+    - umm.example.com
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile: {type: RuntimeDefault}
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

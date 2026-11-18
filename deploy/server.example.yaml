@@ -1,0 +1,53 @@
+# umm-server configuration. Secrets are NOT set here; they come from the
+# environment (see docs/design.md#security-model):
+#   UMM_DATABASE_URL, UMM_SECRET_KEY, UMM_OIDC_CLIENT_SECRET,
+#   UMM_S3_ACCESS_KEY, UMM_S3_SECRET_KEY, UMM_BOOTSTRAP_ADMIN_KEY
+listen: ":8080"
+# How agents and browsers reach the router (used for signed URLs and OIDC).
+public_url: "https://umm.example.com"
+# Overridden by UMM_DATABASE_URL when set.
+database: "sqlite:///data/umm.db"
+web_dir: "/app/web"
+log_level: info
+max_upload_mb: 20480
+
+storage:
+  # local: the router stores and relays files itself (zero extra infra).
+  # s3:    any S3-compatible store; agents get short-lived presigned URLs.
+  backend: local
+  local:
+    dir: /data/blobs
+  s3:
+    endpoint: "https://s3.example.com"
+    region: "us-east-1"
+    bucket: "umm"
+    prefix: "umm/"
+    path_style: true
+
+# Dashboard login. Leave client_id empty to use API-key login only.
+oidc:
+  # Microsoft Entra ID preset: issuer, groups claim and app-roles claim are
+  # filled in from tenant_id.
+  preset: entra
+  tenant_id: ""
+  client_id: ""
+  # redirect_url defaults to <public_url>/auth/callback
+  admin_groups: []    # Entra group object IDs or app-role values
+  viewer_groups: []
+  default_role: ""    # "" = deny users in no listed group; "viewer" = allow read-only
+
+scheduler:
+  tick_interval: 1s
+  heartbeat_timeout: 30s   # no heartbeat for this long = Mac lost, tasks reassigned
+  assign_timeout: 60s
+  default_timeout: 1h
+  timeout_grace: 2m
+  default_max_retries: 3
+  backoff_base: 5s
+  backoff_max: 5m
+  fail_exclude: 1h         # a Mac that failed a task is skipped for that task
+  yield_exclude: 15m       # a Mac that yielded a task is skipped for that task
+  quarantine_after: 3      # consecutive failures before a Mac is quarantined
+  quarantine_for: 10m
+  weights: {presence: 3, load: 2, spread: 1.5, memory: 1, power: 1, thermal: 1, gpu: 1.5, capacity: 0.5}
+  limits: {idle_full_seconds: 900, min_disk_free_mb: 2048, allow_battery: false, min_battery_percent: 40}

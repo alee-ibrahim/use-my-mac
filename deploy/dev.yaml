@@ -1,0 +1,11 @@
+# Local development: `make run-dev`. Not for production.
+listen: ":8080"
+public_url: "http://localhost:8080"
+database: "sqlite://data/umm.db"
+web_dir: "dashboard/dist"
+storage:
+  backend: local
+  local:
+    dir: data/blobs
+secure_cookies: false
+log_level: debug

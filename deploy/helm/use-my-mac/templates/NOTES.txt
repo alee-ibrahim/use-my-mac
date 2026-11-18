@@ -1,0 +1,6 @@
+use-my-mac router installed.
+
+1. Make sure Secret "{{ .Values.existingSecret }}" exists with at least UMM_SECRET_KEY
+   (and UMM_BOOTSTRAP_ADMIN_KEY for the first admin sign-in).
+2. Open {{ .Values.publicURL }} and sign in.
+3. Add a Mac: dashboard -> Macs -> Add a Mac, or `umm enrol`.

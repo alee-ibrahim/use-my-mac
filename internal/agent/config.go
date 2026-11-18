@@ -1,0 +1,169 @@
+package agent
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the agent's YAML configuration. It holds no secrets: the agent
+// credential lives in CredentialFile (mode 0600) or UMM_AGENT_CREDENTIAL.
+type Config struct {
+	Server         string `yaml:"server"`
+	Name           string `yaml:"name"`
+	CredentialFile string `yaml:"credential_file"`
+	WorkDir        string `yaml:"work_dir"`
+	MaxTasks       int    `yaml:"max_tasks"`
+	// Runtimes is the allowlist: name -> fixed argv prefix. Tasks pick a
+	// runtime by name and can only append arguments.
+	Runtimes map[string][]string `yaml:"runtimes"`
+	Labels   map[string]string   `yaml:"labels"`
+	// TaskEnv is added to every task's environment.
+	TaskEnv map[string]string `yaml:"task_env"`
+
+	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
+	PollWait          time.Duration `yaml:"poll_wait"`
+	// StopGrace is how long a task gets after SIGTERM before SIGKILL.
+	StopGrace time.Duration `yaml:"stop_grace"`
+
+	// Priority: "background" (taskpolicy -b: lowest CPU/IO priority; on
+	// Apple Silicon this also keeps work on efficiency cores), "utility"
+	// (taskpolicy -c utility + nice), or "none".
+	Priority string `yaml:"priority"`
+	// Sandbox wraps tasks in sandbox-exec so they can only write inside
+	// their work dir (macOS only; optional).
+	Sandbox bool `yaml:"sandbox"`
+	// PauseFile: while this file exists the Mac takes no work and stops
+	// running tasks (a local opt-out switch for the Mac's owner).
+	PauseFile string `yaml:"pause_file"`
+	// UserLoadScope: "console" or "all" (see telemetry.Options).
+	UserLoadScope string `yaml:"user_load_scope"`
+
+	Yield YieldConfig `yaml:"yield"`
+
+	// MaxLogBytes caps the log volume streamed per attempt.
+	MaxLogBytes int `yaml:"max_log_bytes"`
+}
+
+var runtimeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// LoadConfig reads and validates a YAML config file.
+func LoadConfig(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c := &Config{}
+	if err := yaml.Unmarshal(b, c); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, c.Normalize()
+}
+
+// Normalize fills defaults and validates.
+func (c *Config) Normalize() error {
+	if c.Server == "" {
+		return errors.New("server is required")
+	}
+	c.Server = strings.TrimRight(c.Server, "/")
+	if c.Name == "" {
+		h, _ := os.Hostname()
+		c.Name = h
+	}
+	if c.WorkDir == "" {
+		return errors.New("work_dir is required")
+	}
+	if c.MaxTasks <= 0 {
+		c.MaxTasks = 1
+	}
+	if len(c.Runtimes) == 0 {
+		return errors.New("at least one runtime must be allowlisted")
+	}
+	for name, argv := range c.Runtimes {
+		if !runtimeNameRe.MatchString(name) {
+			return fmt.Errorf("runtime name %q is invalid", name)
+		}
+		if len(argv) == 0 || !strings.HasPrefix(argv[0], "/") {
+			return fmt.Errorf("runtime %q must start with an absolute executable path", name)
+		}
+	}
+	if c.HeartbeatInterval <= 0 {
+		c.HeartbeatInterval = 5 * time.Second
+	}
+	if c.PollWait <= 0 {
+		c.PollWait = 25 * time.Second
+	}
+	if c.StopGrace <= 0 {
+		c.StopGrace = 10 * time.Second
+	}
+	switch c.Priority {
+	case "":
+		c.Priority = "background"
+	case "background", "utility", "none":
+	default:
+		return fmt.Errorf("priority must be background, utility or none")
+	}
+	if c.UserLoadScope == "" {
+		c.UserLoadScope = "console"
+	}
+	// Fill unset yield fields individually so a partial config keeps sane
+	// defaults (YieldOnBattery defaults to true only when the block is absent).
+	d := DefaultYieldConfig()
+	if c.Yield == (YieldConfig{}) {
+		c.Yield = d
+	}
+	y := &c.Yield
+	if y.UserCPUHigh <= 0 {
+		y.UserCPUHigh = d.UserCPUHigh
+	}
+	if y.UserCPULow <= 0 || y.UserCPULow > y.UserCPUHigh {
+		y.UserCPULow = y.UserCPUHigh / 2
+	}
+	if y.SustainSeconds <= 0 {
+		y.SustainSeconds = d.SustainSeconds
+	}
+	if y.CooldownSeconds <= 0 {
+		y.CooldownSeconds = d.CooldownSeconds
+	}
+	if y.MemoryPressure == "" {
+		y.MemoryPressure = d.MemoryPressure
+	}
+	if y.Thermal == "" {
+		y.Thermal = d.Thermal
+	}
+	if c.MaxLogBytes <= 0 {
+		c.MaxLogBytes = 1 << 20
+	}
+	return nil
+}
+
+// RuntimeNames returns the allowlisted runtime names, sorted.
+func (c *Config) RuntimeNames() []string {
+	var out []string
+	for k := range c.Runtimes {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// LoadCredential reads the agent credential from the environment or file.
+func (c *Config) LoadCredential() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("UMM_AGENT_CREDENTIAL")); v != "" {
+		return v, nil
+	}
+	if c.CredentialFile == "" {
+		return "", errors.New("no credential: set credential_file or UMM_AGENT_CREDENTIAL (run `umm-agent enrol` first)")
+	}
+	b, err := os.ReadFile(c.CredentialFile)
+	if err != nil {
+		return "", fmt.Errorf("read credential: %w (run `umm-agent enrol` first)", err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}

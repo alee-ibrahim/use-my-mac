@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for the use-my-mac agent. Runs as the dedicated non-admin
+  service user _umm. The agent only makes outbound connections; tasks are
+  started at background priority (taskpolicy -b) by the agent itself.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.alee-ibrahim.umm-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/umm-agent</string>
+    <string>run</string>
+    <string>-config</string>
+    <string>/usr/local/etc/umm/agent.yaml</string>
+  </array>
+  <key>UserName</key>
+  <string>_umm</string>
+  <key>GroupName</key>
+  <string>_umm</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>WorkingDirectory</key>
+  <string>/usr/local/var/umm</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/umm/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/umm/agent.log</string>
+</dict>
+</plist>

@@ -1,0 +1,20 @@
+# umm submit examples/hello.yaml -wait
+#
+# Needs these runtimes allowlisted on the Macs:
+#   runtimes:
+#     wc:  ["/usr/bin/wc", "-l"]
+#     sha: ["/usr/bin/shasum", "-a", "256"]
+# Both write to stdout, so the result is in the task logs (umm logs TASK).
+name: hello
+tasks:
+  - key: count
+    runtime: wc
+    args: ["{in:text}"]
+    inputs:
+      - {name: text, file: ../README.md}   # uploaded by the CLI first
+  - key: hash
+    runtime: sha
+    args: ["{in:text}"]
+    inputs:
+      - {name: text, file: ../README.md}
+    resources: {ram_mb: 64, expected_seconds: 1}

@@ -1,0 +1,52 @@
+# /usr/local/etc/umm/agent.yaml — umm-agent configuration (no secrets here).
+server: https://umm.example.com
+name: "studio-01"
+# Written by `umm-agent enrol`; mode 0600, owned by _umm.
+credential_file: /usr/local/etc/umm/credential
+work_dir: /usr/local/var/umm/work
+max_tasks: 1
+labels:
+  chip: m2-pro
+
+# The allowlist. A task names a runtime and can only append arguments; it can
+# never choose the executable. Prefer specific scripts over bare interpreters
+# (allowing "python3" alone would let a task run any Python code).
+runtimes:
+  ffmpeg: ["/opt/homebrew/bin/ffmpeg"]
+  ocr: ["/usr/bin/python3", "/opt/ocr/run.py"]
+
+# Extra environment for every task.
+task_env: {}
+
+heartbeat_interval: 5s
+poll_wait: 25s
+stop_grace: 10s
+
+# background: taskpolicy -b (lowest CPU/IO priority; on Apple Silicon this
+#             also keeps CPU work on efficiency cores)
+# utility:    taskpolicy -c utility + nice 10 (faster, still polite)
+# none:       no wrapper (testing only)
+priority: background
+
+# Optional: run tasks under sandbox-exec so they can only write in their
+# work dir.
+sandbox: false
+
+# While this file exists the Mac takes no work and stops running tasks.
+pause_file: /usr/local/etc/umm/paused
+
+# console: only the console user's processes count as "user load".
+# all:     every process that is not ours counts.
+user_load_scope: console
+
+# "Don't disturb the user" policy. A logged-in user alone never stops work.
+yield:
+  user_cpu_high: 50       # user's own CPU (% of machine, ours excluded) that is "heavy"
+  user_cpu_low: 25        # below this the user is calm again
+  sustain_seconds: 10     # heavy for this long -> stop our tasks, router reassigns them
+  cooldown_seconds: 120   # calm for this long -> accept work again
+  memory_pressure: warn   # warn | critical (critical always yields immediately)
+  thermal: serious        # fair | serious | critical (critical always yields immediately)
+  yield_on_battery: true
+
+max_log_bytes: 1048576

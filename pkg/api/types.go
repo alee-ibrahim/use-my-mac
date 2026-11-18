@@ -1,0 +1,365 @@
+// Package api holds the wire types shared by the server, the agent, the CLI
+// and the Go client SDK. Everything here is plain JSON; nothing is
+// workload-specific.
+package api
+
+import "time"
+
+// ---------------------------------------------------------------------------
+// Jobs and tasks (app-facing)
+// ---------------------------------------------------------------------------
+
+// JobSpec is what an app submits. A job is a small DAG of tasks: usually a set
+// of independent "map" tasks plus an optional "reduce" task that depends on
+// them. The app does the splitting; the router schedules, retries and
+// reassigns.
+type JobSpec struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
+	Tasks  []TaskSpec        `json:"tasks"`
+}
+
+// TaskSpec describes one unit of work.
+type TaskSpec struct {
+	// Key identifies the task inside its job (unique per job). Other tasks
+	// refer to it in DependsOn and in Input.From.
+	Key string `json:"key"`
+	// Runtime names an allowlisted runtime configured on the agent
+	// (e.g. "ffmpeg"). Tasks can never run arbitrary binaries.
+	Runtime string `json:"runtime"`
+	// Args are appended to the runtime's fixed argv. Placeholders:
+	//   {in:NAME}  absolute path of input NAME
+	//   {out:NAME} absolute path where output NAME must be written
+	//   {workdir}  the task's private working directory
+	Args []string          `json:"args,omitempty"`
+	Env  map[string]string `json:"env,omitempty"`
+
+	Inputs  []Input  `json:"inputs,omitempty"`
+	Outputs []Output `json:"outputs,omitempty"`
+
+	Resources Resources `json:"resources,omitempty"`
+
+	// TimeoutSeconds bounds one attempt. 0 means the server default.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// MaxRetries is the number of failed attempts retried before the task
+	// fails for good. Yields and lost agents do not count. nil means the
+	// server default.
+	MaxRetries *int `json:"max_retries,omitempty"`
+
+	// DependsOn lists task keys that must succeed before this task can run.
+	DependsOn []string `json:"depends_on,omitempty"`
+}
+
+// Input is a file placed in the task's in/ directory before it starts.
+// Exactly one of URL, Blob or From must be set.
+type Input struct {
+	Name string `json:"name"`
+	// URL is a plain URL supplied by the app (GET).
+	URL string `json:"url,omitempty"`
+	// Blob is a key previously uploaded to the router's storage.
+	Blob string `json:"blob,omitempty"`
+	// From references an output of another task in the same job.
+	From *OutputRef `json:"from,omitempty"`
+}
+
+// OutputRef points at an output of another task in the same job.
+type OutputRef struct {
+	Task   string `json:"task"`
+	Output string `json:"output"`
+}
+
+// Output is a file the task must write to out/<Name>.
+type Output struct {
+	Name string `json:"name"`
+	// URL optionally sends the output straight to an app-supplied URL (PUT)
+	// instead of the router's storage.
+	URL string `json:"url,omitempty"`
+	// Optional marks outputs that may legitimately be missing.
+	Optional bool `json:"optional,omitempty"`
+}
+
+// Resources are scheduling hints and hard requirements.
+type Resources struct {
+	// RAMMB is the memory the task needs; Macs without that much available
+	// headroom are skipped.
+	RAMMB int `json:"ram_mb,omitempty"`
+	// GPU marks work that uses Metal/VideoToolbox/ANE; GPU utilisation then
+	// counts in the score.
+	GPU bool `json:"gpu,omitempty"`
+	// ExpectedSeconds lets the scorer prefer quiet, powerful Macs for long work.
+	ExpectedSeconds int `json:"expected_seconds,omitempty"`
+	// DiskMB is scratch space needed in the work dir.
+	DiskMB int `json:"disk_mb,omitempty"`
+	// Labels must all match the agent's labels (e.g. {"chip":"m2"}).
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// Task / job states.
+const (
+	StateBlocked   = "blocked"   // waiting on dependencies
+	StatePending   = "pending"   // runnable, waiting for a Mac
+	StateAssigned  = "assigned"  // picked a Mac, not yet fetched by it
+	StateRunning   = "running"   // fetched by the agent
+	StateSucceeded = "succeeded" // done
+	StateFailed    = "failed"    // out of retries
+	StateCancelled = "cancelled" // cancelled by the app or an upstream failure
+)
+
+// IsTerminal reports whether a task/job state is final.
+func IsTerminal(s string) bool {
+	return s == StateSucceeded || s == StateFailed || s == StateCancelled
+}
+
+// Job is the server's view of a job.
+type Job struct {
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Owner      string            `json:"owner"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	State      string            `json:"state"`
+	CreatedAt  time.Time         `json:"created_at"`
+	FinishedAt *time.Time        `json:"finished_at,omitempty"`
+	Counts     map[string]int    `json:"counts"`
+	Tasks      []Task            `json:"tasks,omitempty"`
+}
+
+// Task is the server's view of a task.
+type Task struct {
+	ID          string     `json:"id"`
+	JobID       string     `json:"job_id"`
+	Key         string     `json:"key"`
+	Spec        TaskSpec   `json:"spec"`
+	State       string     `json:"state"`
+	Attempt     int        `json:"attempt"`
+	Failures    int        `json:"failures"`
+	AgentID     string     `json:"agent_id,omitempty"`
+	Excluded    []string   `json:"excluded,omitempty"`
+	NotBefore   *time.Time `json:"not_before,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	ExitCode    *int       `json:"exit_code,omitempty"`
+	Error       string     `json:"error,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	Attempts    []Attempt  `json:"attempts,omitempty"`
+	OutputsDone []string   `json:"outputs_done,omitempty"`
+}
+
+// Attempt records one try of a task on one Mac.
+type Attempt struct {
+	Attempt    int        `json:"attempt"`
+	AgentID    string     `json:"agent_id"`
+	AgentName  string     `json:"agent_name,omitempty"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// Outcome: running, succeeded, failed, yielded, lost, cancelled, timeout.
+	Outcome string  `json:"outcome"`
+	Error   string  `json:"error,omitempty"`
+	Score   float64 `json:"score"`
+}
+
+// ---------------------------------------------------------------------------
+// Macs (agents)
+// ---------------------------------------------------------------------------
+
+// Telemetry is what an agent reports on every heartbeat. Unknown numeric
+// values are -1.
+type Telemetry struct {
+	CollectedAt time.Time `json:"collected_at"`
+
+	// Presence
+	ConsoleUser     string  `json:"console_user"` // "" when nobody is logged in at the console
+	UserIdleSeconds float64 `json:"user_idle_seconds"`
+	ScreenLocked    bool    `json:"screen_locked"`
+
+	// Load, split between the user's processes and ours (agent + tasks).
+	CPUCount       int     `json:"cpu_count"`
+	UserCPUPercent float64 `json:"user_cpu_percent"` // 0..100 of the whole machine
+	OurCPUPercent  float64 `json:"our_cpu_percent"`
+	UserMemBytes   uint64  `json:"user_mem_bytes"`
+	OurMemBytes    uint64  `json:"our_mem_bytes"`
+
+	MemTotalBytes     uint64 `json:"mem_total_bytes"`
+	MemAvailableBytes uint64 `json:"mem_available_bytes"`
+	// MemoryPressure: normal, warn, critical (or "" if unknown).
+	MemoryPressure string `json:"memory_pressure"`
+	// Thermal: nominal, fair, serious, critical (or "" if unknown).
+	Thermal string `json:"thermal"`
+
+	OnAC           bool    `json:"on_ac"`
+	BatteryPercent int     `json:"battery_percent"` // -1 when there is no battery
+	GPUUtilPercent float64 `json:"gpu_util_percent"`
+	DiskFreeBytes  uint64  `json:"disk_free_bytes"`
+
+	Chip     string `json:"chip"`
+	Model    string `json:"model"`
+	GPUCores int    `json:"gpu_cores"`
+	OS       string `json:"os"`
+}
+
+// AgentState is the agent's own view of whether it accepts work.
+const (
+	AgentReady    = "ready"    // accepting work
+	AgentBusyUser = "yielding" // the user is busy; not accepting, stopping tasks
+	AgentCooldown = "cooldown" // recently yielded; waiting for the user to calm down
+	AgentDraining = "draining" // admin drain / local opt-out
+)
+
+// Mac is the server's view of an enrolled agent.
+type Mac struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Online      bool              `json:"online"`
+	LastSeen    *time.Time        `json:"last_seen,omitempty"`
+	AgentState  string            `json:"agent_state"`
+	Drain       bool              `json:"drain"`
+	OptedOut    bool              `json:"opted_out"`
+	Quarantined *time.Time        `json:"quarantined_until,omitempty"`
+	Runtimes    []string          `json:"runtimes"`
+	Labels      map[string]string `json:"labels"`
+	MaxTasks    int               `json:"max_tasks"`
+	Running     []string          `json:"running"`
+	Telemetry   *Telemetry        `json:"telemetry,omitempty"`
+	Version     string            `json:"version,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+}
+
+// MacPatch is used by admins to drain or opt a Mac out.
+type MacPatch struct {
+	Drain    *bool `json:"drain,omitempty"`
+	OptedOut *bool `json:"opted_out,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Agent protocol (agents always connect outbound)
+// ---------------------------------------------------------------------------
+
+// EnrolRequest exchanges a one-time enrolment token for an agent credential.
+type EnrolRequest struct {
+	Token    string            `json:"token"`
+	Name     string            `json:"name"`
+	Runtimes []string          `json:"runtimes"`
+	Labels   map[string]string `json:"labels,omitempty"`
+	MaxTasks int               `json:"max_tasks"`
+	Version  string            `json:"version"`
+}
+
+// EnrolResponse carries the long-lived agent credential (shown once).
+type EnrolResponse struct {
+	AgentID    string `json:"agent_id"`
+	Credential string `json:"credential"`
+}
+
+// Heartbeat is sent by the agent every few seconds.
+type Heartbeat struct {
+	State     string            `json:"state"` // AgentReady, AgentBusyUser, ...
+	Reason    string            `json:"reason,omitempty"`
+	Telemetry Telemetry         `json:"telemetry"`
+	Running   []string          `json:"running"` // task IDs currently executing
+	Runtimes  []string          `json:"runtimes"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	MaxTasks  int               `json:"max_tasks"`
+	Version   string            `json:"version"`
+}
+
+// HeartbeatResponse tells the agent what to stop.
+type HeartbeatResponse struct {
+	Cancel []string `json:"cancel,omitempty"` // task IDs to stop now
+	Drain  bool     `json:"drain"`
+}
+
+// Assignment is a task handed to an agent.
+type Assignment struct {
+	TaskID         string            `json:"task_id"`
+	JobID          string            `json:"job_id"`
+	Key            string            `json:"key"`
+	Attempt        int               `json:"attempt"`
+	Runtime        string            `json:"runtime"`
+	Args           []string          `json:"args"`
+	Env            map[string]string `json:"env,omitempty"`
+	Inputs         []AssignedInput   `json:"inputs"`
+	Outputs        []AssignedOutput  `json:"outputs"`
+	TimeoutSeconds int               `json:"timeout_seconds"`
+	Resources      Resources         `json:"resources"`
+}
+
+// AssignedInput is a resolved, short-lived download URL.
+type AssignedInput struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// AssignedOutput is a resolved, short-lived upload URL (HTTP PUT).
+type AssignedOutput struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Optional bool   `json:"optional,omitempty"`
+}
+
+// PollResponse returns zero or more assignments.
+type PollResponse struct {
+	Assignments []Assignment `json:"assignments"`
+}
+
+// Task outcomes reported by agents.
+const (
+	OutcomeRunning   = "running"
+	OutcomeSucceeded = "succeeded"
+	OutcomeFailed    = "failed"
+	OutcomeYielded   = "yielded" // stopped because the Mac's user needed it
+	OutcomeLost      = "lost"    // agent vanished
+	OutcomeCancelled = "cancelled"
+	OutcomeTimeout   = "timeout"
+)
+
+// TaskUpdate is how an agent reports progress/finish of an attempt.
+type TaskUpdate struct {
+	Attempt  int      `json:"attempt"`
+	Outcome  string   `json:"outcome"`
+	ExitCode *int     `json:"exit_code,omitempty"`
+	Error    string   `json:"error,omitempty"`
+	Outputs  []string `json:"outputs,omitempty"` // names uploaded successfully
+}
+
+// LogChunk is a piece of a task's stdout/stderr.
+type LogChunk struct {
+	Attempt int    `json:"attempt"`
+	Seq     int    `json:"seq"`
+	Data    string `json:"data"`
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+// APIKey is an app credential (secret shown once at creation).
+type APIKey struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Role       string     `json:"role"` // "app" or "admin"
+	Prefix     string     `json:"prefix"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	Secret     string     `json:"secret,omitempty"`
+}
+
+// EnrolmentToken is a one-time token used by a new Mac (secret shown once).
+type EnrolmentToken struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Me describes the caller.
+type Me struct {
+	Subject string `json:"subject"`
+	Name    string `json:"name"`
+	Role    string `json:"role"` // admin, viewer, app
+	Via     string `json:"via"`  // oidc, apikey
+}
+
+// Roles.
+const (
+	RoleAdmin  = "admin"
+	RoleViewer = "viewer"
+	RoleApp    = "app"
+)
