@@ -68,6 +68,16 @@ umm fleet uninstall -inventory fleet.yaml          # remove agent
 umm fleet uninstall -inventory fleet.yaml -purge   # also remove config/user/sudoers
 ```
 
+Re-running `install` applies inventory changes (runtimes, labels, ...) to
+`agent.yaml` as long as the file on the Mac is still the one fleet wrote (fleet
+keeps its checksum next to it). A file edited on the Mac is kept, with a
+warning; pass `-replace-config` to overwrite it. After restarting the daemon,
+`install` waits up to 45 s for a heartbeat from the new agent process before
+reporting `telemetry: online`.
+
+The managed scripts are root-owned, so a newer `umm` with changed scripts only
+takes effect on a Mac after `umm fleet bootstrap` is run again there.
+
 Add host names/IPs as positional arguments to act on a subset:
 `umm fleet upgrade mac-a.example.com studio-b`.
 

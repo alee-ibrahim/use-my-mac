@@ -43,6 +43,9 @@ type Options struct {
 	SudoPassword  Secret // required for bootstrap
 	EnrolTTLHours int
 	Purge         bool // uninstall only
+	// ReplaceConfig (install) overwrites agent.yaml on the Mac even if it was
+	// edited locally or predates fleet's config tracking.
+	ReplaceConfig bool
 	Concurrency   int
 	SSH           SSHOptions
 	Dial          DialFunc
@@ -52,6 +55,11 @@ type Options struct {
 	// VerifyWindow is how recently a Mac must have been seen to count as
 	// "sending telemetry" after an install.
 	VerifyWindow time.Duration
+	// VerifyTimeout bounds how long install waits for the restarted agent's
+	// first heartbeat (default 45s).
+	VerifyTimeout time.Duration
+	// Sleep is used between router checks while verifying. Overridable for tests.
+	Sleep func(ctx context.Context, d time.Duration)
 }
 
 // HostResult is the per-host outcome.
@@ -83,6 +91,17 @@ func NewRunner(opt Options) *Runner {
 	}
 	if opt.VerifyWindow <= 0 {
 		opt.VerifyWindow = 90 * time.Second
+	}
+	if opt.VerifyTimeout <= 0 {
+		opt.VerifyTimeout = 45 * time.Second
+	}
+	if opt.Sleep == nil {
+		opt.Sleep = func(ctx context.Context, d time.Duration) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+			}
+		}
 	}
 	if opt.Dial == nil {
 		opt.Dial = func(ctx context.Context, h ResolvedHost, o SSHOptions) (Target, error) {
@@ -210,6 +229,15 @@ func (r *Runner) install(ctx context.Context, t Target, h ResolvedHost) HostResu
 		files["enrol-token"] = staged{[]byte(tok.Token), 0o600}
 		minted = true
 	}
+	if r.opt.ReplaceConfig {
+		files["replace-config"] = staged{[]byte("1\n"), 0o644}
+	}
+	// Remember the router's last heartbeat for this Mac before the restart, so
+	// verification below only accepts a heartbeat from the new agent process.
+	var before *time.Time
+	if minted {
+		before = r.lastSeen(ctx, h)
+	}
 	stage, cleanup, err := r.stage(ctx, t, files)
 	if err != nil {
 		return HostResult{Status: "failed", Message: "stage", Err: err}
@@ -227,8 +255,11 @@ func (r *Runner) install(ctx context.Context, t Target, h ResolvedHost) HostResu
 		return HostResult{Status: "failed", Message: "install", Err: remoteErr("install", res)}
 	}
 	msg := strings.TrimSpace(lastLine(res.Stdout))
+	if w := warnings(res.Stderr); w != "" {
+		msg += "; " + w
+	}
 	if minted {
-		if v := r.verify(ctx, h); v != "" {
+		if v := r.verifyFresh(ctx, h, before); v != "" {
 			msg += "; " + v
 		}
 	}
@@ -297,6 +328,69 @@ func (r *Runner) status(ctx context.Context, t Target, h ResolvedHost) HostResul
 		msg += "; " + v
 	}
 	return HostResult{Status: "ok", Message: msg}
+}
+
+// lastSeen returns the router's last heartbeat time for h, or nil.
+func (r *Runner) lastSeen(ctx context.Context, h ResolvedHost) *time.Time {
+	if r.opt.Router_ == nil {
+		return nil
+	}
+	macs, err := r.opt.Router_.Macs(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, m := range macs {
+		if m.Name == h.Name && m.LastSeen != nil {
+			t := *m.LastSeen
+			return &t
+		}
+	}
+	return nil
+}
+
+// verifyFresh waits (bounded by VerifyTimeout) for a heartbeat newer than
+// before, i.e. one sent by the agent process the install just (re)started. A
+// heartbeat recorded before the restart proves nothing about the new process,
+// and the first one can take a few seconds to arrive. Comparing router
+// timestamps with each other avoids clock skew with the admin workstation.
+func (r *Runner) verifyFresh(ctx context.Context, h ResolvedHost, before *time.Time) string {
+	if r.opt.Router_ == nil {
+		return ""
+	}
+	deadline := r.opt.Now().Add(r.opt.VerifyTimeout)
+	last := "not yet on the router"
+	for {
+		macs, err := r.opt.Router_.Macs(ctx)
+		if err != nil {
+			last = "router check failed: " + err.Error()
+		} else {
+			last = "not yet on the router"
+			for _, m := range macs {
+				if m.Name != h.Name {
+					continue
+				}
+				if m.LastSeen != nil && (before == nil || m.LastSeen.After(*before)) {
+					return "telemetry: online"
+				}
+				last = "registered but no heartbeat since restart"
+			}
+		}
+		if ctx.Err() != nil || !r.opt.Now().Before(deadline) {
+			return last + fmt.Sprintf(" (waited %s)", r.opt.VerifyTimeout)
+		}
+		r.opt.Sleep(ctx, 2*time.Second)
+	}
+}
+
+// warnings returns the remote script's "warning:" lines from stderr, joined.
+func warnings(stderr string) string {
+	var out []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "warning: ") {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // verify asks the router whether the Mac is present and sending telemetry.

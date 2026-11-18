@@ -16,7 +16,18 @@ install -m 0755 -o root -g wheel "$STAGE/umm-agent" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 
 if ! launchctl kickstart -k "system/${LABEL}" 2>/dev/null; then
+  # Not loaded (or kickstart refused): load it. Same bootout race as install.
   launchctl bootout "system/${LABEL}" 2>/dev/null || true
-  [ -f "$PLIST" ] && launchctl bootstrap system "$PLIST" || true
+  i=0
+  while launchctl print "system/${LABEL}" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+    i=$((i + 1)); sleep 0.2
+  done
+  if [ -f "$PLIST" ]; then
+    n=0
+    until launchctl bootstrap system "$PLIST"; do
+      n=$((n + 1)); [ "$n" -lt 5 ] || { echo "launchctl bootstrap ${LABEL} failed" >&2; exit 1; }
+      sleep 1
+    done
+  fi
 fi
 echo "upgraded: $("$BIN" version 2>/dev/null || echo unknown)"

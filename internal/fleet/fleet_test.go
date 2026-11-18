@@ -73,6 +73,10 @@ type fakeRouter struct {
 	token    string
 	macName  string
 	lastSeen *time.Time
+	// tick advances lastSeen by a second on every Macs call, like a live
+	// agent heartbeating; without it lastSeen stays put (a stale record).
+	tick  bool
+	calls int
 }
 
 func (r *fakeRouter) CreateEnrolmentToken(ctx context.Context, ttl int) (*api.EnrolmentToken, error) {
@@ -80,6 +84,11 @@ func (r *fakeRouter) CreateEnrolmentToken(ctx context.Context, ttl int) (*api.En
 }
 
 func (r *fakeRouter) Macs(ctx context.Context) ([]api.Mac, error) {
+	r.calls++
+	if r.tick && r.lastSeen != nil {
+		t := r.lastSeen.Add(time.Second)
+		r.lastSeen = &t
+	}
 	return []api.Mac{{Name: r.macName, Online: true, LastSeen: r.lastSeen}}, nil
 }
 
@@ -106,6 +115,9 @@ func newRunner(t *testing.T, ft *fakeTarget, buf *bytes.Buffer, opt Options) *Ru
 	opt.Dial = func(ctx context.Context, h ResolvedHost, o SSHOptions) (Target, error) { return ft, nil }
 	opt.Log = slog.New(slog.NewTextHandler(buf, nil))
 	opt.Now = time.Now
+	if opt.Sleep == nil {
+		opt.Sleep = func(ctx context.Context, d time.Duration) {}
+	}
 	return NewRunner(opt)
 }
 
@@ -171,7 +183,7 @@ func TestInstallTokenHandling(t *testing.T) {
 	}}
 	var log bytes.Buffer
 	now := time.Now()
-	fr := &fakeRouter{token: "umm_enrol_SECRETTOKEN", macName: "studio-a", lastSeen: &now}
+	fr := &fakeRouter{token: "umm_enrol_SECRETTOKEN", macName: "studio-a", lastSeen: &now, tick: true}
 	r := newRunner(t, ft, &log, Options{Router: "https://umm.example.com", Bundle: testBundle(t), Router_: fr})
 	res := r.Run(context.Background(), []ResolvedHost{testHost()}, ActionInstall)
 	if len(res) != 1 || !res[0].OK() {
@@ -241,13 +253,58 @@ func TestIdempotentReinstall(t *testing.T) {
 	ft := &fakeTarget{respond: func(cmd string) Result { return Result{ExitCode: 0, Stdout: "installed: running\n"} }}
 	var log bytes.Buffer
 	now := time.Now()
-	fr := &fakeRouter{token: "tok", macName: "studio-a", lastSeen: &now}
+	fr := &fakeRouter{token: "tok", macName: "studio-a", lastSeen: &now, tick: true}
 	r := newRunner(t, ft, &log, Options{Router: "https://umm.example.com", Bundle: testBundle(t), Router_: fr})
 	for i := 0; i < 2; i++ {
 		res := r.Run(context.Background(), []ResolvedHost{testHost()}, ActionInstall)
 		if !res[0].OK() {
 			t.Fatalf("run %d not ok: %+v", i, res[0])
 		}
+	}
+}
+
+// A heartbeat recorded before the restart must not count as the new agent
+// being online: install waits for a newer one and reports when none arrives.
+func TestInstallIgnoresStaleHeartbeat(t *testing.T) {
+	ft := &fakeTarget{respond: func(cmd string) Result { return Result{ExitCode: 0, Stdout: "installed: running\n"} }}
+	var log bytes.Buffer
+	old := time.Now().Add(-10 * time.Second)
+	fr := &fakeRouter{token: "tok", macName: "studio-a", lastSeen: &old}
+	clock := time.Now()
+	r := newRunner(t, ft, &log, Options{Router: "https://umm.example.com", Bundle: testBundle(t), Router_: fr})
+	r.opt.Now = func() time.Time { return clock }
+	r.opt.Sleep = func(ctx context.Context, d time.Duration) { clock = clock.Add(d) }
+	res := r.Run(context.Background(), []ResolvedHost{testHost()}, ActionInstall)
+	if strings.Contains(res[0].Message, "telemetry: online") {
+		t.Fatalf("stale heartbeat counted as online: %q", res[0].Message)
+	}
+	if !strings.Contains(res[0].Message, "no heartbeat since restart") {
+		t.Errorf("message = %q", res[0].Message)
+	}
+	if fr.calls < 3 {
+		t.Errorf("expected repeated router checks, got %d", fr.calls)
+	}
+}
+
+// -replace-config stages a marker file; install warnings on stderr surface.
+func TestInstallReplaceConfigAndWarnings(t *testing.T) {
+	ft := &fakeTarget{respond: func(cmd string) Result {
+		return Result{ExitCode: 0, Stdout: "installed: running\n", Stderr: "warning: kept /usr/local/etc/umm/agent.yaml\n"}
+	}}
+	var log bytes.Buffer
+	r := newRunner(t, ft, &log, Options{Router: "https://umm.example.com", Bundle: testBundle(t), ReplaceConfig: true})
+	res := r.Run(context.Background(), []ResolvedHost{testHost()}, ActionInstall)
+	if !res[0].OK() || !strings.Contains(res[0].Message, "warning: kept") {
+		t.Fatalf("result: %+v", res[0])
+	}
+	found := false
+	for _, u := range ft.uploads {
+		if filepath.Base(u.Path) == "replace-config" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("replace-config marker not staged")
 	}
 }
 
