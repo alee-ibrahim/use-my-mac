@@ -50,7 +50,7 @@ scheduler:
 
 A Mac is skipped (with a reason shown in the dashboard) if it is offline, drained, opted out, quarantined,
 or not `ready` (yielding, cooldown, paused). It is also skipped if it is excluded for this task, lacks the
-runtime, has non-matching labels or is at `max_tasks`. Resource reasons: the task needs more RAM than the Mac
+runtime (or has it allowlisted but unavailable: the agent's preflight failed, or a task could not execute it), has non-matching labels or is at `max_tasks`. Resource reasons: the task needs more RAM than the Mac
 has, or free memory minus RAM reserved by our other tasks on it is too small. Machine-state reasons: critical
 memory pressure, critical thermal state, too little free disk, or running on battery (unless
 `allow_battery`, and then only above `min_battery_percent`).
@@ -307,6 +307,8 @@ removes its metrics; its past attempts stay with their jobs.
 | --- | --- | --- |
 | Task exits non-zero / missing output | agent report | failure: `failures++`, exclude that Mac for `fail_exclude`, retry after `backoff_base × 2^(n−1)` (max `backoff_max`); give up after `max_retries` |
 | Task exceeds timeout | agent kills it | as a failure (`timeout`) |
+| Runtime program missing or not executable | agent preflight (startup, every `preflight_interval`, `SIGHUP`) | runtime not advertised; shown as unavailable with the reason; never scheduled there |
+| Task cannot execute its runtime (exit 127, exec `ENOENT`/`EACCES`) | agent report (`runtime_unavailable`, or a bare exit 127 from older agents) | Mac fault: attempt `unavailable`, no failure counted, requeued at once, Mac excluded for that task for `yield_exclude`; the runtime is unavailable on that Mac until a newer preflight reports it (agents without preflight: `legacy_fault_ttl`). After `max_mac_faults` such attempts a task's further ones count as failures |
 | Agent dies silently mid-task | no heartbeat for `heartbeat_timeout` | requeue (`lost`), no failure counted; if the agent comes back and still reports the task it is told to stop |
 | Mac's user goes heavy | yield policy | `yielded`, requeue at once, Mac excluded for that task for `yield_exclude` |
 | Mac keeps failing tasks | `quarantine_after` consecutive failures | quarantined for `quarantine_for` (no new work); a success resets the count |

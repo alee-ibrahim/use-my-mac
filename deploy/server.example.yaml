@@ -60,6 +60,8 @@ scheduler:
   yield_exclude: 5m        # a Mac that yielded a task is skipped for that task
   quarantine_after: 3      # consecutive failures before a Mac is quarantined
   quarantine_for: 10m
+  max_mac_faults: 5        # free reschedules per task when a Mac cannot run its runtime (exit 127)
+  legacy_fault_ttl: 30m    # agents without runtime preflight get a faulted runtime back after this
   weights: {presence: 3, load: 2, spread: 1.5, memory: 1, power: 1, thermal: 1, gpu: 1.5, capacity: 0.5}
   limits: {idle_full_seconds: 900, min_disk_free_mb: 2048, allow_battery: false, min_battery_percent: 40}
 

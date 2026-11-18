@@ -257,6 +257,18 @@ runtimes:
 - Allowlist specific scripts, not bare interpreters: `python3` alone would let a task run any code.
 - The router only places a task on Macs that have its runtime. `umm macs` and the dashboard show each Mac's
   runtimes.
+- **Preflight.** At startup, every minute (`preflight_interval`) and on `SIGHUP` (which re-reads the
+  `runtimes` block; other settings need a restart) the agent checks that each runtime's program exists, is a
+  regular file and is executable by `_umm`. Runtimes that fail are not offered: the dashboard shows them
+  struck through on the **Macs** page (hover for the reason), `umm macs` lists them under *Unavailable
+  runtimes*, and the scheduler never places a task needing one there. Install the program and the runtime
+  comes back within a minute, without a restart.
+- **Exit 127.** If a task still cannot start its runtime on a Mac (exit 127 "command not found", or the
+  program is missing or not executable at start), that is the Mac's fault, not the task's: the attempt ends as
+  `unavailable`, does not use up `max_retries`, and the task is rescheduled on another Mac at once. The runtime
+  stays unavailable on that Mac until a later preflight sees the program changed (or 15 minutes pass), and a
+  `mac.runtime_unavailable` event is logged. After `max_mac_faults` (5) such attempts a task's further ones
+  count as normal failures, so it cannot bounce forever.
 - Tasks run as the hidden non-admin `_umm` user at background priority (`taskpolicy -b`), in a fresh private
   work dir that is deleted afterwards. Install the tools they need where that user can read them.
 
@@ -527,5 +539,6 @@ the Macs check the signature themselves.
 | `400` on submit | the error text | unknown field, duplicate task key, cycle, an input with no or several sources, or a disallowed `env` name |
 | Mac shows offline | `umm-agent telemetry` and the agent log on the Mac | network or proxy to the router, a revoked credential, or the daemon is not loaded |
 | Mac never `ready` | the Mac's state and reason in the dashboard | paused (`paused` file), drained, quarantined after repeated failures, on battery, or its user is busy |
-| Program not found or permission denied | the runtime path in `agent.yaml` | the path must be absolute and readable and executable by `_umm` |
+| Program not found or permission denied; a runtime is struck through on the **Macs** page or listed under *Unavailable runtimes* in `umm macs` | the reason in its tooltip / `umm macs`, and the runtime path in `agent.yaml` | the program is not installed on that Mac (e.g. Homebrew `ffmpeg` missing), or the path or a parent directory is not readable and executable by `_umm`. Install or fix it; the agent re-checks every minute (or run `sudo launchctl kill HUP system/io.github.alee-ibrahim.umm-agent` after editing `agent.yaml`). No task is placed there meanwhile |
+| Attempts with outcome `unavailable` (exit 127) | `umm logs TASK`, the **Activity** page (`mac.runtime_unavailable`) | the Mac could not execute the runtime. The task moved to another Mac without using a retry, and that Mac lost the runtime until its program is fixed |
 | Mac stays on an old version | its update state and history (click the version on the **Macs** page) | updates paused, a downgrade without a pinned version (`refused`), a version that rolled back (retried after 1 h, then 2 h, ... up to a day), or "no updater" on Macs installed before self-update |

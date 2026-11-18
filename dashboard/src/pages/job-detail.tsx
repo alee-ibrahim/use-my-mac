@@ -35,7 +35,12 @@ const outcomeGroups = [
   { key: "failed", label: "Failed / timeout", color: "var(--chart-2)", match: ["failed", "timeout"] },
   { key: "running", label: "Running", color: "var(--chart-3)", match: ["running"] },
   { key: "yielded", label: "Yielded", color: "var(--chart-4)", match: ["yielded"] },
-  { key: "other", label: "Lost / cancelled", color: "var(--chart-muted)", match: ["lost", "cancelled"] },
+  {
+    key: "other",
+    label: "Lost / cancelled / Mac fault",
+    color: "var(--chart-muted)",
+    match: ["lost", "cancelled", "unavailable"],
+  },
 ]
 const groupOf = (outcome: string) => outcomeGroups.find((g) => g.match.includes(outcome)) ?? outcomeGroups[4]
 const timelineConfig = Object.fromEntries(outcomeGroups.map((g) => [g.key, { label: g.label, color: g.color }])) as ChartConfig

@@ -57,6 +57,9 @@ type Candidate struct {
 	Quarantined bool
 	Excluded    bool // excluded for this specific task (it failed/yielded here)
 	Runtimes    []string
+	// Unavailable maps allowlisted runtimes the Mac cannot run to the
+	// reason (preflight failure or exec fault). They never match.
+	Unavailable map[string]string
 	Labels      map[string]string
 	MaxTasks    int
 	Active      int // our tasks assigned or running on it
@@ -143,6 +146,9 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 		return reject("agent %s", c.AgentState)
 	case c.Excluded:
 		return reject("excluded for this task")
+	}
+	if why, bad := c.Unavailable[n.Runtime]; bad {
+		return reject("runtime %q unavailable: %s", n.Runtime, why)
 	}
 	if !contains(c.Runtimes, n.Runtime) {
 		return reject("runtime %q not available", n.Runtime)

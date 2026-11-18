@@ -13,6 +13,7 @@ const variants: Record<string, "default" | "secondary" | "destructive" | "outlin
   yielding: "secondary",
   yielded: "secondary",
   lost: "secondary",
+  unavailable: "secondary",
   offline: "destructive",
   failed: "destructive",
   timeout: "destructive",

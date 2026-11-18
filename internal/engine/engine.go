@@ -47,6 +47,14 @@ type Config struct {
 	QuarantineFor     time.Duration `json:"quarantine_for" yaml:"quarantine_for"`
 	MaxLogBytes       int           `json:"max_log_bytes" yaml:"max_log_bytes"`
 	EnrolTokenTTL     time.Duration `json:"enrol_token_ttl" yaml:"enrol_token_ttl"`
+	// MaxMacFaults is how many times one task is rescheduled for free
+	// because a Mac could not execute its runtime (program missing, exit
+	// 127). Further such attempts count against the task's max_retries, so
+	// a task cannot bounce forever.
+	MaxMacFaults int `json:"max_mac_faults" yaml:"max_mac_faults"`
+	// LegacyFaultTTL: agents without runtime preflight never confirm a
+	// runtime is back, so the router retries it after this long.
+	LegacyFaultTTL time.Duration `json:"legacy_fault_ttl" yaml:"legacy_fault_ttl"`
 }
 
 // DefaultConfig returns production defaults.
@@ -68,6 +76,8 @@ func DefaultConfig() Config {
 		QuarantineFor:     10 * time.Minute,
 		MaxLogBytes:       1 << 20,
 		EnrolTokenTTL:     24 * time.Hour,
+		MaxMacFaults:      5,
+		LegacyFaultTTL:    30 * time.Minute,
 	}
 }
 
@@ -89,6 +99,15 @@ type live struct {
 	wake chan struct{}
 	// updDrainUntil: the updater has the Mac drained until then.
 	updDrainUntil time.Time
+	// Runtime availability (see runtimes.go): faults are runtimes the
+	// router marked unavailable after an exec failure; runtimes/unavail are
+	// the effective view the scheduler and the API use.
+	faults       map[string]runtimeFault
+	faultsLoaded bool
+	runtimes     []string
+	unavail      []api.UnavailableRuntime
+	savedUnavail string
+	savedFaults  string
 }
 
 // Engine is safe for concurrent use.
@@ -378,7 +397,7 @@ func (e *Engine) Heartbeat(ctx context.Context, agentID string, hb api.Heartbeat
 	}
 	a.LastSeen, a.State, a.Reason = ms(now), hb.State, hb.Reason
 	a.Telemetry = jsonStr(hb.Telemetry)
-	a.Runtimes, a.Labels = jsonStr(nonNil(hb.Runtimes)), jsonStr(nonNilMap(hb.Labels))
+	a.Runtimes, a.Labels = jsonStr(nonNil(e.applyRuntimesLocked(ctx, agentID, l, now))), jsonStr(nonNilMap(hb.Labels))
 	a.MaxTasks, a.Version = hb.MaxTasks, hb.Version
 	if err := e.st.UpdateAgentHeartbeat(ctx, a); err != nil {
 		return api.HeartbeatResponse{}, err
@@ -618,6 +637,10 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		}
 		e.outcome(api.OutcomeSucceeded, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
 	case api.OutcomeFailed, api.OutcomeTimeout:
+		if why := macFault(u); why != "" {
+			e.runtimeFaultLocked(ctx, t, agentID, spec.Runtime, why, u.ExitCode, now)
+			break
+		}
 		msg := u.Error
 		if msg == "" {
 			msg = u.Outcome
@@ -893,7 +916,13 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 			Active: active[a.ID], ReservedMB: reserved[a.ID],
 		}
 		if l := e.live[a.ID]; l != nil {
-			c.AgentState, c.Telemetry, c.Runtimes, c.Labels = l.hb.State, l.hb.Telemetry, l.hb.Runtimes, l.hb.Labels
+			c.AgentState, c.Telemetry, c.Runtimes, c.Labels = l.hb.State, l.hb.Telemetry, l.runtimes, l.hb.Labels
+			if len(l.unavail) > 0 {
+				c.Unavailable = map[string]string{}
+				for _, u := range l.unavail {
+					c.Unavailable[u.Name] = u.Reason
+				}
+			}
 			if l.hb.MaxTasks > 0 {
 				c.MaxTasks = l.hb.MaxTasks
 			}

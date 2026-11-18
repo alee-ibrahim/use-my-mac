@@ -374,6 +374,10 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 	if err != nil {
 		return nil, err
 	}
+	rts, err := e.st.ListAgentRuntimes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	us := e.UpdateSettings()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -391,6 +395,11 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		}
 		m.Update = macUpdate(updates[a.ID], selfupdate.ResolveTarget(us, e.version, a.ID).Version)
 		_ = json.Unmarshal([]byte(a.Runtimes), &m.Runtimes)
+		if l := e.live[a.ID]; l != nil && l.faultsLoaded {
+			m.UnavailableRuntimes = l.unavail
+		} else if r := rts[a.ID]; r != nil {
+			_ = json.Unmarshal([]byte(r.Unavailable), &m.UnavailableRuntimes)
+		}
 		_ = json.Unmarshal([]byte(a.Labels), &m.Labels)
 		if a.Telemetry != "" {
 			var t api.Telemetry

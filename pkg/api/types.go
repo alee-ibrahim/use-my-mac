@@ -224,7 +224,31 @@ type Mac struct {
 	// Update is the agent self-update status (nil before the updater has
 	// ever checked in).
 	Update *MacUpdate `json:"update,omitempty"`
+	// UnavailableRuntimes are allowlisted runtimes the Mac cannot run, with
+	// the reason. Runtimes lists only the ones it can run; the scheduler
+	// never places a task needing an unavailable runtime here.
+	UnavailableRuntimes []UnavailableRuntime `json:"unavailable_runtimes,omitempty"`
 }
+
+// UnavailableRuntime is an allowlisted runtime that a Mac cannot run.
+type UnavailableRuntime struct {
+	Name string `json:"name"`
+	// Program is the runtime's executable path (argv[0]).
+	Program string `json:"program,omitempty"`
+	// Reason says why, e.g. "program not found: /opt/homebrew/bin/ffmpeg".
+	Reason string `json:"reason"`
+	// Source: "preflight" (the agent's own check) or "exec" (a task could
+	// not execute it; it stays unavailable until the agent's next
+	// preflight shows it available again).
+	Source string     `json:"source,omitempty"`
+	Since  *time.Time `json:"since,omitempty"`
+}
+
+// Sources of an UnavailableRuntime.
+const (
+	RuntimeSourcePreflight = "preflight"
+	RuntimeSourceExec      = "exec"
+)
 
 // MacPatch is used by admins to drain, opt out or rename a Mac.
 type MacPatch struct {
@@ -266,6 +290,16 @@ type Heartbeat struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	MaxTasks  int               `json:"max_tasks"`
 	Version   string            `json:"version"`
+	// Runtimes above lists only the runtimes that passed the agent's
+	// preflight (the program exists, is a regular file and the agent's user
+	// may execute it). UnavailableRuntimes are the allowlisted ones that
+	// failed it.
+	UnavailableRuntimes []UnavailableRuntime `json:"unavailable_runtimes,omitempty"`
+	// PreflightID changes every time the agent re-runs its runtime
+	// preflight (0 = an agent without preflight). The router clears a
+	// runtime it marked unavailable after an exec failure once a newer
+	// preflight reports the runtime as available again.
+	PreflightID int64 `json:"preflight_id,omitempty"`
 }
 
 // HeartbeatResponse tells the agent what to stop.
@@ -318,6 +352,10 @@ const (
 	OutcomeLost      = "lost"    // agent vanished
 	OutcomeCancelled = "cancelled"
 	OutcomeTimeout   = "timeout"
+	// OutcomeUnavailable: the Mac could not execute the task's runtime
+	// (program missing or not executable, exit 127). That is the Mac's
+	// fault, so it does not count against the task's max_retries.
+	OutcomeUnavailable = "unavailable"
 )
 
 // TaskUpdate is how an agent reports progress/finish of an attempt.
@@ -327,6 +365,11 @@ type TaskUpdate struct {
 	ExitCode *int     `json:"exit_code,omitempty"`
 	Error    string   `json:"error,omitempty"`
 	Outputs  []string `json:"outputs,omitempty"` // names uploaded successfully
+	// RuntimeUnavailable is set (with the reason) when the agent could not
+	// execute the runtime's program at all (exec ENOENT/EACCES, or exit
+	// 127 from the launcher). The router then treats the attempt as a Mac
+	// fault. Routers also treat a bare exit code 127 this way.
+	RuntimeUnavailable string `json:"runtime_unavailable,omitempty"`
 }
 
 // LogChunk is a piece of a task's stdout/stderr.

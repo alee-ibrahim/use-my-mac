@@ -53,6 +53,15 @@ type Agent struct {
 	haveTel bool
 	// applyQoS moves a task's process group into or out of background QoS.
 	applyQoS func(pgid int, background bool) error
+
+	// Runtime preflight (see preflight.go). runtimes is the allowlist
+	// (replaced on reload); avail/unavail are the last preflight's result.
+	runtimes      map[string][]string
+	avail         []string
+	unavail       map[string]api.UnavailableRuntime
+	faults        map[string]execFault
+	preflightID   int64
+	lastPreflight time.Time
 }
 
 type run struct {
@@ -84,7 +93,10 @@ func New(cfg *Config, cred string, collector telemetry.Collector, log *slog.Logg
 		running:  map[string]*run{},
 		capacity: make(chan struct{}, 1),
 		applyQoS: setGroupBackground,
+		unavail:  map[string]api.UnavailableRuntime{},
+		faults:   map[string]execFault{},
 	}
+	a.ReloadRuntimes(cfg.Runtimes)
 	if collector == nil {
 		collector = telemetry.NewDefault(telemetry.Options{
 			WorkDir: cfg.WorkDir, UserLoadScope: cfg.UserLoadScope, OurUID: os.Getuid(),
@@ -144,7 +156,14 @@ func (a *Agent) call(ctx context.Context, method, path string, in, out any) erro
 // Enrol exchanges a one-time token for a credential. The token must come
 // from the environment or stdin, never argv.
 func Enrol(ctx context.Context, cfg *Config, token string) (*api.EnrolResponse, error) {
-	req := api.EnrolRequest{Token: token, Name: cfg.Name, Runtimes: cfg.RuntimeNames(), Labels: cfg.Labels,
+	// Only runtimes that pass the preflight; heartbeats keep this current.
+	rts := []string{}
+	for _, n := range cfg.RuntimeNames() {
+		if CheckProgram(cfg.Runtimes[n][0]) == "" {
+			rts = append(rts, n)
+		}
+	}
+	req := api.EnrolRequest{Token: token, Name: cfg.Name, Runtimes: rts, Labels: cfg.Labels,
 		MaxTasks: cfg.MaxTasks, Version: Version}
 	b, _ := json.Marshal(req)
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Server+"/v1/agent/enrol", bytes.NewReader(b))
@@ -233,6 +252,11 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	now := time.Now()
 	a.mu.Lock()
+	if now.Sub(a.lastPreflight) >= a.cfg.PreflightInterval {
+		a.preflightLocked(now)
+	}
+	avail, unavail := a.runtimeStatusLocked()
+	preflightID := a.preflightID
 	a.lastTel, a.haveTel = tel, true
 	state, changed := a.yield.Update(now, tel)
 	_, reason := a.yield.State()
@@ -272,7 +296,8 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	a.adjustQoS()
 
 	hb := api.Heartbeat{State: state, Reason: reason, Telemetry: tel, Running: nonNilS(running),
-		Runtimes: a.cfg.RuntimeNames(), Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version}
+		Runtimes: avail, UnavailableRuntimes: unavail, PreflightID: preflightID,
+		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version}
 	var resp api.HeartbeatResponse
 	if err := a.call(ctx, http.MethodPost, "/v1/agent/heartbeat", hb, &resp); err != nil {
 		if ctx.Err() == nil {
@@ -452,9 +477,10 @@ func (a *Agent) report(taskID string, upd api.TaskUpdate) {
 func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	as := r.as
 	upd := api.TaskUpdate{Attempt: as.Attempt}
-	prefix, ok := a.cfg.Runtimes[as.Runtime]
-	if !ok {
-		upd.Outcome, upd.Error = api.OutcomeFailed, "runtime "+as.Runtime+" is not allowlisted on this Mac"
+	prefix, why := a.runtimeFor(as.Runtime)
+	if why != "" {
+		// The router placed it before it learned; it is the Mac's fault.
+		upd.Outcome, upd.Error, upd.RuntimeUnavailable = api.OutcomeFailed, why, why
 		return upd
 	}
 	workdir := filepath.Join(a.cfg.WorkDir, fmt.Sprintf("%s-%d", as.TaskID, as.Attempt))
@@ -510,6 +536,10 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	setupProc(cmd)
 	if err := cmd.Start(); err != nil {
 		upd.Outcome, upd.Error = api.OutcomeFailed, "start: "+err.Error()
+		if why := execFailureReason(prefix[0], err, 0); why != "" {
+			upd.RuntimeUnavailable = why
+			a.markExecFault(as.Runtime, why)
+		}
 		return upd
 	}
 	a.mu.Lock()
@@ -530,6 +560,12 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	}
 	if werr != nil {
 		upd.Outcome, upd.Error = api.OutcomeFailed, werr.Error()
+		if upd.ExitCode != nil {
+			if why := execFailureReason(prefix[0], nil, *upd.ExitCode); why != "" {
+				upd.RuntimeUnavailable = why
+				a.markExecFault(as.Runtime, why)
+			}
+		}
 		return upd
 	}
 

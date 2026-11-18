@@ -179,3 +179,18 @@ func TestBackoff(t *testing.T) {
 		}
 	}
 }
+
+func TestUnavailableRuntimeFilters(t *testing.T) {
+	c := baseCand("a")
+	// Even if a stale runtime list still names it, an unavailable runtime
+	// never matches, and the reason is surfaced.
+	c.Unavailable = map[string]string{"ffmpeg": "program not found: /opt/homebrew/bin/ffmpeg"}
+	r := Score(c, need, DefaultWeights(), DefaultLimits())
+	if r.OK || !strings.Contains(r.Reason, "program not found") {
+		t.Fatalf("want filtered with reason, got %+v", r)
+	}
+	c.Unavailable = map[string]string{"other": "missing"}
+	if r := Score(c, need, DefaultWeights(), DefaultLimits()); !r.OK {
+		t.Fatalf("other runtimes must not matter: %s", r.Reason)
+	}
+}

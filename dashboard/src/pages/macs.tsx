@@ -35,7 +35,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useIsMobile } from "@/hooks/use-mobile"
 import { api, bytes, since, type Mac } from "@/lib/api"
 import { href, usePolling } from "@/lib/hooks"
-import { MacStateBadges, PresenceLine, VersionLine } from "@/components/mac-bits"
+import { MacStateBadges, PresenceLine, RuntimeBadges, VersionLine } from "@/components/mac-bits"
 import { AddMac, InstallLinks } from "@/pages/install"
 
 function Meter({ value, label }: { value: number; label: string }) {
@@ -293,6 +293,7 @@ function MacListCard({ m, admin, onChanged }: { m: Mac; admin: boolean; onChange
         <div className="text-sm">
           <PresenceLine m={m} />
         </div>
+        <RuntimeBadges m={m} />
         <dl className="grid grid-cols-3 gap-2 text-xs">
           <div>
             <dt className="text-muted-foreground">Our CPU</dt>
@@ -330,6 +331,7 @@ function MacTable({ macs, admin, onChanged }: { macs: Mac[]; admin: boolean; onC
           <TableHead className="hidden xl:table-cell">Power</TableHead>
           <TableHead className="hidden xl:table-cell">Thermal</TableHead>
           <TableHead>Tasks</TableHead>
+          <TableHead className="hidden lg:table-cell">Runtimes</TableHead>
           <TableHead className="hidden lg:table-cell">Version</TableHead>
           {admin && <TableHead className="w-10" />}
         </TableRow>
@@ -393,6 +395,9 @@ function MacTable({ macs, admin, onChanged }: { macs: Mac[]; admin: boolean; onC
               <TableCell className="hidden xl:table-cell">{t?.thermal || "–"}</TableCell>
               <TableCell className="tabular-nums">
                 {m.running.length}/{m.max_tasks}
+              </TableCell>
+              <TableCell className="hidden max-w-48 lg:table-cell">
+                <RuntimeBadges m={m} />
               </TableCell>
               <TableCell className="hidden lg:table-cell">
                 <VersionLine m={m} />
