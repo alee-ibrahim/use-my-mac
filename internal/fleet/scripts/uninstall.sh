@@ -12,11 +12,13 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
+launchctl bootout "system/${LABEL}.updater" 2>/dev/null || true
 launchctl bootout "system/${LABEL}" 2>/dev/null || true
-rm -f "$PLIST" /usr/local/bin/umm-agent
+rm -f "/Library/LaunchDaemons/${LABEL}.updater.plist" "$PLIST" /usr/local/bin/umm-agent /usr/local/bin/.umm-agent.new
+rm -rf /usr/local/var/umm-updater
 
 if [ "$PURGE" = "--purge" ]; then
-  rm -rf /usr/local/etc/umm /usr/local/var/umm /usr/local/var/log/umm
+  rm -rf /usr/local/etc/umm /usr/local/var/umm /usr/local/var/log/umm /usr/local/var/log/umm-updater.log
   dscl . -delete "/Users/${SVC_USER}" 2>/dev/null || true
   dscl . -delete "/Groups/${SVC_USER}" 2>/dev/null || true
   rm -f /etc/sudoers.d/umm

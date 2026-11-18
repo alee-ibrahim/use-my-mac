@@ -81,6 +81,28 @@ takes effect on a Mac after `umm fleet bootstrap` is run again there.
 Add host names/IPs as positional arguments to act on a subset:
 `umm fleet upgrade mac-a.example.com studio-b`.
 
+## Agent self-update
+
+`install` and `upgrade` also install the agent's **root updater**: a second
+LaunchDaemon, `<service_label>.updater`, that runs `umm-agent update` at boot
+and every 15 minutes. From then on the Macs follow the version the router asks
+for (dashboard Settings, **Agent updates**), installing only signed releases
+and rolling back on failure. See [Design](design.md#agent-self-update) and
+[Usage](usage.md#agent-updates). After that, `umm fleet upgrade` is only
+needed to repair a Mac or to change the LaunchDaemons themselves.
+
+Macs installed before self-update existed have old managed scripts that do not
+know about the updater. Give them the updater once:
+
+```sh
+umm fleet bootstrap -inventory fleet.yaml -sudo-password-file ~/.umm/sudo.txt   # new scripts (sudo password)
+umm fleet upgrade   -inventory fleet.yaml                                        # installs the updater daemon
+umm fleet status    -inventory fleet.yaml                                        # shows "updater"
+```
+
+The updater runs from launchd as root, so the sudoers drop-in keeps granting
+only the three managed scripts. `uninstall` removes the updater too.
+
 Runs are **parallel** (bounded by `-concurrency`, default 5), **idempotent**
 (safe to re-run), and print a per-host result table. A non-zero exit means at
 least one host failed.
@@ -160,7 +182,7 @@ staff are not meant to notice:
 | Step | Privilege | Password? | Script |
 | --- | --- | --- | --- |
 | `bootstrap` | `sudo -S` (root) | yes, once | installs `/usr/local/libexec/umm/{install,upgrade,uninstall}` + `/etc/sudoers.d/umm` |
-| `install` | `sudo -n` (root) | no | creates `_umm`, installs binary/config/plist, enrols, loads the daemon |
-| `upgrade` | `sudo -n` (root) | no | replaces the binary, restarts the daemon |
+| `install` | `sudo -n` (root) | no | creates `_umm`, installs binary/config/plists, enrols, loads the agent and updater daemons |
+| `upgrade` | `sudo -n` (root) | no | replaces the binary, restarts the daemon, installs or refreshes the updater daemon |
 | `uninstall` | `sudo -n` (root) | no | stops and removes the agent (`-purge` also removes state, user, sudoers) |
-| `status` | none | no | reads agent version / daemon presence + router telemetry |
+| `status` | none | no | reads agent version / daemon and updater presence + router telemetry |

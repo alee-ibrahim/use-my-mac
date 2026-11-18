@@ -55,7 +55,35 @@ type Config struct {
 
 	// MaxLogBytes caps the log volume streamed per attempt.
 	MaxLogBytes int `yaml:"max_log_bytes"`
+
+	// Update configures the root updater (`umm-agent update`). The agent
+	// itself ignores it.
+	Update UpdateConfig `yaml:"update"`
 }
+
+// UpdateConfig is read by the root updater. agent.yaml is root-owned, so the
+// unprivileged agent cannot change where updates come from or which key
+// they must be signed with.
+type UpdateConfig struct {
+	// Enabled: nil/true = the updater acts on the router's target version;
+	// false = it never changes the binary.
+	Enabled *bool `yaml:"enabled"`
+	// Source: auto (default: through the router when it relays, else
+	// direct), router, or direct.
+	Source string `yaml:"source"`
+	// ReleaseURL is the direct download base: <release_url>/<version>/<file>.
+	// Default: the project's GitHub releases.
+	ReleaseURL string `yaml:"release_url"`
+	// PublicKey overrides the minisign public key built into the binary
+	// (for forks that sign their own releases).
+	PublicKey string `yaml:"public_key"`
+	// VerifyTimeout is how long a new agent has to heartbeat before the
+	// updater rolls back. Default 2m.
+	VerifyTimeout time.Duration `yaml:"verify_timeout"`
+}
+
+// UpdatesEnabled reports whether the updater may change the binary.
+func (u UpdateConfig) UpdatesEnabled() bool { return u.Enabled == nil || *u.Enabled }
 
 var runtimeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
@@ -148,6 +176,16 @@ func (c *Config) Normalize() error {
 	}
 	if c.MaxLogBytes <= 0 {
 		c.MaxLogBytes = 1 << 20
+	}
+	switch c.Update.Source {
+	case "":
+		c.Update.Source = "auto"
+	case "auto", "router", "direct":
+	default:
+		return fmt.Errorf("update.source must be auto, router or direct")
+	}
+	if c.Update.VerifyTimeout <= 0 {
+		c.Update.VerifyTimeout = 2 * time.Minute
 	}
 	return nil
 }

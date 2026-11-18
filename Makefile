@@ -28,7 +28,8 @@ agent-darwin:
 # Folder + tarball to copy to a Mac: binary, install script, launchd plist.
 dist-mac: agent-darwin
 	cp deploy/mac/install.sh deploy/mac/uninstall.sh deploy/mac/agent.example.yaml \
-		deploy/mac/io.github.alee-ibrahim.umm-agent.plist dist/umm-agent-darwin-arm64/
+		deploy/mac/io.github.alee-ibrahim.umm-agent.plist \
+		deploy/mac/io.github.alee-ibrahim.umm-agent.updater.plist dist/umm-agent-darwin-arm64/
 	tar -C dist -czf dist/umm-agent-darwin-arm64.tar.gz umm-agent-darwin-arm64
 
 docker:

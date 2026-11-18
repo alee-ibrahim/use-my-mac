@@ -210,11 +210,16 @@ func (r *Runner) install(ctx context.Context, t Target, h ResolvedHost) HostResu
 	if err != nil {
 		return HostResult{Status: "failed", Err: err}
 	}
+	updPlist, err := RenderUpdaterPlist(h.ServiceLabel)
+	if err != nil {
+		return HostResult{Status: "failed", Err: err}
+	}
 	files := map[string]staged{
-		"umm-agent":  {bin, 0o755},
-		"plist":      {plist, 0o644},
-		"agent.yaml": {agentYAML, 0o644},
-		"label":      {[]byte(h.ServiceLabel + "\n"), 0o644},
+		"umm-agent":     {bin, 0o755},
+		"plist":         {plist, 0o644},
+		"updater-plist": {updPlist, 0o644},
+		"agent.yaml":    {agentYAML, 0o644},
+		"label":         {[]byte(h.ServiceLabel + "\n"), 0o644},
 	}
 	// Mint a one-time enrolment token for this Mac. It is consumed by the
 	// agent only if the Mac is not already enrolled; a re-run leaves an unused
@@ -271,9 +276,14 @@ func (r *Runner) upgrade(ctx context.Context, t Target, h ResolvedHost) HostResu
 	if err != nil {
 		return HostResult{Status: "failed", Err: err}
 	}
+	updPlist, err := RenderUpdaterPlist(h.ServiceLabel)
+	if err != nil {
+		return HostResult{Status: "failed", Err: err}
+	}
 	stage, cleanup, err := r.stage(ctx, t, map[string]staged{
-		"umm-agent": {bin, 0o755},
-		"label":     {[]byte(h.ServiceLabel + "\n"), 0o644},
+		"umm-agent":     {bin, 0o755},
+		"updater-plist": {updPlist, 0o644},
+		"label":         {[]byte(h.ServiceLabel + "\n"), 0o644},
 	})
 	if err != nil {
 		return HostResult{Status: "failed", Message: "stage", Err: err}
@@ -317,7 +327,8 @@ func (r *Runner) status(ctx context.Context, t Target, h ResolvedHost) HostResul
 	// Read-only, no sudo: report the binary version and whether the daemon
 	// plist is present. The router-side telemetry check adds the live view.
 	cmd := "if [ -x /usr/local/bin/umm-agent ]; then /usr/local/bin/umm-agent version; else echo absent; fi; " +
-		fmt.Sprintf("if [ -f /Library/LaunchDaemons/%s.plist ]; then echo installed; else echo not-installed; fi", h.ServiceLabel)
+		fmt.Sprintf("if [ -f /Library/LaunchDaemons/%s.plist ]; then echo installed; else echo not-installed; fi; ", h.ServiceLabel) +
+		fmt.Sprintf("if [ -f /Library/LaunchDaemons/%s.updater.plist ]; then echo updater; else echo no-updater; fi", h.ServiceLabel)
 	res, err := t.Run(ctx, cmd, nil)
 	if err != nil {
 		return HostResult{Status: "failed", Message: "status", Err: err}

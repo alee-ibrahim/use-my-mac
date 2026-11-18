@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import {
   BatteryIcon,
@@ -33,11 +33,12 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Progress } from "@/components/ui/progress"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { api, bytes, duration, since, type Mac } from "@/lib/api"
+import { api, bytes, duration, since, type Mac, type UpdateEvent } from "@/lib/api"
 import { usePolling } from "@/lib/hooks"
 
 function Meter({ value, label }: { value: number; label: string }) {
@@ -63,6 +64,108 @@ function Presence({ m }: { m: Mac }) {
         <span className="text-xs text-muted-foreground">idle {duration(t.user_idle_seconds)}</span>
       )}
     </span>
+  )
+}
+
+// Version shows the agent version, the version the router wants on this Mac
+// and the self-updater's latest state. Clicking it opens the update history.
+function Version({ m, onHistory }: { m: Mac; onHistory: () => void }) {
+  const u = m.update
+  const pending = u?.desired && u.desired !== m.version
+  const showState = u?.state && u.state !== "up_to_date"
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <Button variant="link" size="sm" className="h-auto p-0 font-mono text-xs" onClick={onHistory}>
+        {m.version || "–"}
+        {pending && <span className="text-muted-foreground"> → {u?.desired}</span>}
+      </Button>
+      {showState && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span>
+              <StateBadge state={u.state!} />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-sm">
+            {u.message || u.state} {u.at ? `(${since(u.at)})` : ""}
+          </TooltipContent>
+        </Tooltip>
+      )}
+      {!u?.checked_at && m.version && (
+        <span className="text-xs text-muted-foreground">no updater</span>
+      )}
+    </div>
+  )
+}
+
+function UpdateHistory({ mac, onClose }: { mac?: Mac; onClose: () => void }) {
+  const [events, setEvents] = useState<UpdateEvent[]>()
+  const [error, setError] = useState<string>()
+  const id = mac?.id
+  useEffect(() => {
+    if (!id) return
+    let live = true
+    api.macUpdates(id).then(
+      (e) => live && setEvents(e),
+      (e) => live && setError(String(e)),
+    )
+    return () => {
+      live = false
+      setEvents(undefined)
+      setError(undefined)
+    }
+  }, [id])
+  return (
+    <Dialog open={!!mac} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Agent updates: {mac?.name}</DialogTitle>
+          <DialogDescription>
+            Running {mac?.version || "unknown"}
+            {mac?.update?.desired ? `, router wants ${mac.update.desired}` : ""}
+            {mac?.update?.checked_at ? `. Updater last checked ${since(mac.update.checked_at)}.` : ". The updater has not checked in."}
+          </DialogDescription>
+        </DialogHeader>
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {!events && !error ? (
+          <Spinner />
+        ) : events && events.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No update attempts yet.</p>
+        ) : (
+          <ScrollArea className="max-h-96">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>When</TableHead>
+                  <TableHead>State</TableHead>
+                  <TableHead>Version</TableHead>
+                  <TableHead>Details</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {events?.map((e, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="whitespace-nowrap text-xs">{new Date(e.at).toLocaleString()}</TableCell>
+                    <TableCell>
+                      <StateBadge state={e.state} />
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap font-mono text-xs">
+                      {e.from_version}
+                      {e.to_version && e.to_version !== e.from_version ? ` → ${e.to_version}` : ""}
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-normal">{e.message}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </ScrollArea>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -128,6 +231,7 @@ function AddMac() {
 
 export function MacsPage({ admin }: { admin: boolean }) {
   const { data, error, refresh } = usePolling(api.macs, 5000)
+  const [history, setHistory] = useState<Mac>()
 
   async function act(fn: () => Promise<void>, ok: string) {
     try {
@@ -178,6 +282,7 @@ export function MacsPage({ admin }: { admin: boolean }) {
               <TableRow>
                 <TableHead>Mac</TableHead>
                 <TableHead>State</TableHead>
+                <TableHead>Version</TableHead>
                 <TableHead>User</TableHead>
                 <TableHead>User CPU</TableHead>
                 <TableHead>Our CPU</TableHead>
@@ -216,6 +321,9 @@ export function MacsPage({ admin }: { admin: boolean }) {
                           </Tooltip>
                         )}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <Version m={m} onHistory={() => setHistory(m)} />
                     </TableCell>
                     <TableCell>
                       <Presence m={m} />
@@ -300,6 +408,7 @@ export function MacsPage({ admin }: { admin: boolean }) {
             </TableBody>
           </Table>
         )}
+        <UpdateHistory mac={history} onClose={() => setHistory(undefined)} />
       </CardContent>
     </Card>
   )

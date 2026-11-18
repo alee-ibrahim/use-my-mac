@@ -221,6 +221,9 @@ type Mac struct {
 	Telemetry   *Telemetry        `json:"telemetry,omitempty"`
 	Version     string            `json:"version,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
+	// Update is the agent self-update status (nil before the updater has
+	// ever checked in).
+	Update *MacUpdate `json:"update,omitempty"`
 }
 
 // MacPatch is used by admins to drain or opt a Mac out.
@@ -265,6 +268,8 @@ type Heartbeat struct {
 type HeartbeatResponse struct {
 	Cancel []string `json:"cancel,omitempty"` // task IDs to stop now
 	Drain  bool     `json:"drain"`
+	// DrainReason says why (e.g. "updating"); empty for an admin drain.
+	DrainReason string `json:"drain_reason,omitempty"`
 }
 
 // Assignment is a task handed to an agent.
@@ -325,6 +330,106 @@ type LogChunk struct {
 	Attempt int    `json:"attempt"`
 	Seq     int    `json:"seq"`
 	Data    string `json:"data"`
+}
+
+// ---------------------------------------------------------------------------
+// Agent self-update
+// ---------------------------------------------------------------------------
+
+// UpdateSettings is the admin's update policy for the fleet.
+type UpdateSettings struct {
+	// Paused stops all agent updates.
+	Paused bool `json:"paused"`
+	// TargetVersion is what every Mac should run. "" means the router's own
+	// version. Setting it explicitly also allows downgrades to it.
+	TargetVersion string `json:"target_version"`
+	// CanaryVersion, when set, goes first to the canary Macs: those listed
+	// in CanaryMacs plus a stable CanaryPercent share of the fleet. The rest
+	// stay on TargetVersion. Promote by setting TargetVersion to it.
+	CanaryVersion string   `json:"canary_version"`
+	CanaryPercent int      `json:"canary_percent"`
+	CanaryMacs    []string `json:"canary_macs"`
+	// DrainTimeoutSeconds bounds how long the updater waits for running
+	// tasks to finish before it restarts the agent anyway (they are then
+	// requeued, not failed). 0 means the default (1 h).
+	DrainTimeoutSeconds int `json:"drain_timeout_seconds"`
+}
+
+// UpdatesInfo is what GET /v1/updates returns.
+type UpdatesInfo struct {
+	Settings      UpdateSettings `json:"settings"`
+	RouterVersion string         `json:"router_version"`
+	// Relay: the router serves release artifacts to agents (cached).
+	Relay      bool   `json:"relay"`
+	ReleaseURL string `json:"release_url,omitempty"`
+}
+
+// UpdateCheck is the router's answer to an updater asking what to run.
+type UpdateCheck struct {
+	// TargetVersion is the version this Mac should run; "" = leave it alone.
+	TargetVersion string `json:"target_version,omitempty"`
+	// AllowDowngrade is true only when an admin pinned the version explicitly.
+	AllowDowngrade bool `json:"allow_downgrade"`
+	Paused         bool `json:"paused"`
+	// Reason explains the target (fleet target, canary, router version, ...).
+	Reason              string `json:"reason,omitempty"`
+	DrainTimeoutSeconds int    `json:"drain_timeout_seconds"`
+	// Relay: artifacts can be fetched from /v1/agent/update/artifacts.
+	Relay bool `json:"relay"`
+	// Agent is the router's live view of this Mac's agent process.
+	Agent UpdateAgentView `json:"agent"`
+	// NowMS is the router's clock (Unix ms), to compare with Agent.LastSeenMS.
+	NowMS int64 `json:"now_ms"`
+}
+
+// UpdateAgentView is what the router last heard from the agent itself.
+type UpdateAgentView struct {
+	Version    string `json:"version"`
+	Online     bool   `json:"online"`
+	Running    int    `json:"running"`
+	LastSeenMS int64  `json:"last_seen_ms"`
+}
+
+// Update states reported by the updater.
+const (
+	UpdateUpToDate    = "up_to_date"
+	UpdatePaused      = "paused"
+	UpdateDownloading = "downloading"
+	UpdateDraining    = "draining"
+	UpdateApplying    = "applying"
+	UpdateSucceeded   = "succeeded"
+	UpdateRolledBack  = "rolled_back"
+	UpdateFailed      = "failed"
+	UpdateRefused     = "refused"
+)
+
+// UpdateReport is sent by the updater on every state change.
+type UpdateReport struct {
+	State       string `json:"state"`
+	FromVersion string `json:"from_version,omitempty"`
+	ToVersion   string `json:"to_version,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+// MacUpdate is the latest update status of one Mac.
+type MacUpdate struct {
+	State       string     `json:"state,omitempty"`
+	FromVersion string     `json:"from_version,omitempty"`
+	ToVersion   string     `json:"to_version,omitempty"`
+	Message     string     `json:"message,omitempty"`
+	At          *time.Time `json:"at,omitempty"`
+	CheckedAt   *time.Time `json:"checked_at,omitempty"`
+	// Desired is the version the router currently wants on this Mac.
+	Desired string `json:"desired,omitempty"`
+}
+
+// UpdateEvent is one entry of a Mac's update history.
+type UpdateEvent struct {
+	At          time.Time `json:"at"`
+	State       string    `json:"state"`
+	FromVersion string    `json:"from_version,omitempty"`
+	ToVersion   string    `json:"to_version,omitempty"`
+	Message     string    `json:"message,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

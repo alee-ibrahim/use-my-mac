@@ -17,9 +17,16 @@ const variants: Record<string, "default" | "secondary" | "destructive" | "outlin
   failed: "destructive",
   timeout: "destructive",
   cancelled: "outline",
+  // agent self-update
+  up_to_date: "outline",
+  paused: "outline",
+  downloading: "secondary",
+  applying: "secondary",
+  rolled_back: "destructive",
+  refused: "destructive",
 }
 
 // StateBadge renders a job/task/Mac/attempt state with the official Badge.
 export function StateBadge({ state }: { state: string }) {
-  return <Badge variant={variants[state] ?? "outline"}>{state || "unknown"}</Badge>
+  return <Badge variant={variants[state] ?? "outline"}>{state ? state.replaceAll("_", " ") : "unknown"}</Badge>
 }

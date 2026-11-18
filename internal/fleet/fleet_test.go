@@ -354,3 +354,37 @@ func TestUninstallPurge(t *testing.T) {
 		t.Error("uninstall --purge not invoked")
 	}
 }
+
+// install and upgrade both stage the root updater's LaunchDaemon, labelled
+// after the agent, so one `umm fleet upgrade` gives an existing Mac self-update.
+func TestUpgradeStagesUpdater(t *testing.T) {
+	for _, action := range []Action{ActionUpgrade, ActionInstall} {
+		ft := &fakeTarget{respond: func(cmd string) Result { return Result{ExitCode: 0, Stdout: "ok\n"} }}
+		var log bytes.Buffer
+		r := newRunner(t, ft, &log, Options{Router: "https://umm.example.com", Bundle: testBundle(t)})
+		h := testHost()
+		h.ServiceLabel = "com.example.helper"
+		res := r.Run(context.Background(), []ResolvedHost{h}, action)
+		if !res[0].OK() {
+			t.Fatalf("%s: %+v", action, res[0])
+		}
+		var plist string
+		for _, u := range ft.uploads {
+			if strings.HasSuffix(u.Path, "/updater-plist") {
+				plist = string(u.Data)
+			}
+		}
+		for _, want := range []string{"<string>com.example.helper.updater</string>", "<string>update</string>",
+			"<string>-label</string>\n    <string>com.example.helper</string>", "<key>StartInterval</key>"} {
+			if !strings.Contains(plist, want) {
+				t.Fatalf("%s: updater plist missing %q:\n%s", action, want, plist)
+			}
+		}
+		if strings.Contains(plist, "UserName") {
+			t.Fatal("updater must run as root")
+		}
+	}
+	if _, err := RenderUpdaterPlist("bad label;"); err == nil {
+		t.Fatal("bad label accepted")
+	}
+}

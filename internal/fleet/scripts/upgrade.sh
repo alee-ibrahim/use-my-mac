@@ -1,7 +1,8 @@
 #!/bin/sh
 # umm fleet upgrade (root-owned; run via `sudo -n .../upgrade <stage>`).
-# Replaces the agent binary and restarts the LaunchDaemon. Config, credential
-# and the service user are left untouched.
+# Replaces the agent binary and restarts the LaunchDaemon, and installs or
+# refreshes the updater LaunchDaemon. Config, credential and the service user
+# are left untouched.
 set -eu
 
 STAGE="${1:?usage: upgrade <stage-dir>}"
@@ -29,5 +30,24 @@ if ! launchctl kickstart -k "system/${LABEL}" 2>/dev/null; then
       sleep 1
     done
   fi
+fi
+# Updater (root LaunchDaemon for signed self-updates). Installing it here is
+# how Macs set up before self-update get it: one `umm fleet upgrade`.
+UPD_LABEL="${LABEL}.updater"
+UPD_PLIST="/Library/LaunchDaemons/${UPD_LABEL}.plist"
+if [ -f "$STAGE/updater-plist" ]; then
+  install -d -m 0755 -o root -g wheel /usr/local/var /usr/local/var/log
+  install -d -m 0700 -o root -g wheel /usr/local/var/umm-updater
+  install -m 0644 -o root -g wheel "$STAGE/updater-plist" "$UPD_PLIST"
+  launchctl bootout "system/${UPD_LABEL}" 2>/dev/null || true
+  i=0
+  while launchctl print "system/${UPD_LABEL}" >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+    i=$((i + 1)); sleep 0.2
+  done
+  n=0
+  until launchctl bootstrap system "$UPD_PLIST"; do
+    n=$((n + 1)); [ "$n" -lt 5 ] || { echo "warning: could not load ${UPD_LABEL}" >&2; break; }
+    sleep 1
+  done
 fi
 echo "upgraded: $("$BIN" version 2>/dev/null || echo unknown)"

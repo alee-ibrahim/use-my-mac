@@ -19,6 +19,9 @@ stops our task within seconds and the router moves it to another Mac.
   Sustained heavy use by the user does.
 - **No inbound ports on Macs.** Agents connect outbound and long-poll. Enrolment uses a one-time token that
   is exchanged for a per-Mac credential.
+- **Self-updating agents.** A root updater on each Mac follows the version the router sets (with canaries and
+  a pause switch), installs only releases signed with the project's minisign key, waits for running tasks
+  and rolls back automatically if the new agent does not report in.
 - **Zero extra infra.** One Go binary with SQLite and local file storage. When you need more, add Postgres
   and any S3-compatible store (agents only ever get short-lived presigned URLs).
 - **Observable.** Prometheus metrics, a dashboard (React + shadcn/ui) with live Mac telemetry, job progress,
@@ -153,7 +156,8 @@ More examples, including map/reduce video encoding with the Go SDK and batched O
   `docker build -t use-my-mac .`. A distroless, non-root image with the dashboard included.
 - **Releases:** each [GitHub release](https://github.com/alee-ibrahim/use-my-mac/releases) has the Mac
   agent bundle (`umm-agent-darwin-arm64.tar.gz`), the `umm` CLI for macOS, Linux and Windows, a standalone
-  router with the dashboard (`umm-server-<os>-<arch>.tar.gz`) and `SHA256SUMS`.
+  router with the dashboard (`umm-server-<os>-<arch>.tar.gz`), `SHA256SUMS` and its minisign signature
+  `SHA256SUMS.minisig` (public key: [`internal/selfupdate/release-signing.pub`](internal/selfupdate/release-signing.pub)).
 - **Config reference:** [`deploy/server.example.yaml`](deploy/server.example.yaml),
   [`deploy/mac/agent.example.yaml`](deploy/mac/agent.example.yaml).
 

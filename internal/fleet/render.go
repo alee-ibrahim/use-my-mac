@@ -127,3 +127,56 @@ func RenderPlist(label string) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
+
+var updaterPlistTmpl = template.Must(template.New("updater").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by umm fleet. The agent updater: runs as root at boot and every
+     15 minutes; verifies signed releases, swaps the binary, rolls back. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{.Label}}.updater</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/umm-agent</string>
+    <string>update</string>
+    <string>-config</string>
+    <string>{{.Config}}</string>
+    <string>-label</string>
+    <string>{{.Label}}</string>
+    <string>-jitter</string>
+    <string>2m</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/umm-updater.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/umm-updater.log</string>
+</dict>
+</plist>
+`))
+
+// RenderUpdaterPlist builds the root updater's LaunchDaemon plist. Its label
+// is the agent's label plus ".updater".
+func RenderUpdaterPlist(label string) ([]byte, error) {
+	if !serviceLabelRe.MatchString(label) {
+		return nil, fmt.Errorf("invalid service label %q", label)
+	}
+	var buf bytes.Buffer
+	if err := updaterPlistTmpl.Execute(&buf, struct{ Label, Config string }{label, agentConfigFile}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -47,6 +48,12 @@ type Server struct {
 	// PollWaitMax caps agent long-poll duration.
 	PollWaitMax time.Duration
 	Now         func() time.Time
+	// Updates configures the agent update relay.
+	Updates UpdatesConfig
+	// ReleaseHTTP fetches release artifacts for the relay (default client).
+	ReleaseHTTP *http.Client
+
+	relayMu sync.Mutex
 }
 
 const sessionCookie = "umm_session"
@@ -100,6 +107,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/api-keys/{id}", s.need(roleAdmin, s.revokeKey))
 	mux.HandleFunc("GET /v1/settings", s.need(roleRead, s.getSettings))
 	mux.HandleFunc("PUT /v1/settings", s.need(roleAdmin, s.putSettings))
+	mux.HandleFunc("GET /v1/updates", s.need(roleRead, s.getUpdates))
+	mux.HandleFunc("PUT /v1/updates", s.need(roleAdmin, s.putUpdates))
+	mux.HandleFunc("PUT /v1/updates/artifacts/{version}/{file}", s.need(roleAdmin, s.putArtifact))
+	mux.HandleFunc("GET /v1/macs/{id}/updates", s.need(roleRead, s.macUpdateEvents))
 
 	// Agent protocol (outbound from the Macs).
 	mux.HandleFunc("POST /v1/agent/enrol", s.agentEnrol)
@@ -107,6 +118,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/poll", s.agent(s.agentPoll))
 	mux.HandleFunc("POST /v1/agent/tasks/{id}/status", s.agent(s.agentStatus))
 	mux.HandleFunc("POST /v1/agent/tasks/{id}/logs", s.agent(s.agentLogs))
+	mux.HandleFunc("GET /v1/agent/update", s.agent(s.agentUpdateCheck))
+	mux.HandleFunc("POST /v1/agent/update/report", s.agent(s.agentUpdateReport))
+	mux.HandleFunc("GET /v1/agent/update/artifacts/{version}/{file}", s.agent(s.agentArtifact))
 	mux.HandleFunc("GET "+storage.SignedPath, s.signedBlob)
 	mux.HandleFunc("PUT "+storage.SignedPath, s.signedBlob)
 
