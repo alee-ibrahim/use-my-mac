@@ -101,8 +101,24 @@ if ! dscl . -read "/Users/$SVC_USER" >/dev/null 2>&1; then
   dscl . -create "/Users/$SVC_USER" Password "*"
 fi
 
+# --- parent directories ----------------------------------------------------
+# _umm must be able to traverse every parent of its own directories. A missing
+# parent is created 0755 root:wheel (in a umask 022 subshell, so intermediate
+# directories are not left 0700 by this script's umask 077). An existing one
+# only gets o+x: its owner and other bits stay as they are (Homebrew may own
+# /usr/local on Intel Macs).
+parent_dirs() {
+  for d do
+    if [ -d "$d" ]; then
+      chmod o+x "$d"
+    else
+      (umask 022; install -d -m 0755 -o root -g wheel "$d")
+    fi
+  done
+}
+parent_dirs "$R/usr/local" "$R/usr/local/bin" "$R/usr/local/etc" "$R/usr/local/var" "$R/usr/local/var/log"
+
 # --- binary (atomic swap; a running agent keeps its file) ------------------
-install -d -m 0755 -o root -g wheel "$R/usr/local/bin"
 install -m 0755 -o root -g wheel "$NEW" "$R/usr/local/bin/.umm-agent.install"
 mv -f "$R/usr/local/bin/.umm-agent.install" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
@@ -150,7 +166,7 @@ cat > "$T/agent.plist" <<'{{.EOF}}'
 {{.Plist}}{{.EOF}}
 cat > "$T/updater.plist" <<'{{.EOF}}'
 {{.UpdaterPlist}}{{.EOF}}
-install -d -m 0755 -o root -g wheel "$R/Library/LaunchDaemons" "$R/usr/local/var" "$R/usr/local/var/log"
+install -d -m 0755 -o root -g wheel "$R/Library/LaunchDaemons"
 install -d -m 0700 -o root -g wheel "$R/usr/local/var/umm-updater"
 install -m 0644 -o root -g wheel "$T/agent.plist" "$PLIST"
 install -m 0644 -o root -g wheel "$T/updater.plist" "$UPD_PLIST"

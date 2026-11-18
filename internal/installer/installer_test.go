@@ -49,6 +49,8 @@ func TestRenderInstall(t *testing.T) {
 		"LABEL='" + DefaultServiceLabel + "'", "PROTO='=https'", "R=''", "room: lab-2",
 		"ffmpeg:\n    - /opt/homebrew/bin/ffmpeg", "osascript -l JavaScript", "main \"$@\"",
 		"<string>" + DefaultServiceLabel + ".updater</string>",
+		`parent_dirs "$R/usr/local" "$R/usr/local/bin" "$R/usr/local/etc" "$R/usr/local/var" "$R/usr/local/var/log"`,
+		`(umask 022; install -d -m 0755 -o root -g wheel "$d")`,
 	} {
 		if !bytes.Contains(s, []byte(want)) {
 			t.Errorf("script lacks %q", want)

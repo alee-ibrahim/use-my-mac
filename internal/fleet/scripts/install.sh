@@ -15,6 +15,21 @@ LABEL="$(cat "$STAGE/label" 2>/dev/null || echo io.github.alee-ibrahim.umm-agent
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# _umm must be able to traverse every parent of its own directories. A missing
+# parent is created 0755 root:wheel (umask 022, so intermediate directories do
+# not inherit a restrictive umask from sudo). An existing one only gets o+x:
+# its owner and other bits stay as they are (Homebrew may own /usr/local on
+# Intel Macs).
+parent_dirs() {
+  for d do
+    if [ -d "$d" ]; then
+      chmod o+x "$d"
+    else
+      (umask 022; install -d -m 0755 -o root -g wheel "$d")
+    fi
+  done
+}
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 [ -f "$STAGE/umm-agent" ] || die "missing $STAGE/umm-agent"
 [ -f "$STAGE/plist" ] || die "missing $STAGE/plist"
@@ -44,7 +59,7 @@ if ! dscl . -read "/Users/${SVC_USER}" >/dev/null 2>&1; then
 fi
 
 # --- binary ---------------------------------------------------------------
-mkdir -p /usr/local/bin
+parent_dirs /usr/local /usr/local/bin /usr/local/etc /usr/local/var /usr/local/var/log
 install -m 0755 -o root -g wheel "$STAGE/umm-agent" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 
@@ -92,7 +107,6 @@ install -m 0644 -o root -g wheel "$STAGE/plist" "$PLIST"
 UPD_LABEL="${LABEL}.updater"
 UPD_PLIST="/Library/LaunchDaemons/${UPD_LABEL}.plist"
 if [ -f "$STAGE/updater-plist" ]; then
-  install -d -m 0755 -o root -g wheel /usr/local/var /usr/local/var/log
   install -d -m 0700 -o root -g wheel /usr/local/var/umm-updater
   install -m 0644 -o root -g wheel "$STAGE/updater-plist" "$UPD_PLIST"
 fi
