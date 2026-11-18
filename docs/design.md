@@ -146,9 +146,21 @@ inputs `from: {task, output}` resolve to the producing task's output URL at disp
 - **API keys** (`umm_key_…`) are hashed at rest and have a role: `app` (submit, and see only its own
   jobs), `viewer` (read everything) or `admin`.
 - **Dashboard:** OIDC authorization-code flow with PKCE and nonce. Roles come from a groups claim and/or
-  an app-roles claim (`admin_groups` and `viewer_groups`; admin wins). Users in neither are denied unless
-  `default_role: viewer`. Microsoft Entra ID **groups overage** (no groups in the token) is detected and
-  refused with a clear error. Use app roles, or "groups assigned to the application". Sessions are
+  an app-roles claim, matched against two rule sets (`internal/access`). **Config rules**
+  (`admin_groups`, `viewer_groups`, `default_role`) are authoritative: read-only at runtime and a floor no
+  other rule can lower, so the configured admins can never be locked out. **Dashboard rules** (database,
+  managed by admins in Settings > Access, `/v1/access/*` or `umm access`) add on top: group ID or user
+  (subject, object ID, email or UPN) to `admin`/`viewer`, plus a default role (`deny`/`viewer`; the
+  effective default is the higher of config and dashboard). Precedence: user rule > group rules (highest
+  wins) > default; then the config floor. Every sign-in (allowed or not) records the user's identifiers
+  and groups, so admins can see who tried and grant access. The role is **re-evaluated on every request**
+  from that record and the current rules (cached for at most 10 s, dropped on every local change); a
+  session from before tracking, or one whose user is now denied, gets `401` and signs in again. Changes
+  that would remove the acting admin's own role with no other signed-in admin left are refused (`409`).
+  Every change is audited (who, when, what). Limit who can sign in at all with the provider's "assignment
+  required". Microsoft Entra ID **groups overage** (no groups in the token) is detected and
+  refused with a clear error unless a user rule matches. Use app roles, or "groups assigned to the
+  application". Sessions are
   HMAC-signed, HttpOnly, SameSite=Lax cookies (Secure behind HTTPS). Cookie-authenticated writes require an
   `X-UMM-CSRF` header. With OIDC configured, a signed-out browser on any dashboard route goes straight to
   the provider (optional `domain_hint`/`prompt`) and returns to the page it asked for; return targets are

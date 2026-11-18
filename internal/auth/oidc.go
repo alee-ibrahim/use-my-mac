@@ -140,6 +140,32 @@ func (c OIDCConfig) MapRole(claims map[string]any) (string, error) {
 	return "", ErrNoRole
 }
 
+// GroupValues returns the group and app-role values in the claims, and
+// whether the provider left the groups out because there are too many
+// (Entra "groups overage").
+func (c OIDCConfig) GroupValues(claims map[string]any) (vals []string, overage bool) {
+	vals = append(vals, claimValues(claims[c.GroupsClaim])...)
+	if c.RolesClaim != "" {
+		vals = append(vals, claimValues(claims[c.RolesClaim])...)
+	}
+	if names, ok := claims["_claim_names"].(map[string]any); ok {
+		if _, over := names[c.GroupsClaim]; over && len(claimValues(claims[c.GroupsClaim])) == 0 {
+			overage = true
+		}
+	}
+	return vals, overage
+}
+
+// ClaimString returns the first non-empty string claim of keys.
+func ClaimString(claims map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := claims[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // DisplayName picks a human name from claims.
 func (c OIDCConfig) DisplayName(claims map[string]any) string {
 	for _, k := range []string{c.NameClaim, "name", "preferred_username", "email", "sub"} {

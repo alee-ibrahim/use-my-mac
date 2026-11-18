@@ -8,7 +8,9 @@ import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet 
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, type Mac, type Me, type Settings, type UpdatesInfo } from "@/lib/api"
+import { AccessPanel } from "@/pages/access"
 
 const weightHelp: Record<string, string> = {
   presence: "Prefer Macs with nobody logged in, a locked screen or an idle user.",
@@ -171,7 +173,34 @@ function UpdatesCard({ admin }: { admin: boolean }) {
   )
 }
 
+// SettingsPage: general settings for everyone; admins also get Access
+// (dashboard roles for single-sign-on users).
 export function SettingsPage({ me }: { me: Me }) {
+  const [tab, setTab] = useState(() => (sessionStorage.getItem("settings-tab") === "access" ? "access" : "general"))
+  if (me.role !== "admin") return <GeneralSettings me={me} />
+  return (
+    <Tabs
+      value={tab}
+      onValueChange={(v) => {
+        setTab(v)
+        sessionStorage.setItem("settings-tab", v)
+      }}
+    >
+      <TabsList>
+        <TabsTrigger value="general">General</TabsTrigger>
+        <TabsTrigger value="access">Access</TabsTrigger>
+      </TabsList>
+      <TabsContent value="general">
+        <GeneralSettings me={me} />
+      </TabsContent>
+      <TabsContent value="access">
+        <AccessPanel me={me} />
+      </TabsContent>
+    </Tabs>
+  )
+}
+
+function GeneralSettings({ me }: { me: Me }) {
   const admin = me.role === "admin"
   const [s, setS] = useState<Settings>()
   const [saving, setSaving] = useState(false)

@@ -32,6 +32,7 @@ oidc:
   tenant_id: ""
   client_id: ""
   # redirect_url defaults to <public_url>/auth/callback
+  # Config rules: locked in the dashboard and never lowered by dashboard rules (Settings > Access adds on top).
   admin_groups: []    # Entra group object IDs or app-role values
   viewer_groups: []
   default_role: ""    # "" = deny users in no listed group; "viewer" = allow read-only
