@@ -176,6 +176,8 @@ export const api = {
   revokeKey: (id: string) => request<void>("DELETE", `/v1/api-keys/${id}`),
   settings: () => request<Settings>("GET", "/v1/settings"),
   saveSettings: (s: Settings) => request<Settings>("PUT", "/v1/settings", s),
+  docs: () => request<DocInfo[]>("GET", "/v1/docs"),
+  doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }
 
 export function bytes(n: number | undefined): string {
@@ -198,3 +200,6 @@ export function duration(seconds: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`
   return `${(seconds / 3600).toFixed(1)}h`
 }
+
+// An embedded documentation page (public, served at /docs).
+export type DocInfo = { slug: string; title: string; path: string }

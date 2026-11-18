@@ -76,6 +76,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/apikey", s.apiKeyLogin)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 
+	// Built-in documentation (public; rendered by the dashboard at /docs).
+	mux.HandleFunc("GET /v1/docs", s.listDocs)
+	mux.HandleFunc("GET /v1/docs/{slug}", s.getDoc)
+
 	// App / viewer / admin API.
 	mux.HandleFunc("GET /v1/me", s.need(roleAny, s.me))
 	mux.HandleFunc("POST /v1/jobs", s.need(roleSubmit, s.submitJob))
