@@ -52,8 +52,19 @@ type Server struct {
 	Updates UpdatesConfig
 	// ReleaseHTTP fetches release artifacts for the relay (default client).
 	ReleaseHTTP *http.Client
+	// PublicURL is the router's public URL (install commands embed it).
+	PublicURL string
+	// Install configures the one-line Mac install.
+	Install InstallConfig
+	// ReleaseKey overrides the release public key embedded in install
+	// scripts (tests). Default: the key compiled into the agent.
+	ReleaseKey string
+	// InstallRoot prefixes every path an install script touches. Tests only;
+	// never set in production.
+	InstallRoot string
 
 	relayMu sync.Mutex
+	limiter rateLimiter
 }
 
 const sessionCookie = "umm_session"
@@ -111,6 +122,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/updates", s.need(roleAdmin, s.putUpdates))
 	mux.HandleFunc("PUT /v1/updates/artifacts/{version}/{file}", s.need(roleAdmin, s.putArtifact))
 	mux.HandleFunc("GET /v1/macs/{id}/updates", s.need(roleRead, s.macUpdateEvents))
+	mux.HandleFunc("GET /v1/install/profiles", s.need(roleAdmin, s.installProfiles))
+	mux.HandleFunc("GET /v1/install-tokens", s.need(roleAdmin, s.listInstallTokens))
+	mux.HandleFunc("POST /v1/install-tokens", s.need(roleAdmin, s.createInstallToken))
+	mux.HandleFunc("DELETE /v1/install-tokens/{id}", s.need(roleAdmin, s.revokeInstallToken))
+	mux.HandleFunc("GET /v1/install-tokens/{id}/events", s.need(roleAdmin, s.installTokenEvents))
+
+	// One-line install (no auth header: the token in the path is the secret).
+	mux.HandleFunc("GET /i/uninstall", s.uninstallScript)
+	mux.HandleFunc("GET /i/{token}", s.installScript)
+	mux.HandleFunc("GET /i/{token}/releases/{version}/{file}", s.installArtifact)
 
 	// Agent protocol (outbound from the Macs).
 	mux.HandleFunc("POST /v1/agent/enrol", s.agentEnrol)
@@ -121,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent/update", s.agent(s.agentUpdateCheck))
 	mux.HandleFunc("POST /v1/agent/update/report", s.agent(s.agentUpdateReport))
 	mux.HandleFunc("GET /v1/agent/update/artifacts/{version}/{file}", s.agent(s.agentArtifact))
+	mux.HandleFunc("GET /v1/agent/self", s.agent(s.agentSelf))
 	mux.HandleFunc("GET "+storage.SignedPath, s.signedBlob)
 	mux.HandleFunc("PUT "+storage.SignedPath, s.signedBlob)
 
@@ -539,7 +561,7 @@ func (s *Server) agentEnrol(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req, 64<<10) {
 		return
 	}
-	resp, err := s.E.Enrol(r.Context(), req)
+	resp, err := s.E.EnrolFrom(r.Context(), req, clientIP(r))
 	if err != nil {
 		s.fail(w, err)
 		return

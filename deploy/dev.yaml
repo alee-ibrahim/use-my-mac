@@ -9,3 +9,5 @@ storage:
     dir: data/blobs
 secure_cookies: false
 log_level: debug
+install:
+  allow_http: true   # dev only: serve one-line install scripts over plain http

@@ -68,6 +68,19 @@ updates: {}
 #  release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
 #  offline: false
 
+# One-line Mac install (dashboard: Macs > Add Mac > One command; see
+# docs/usage.md "Add a Mac with one command"). Needs an https public URL.
+# Without profiles, a "default" profile allowlists /opt/homebrew/bin/ffmpeg.
+install: {}
+#  service_label: com.example.helper   # neutral LaunchDaemon label
+#  profiles:
+#    default:
+#      runtimes: {ffmpeg: ["/opt/homebrew/bin/ffmpeg"]}
+#    lab:
+#      labels: {site: lab}
+#      runtimes: {ffmpeg: ["/opt/homebrew/bin/ffmpeg"], ocr: ["/usr/bin/python3", "/opt/ocr/run.py"]}
+#      max_tasks: 2
+
 service:
   type: ClusterIP
   port: 80

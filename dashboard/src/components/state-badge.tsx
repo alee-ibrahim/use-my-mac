@@ -24,6 +24,11 @@ const variants: Record<string, "default" | "secondary" | "destructive" | "outlin
   applying: "secondary",
   rolled_back: "destructive",
   refused: "destructive",
+  // install links
+  active: "default",
+  used: "secondary",
+  expired: "outline",
+  revoked: "outline",
 }
 
 // StateBadge renders a job/task/Mac/attempt state with the official Badge.

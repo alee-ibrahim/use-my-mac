@@ -4,6 +4,24 @@
 an **admin workstation** (Windows, macOS or Linux). It is the alternative to
 running `deploy/mac/install.sh` by hand on each machine.
 
+## Add a Mac with one command
+
+Without SSH: create an install link in the dashboard (**Macs → Add Mac → One
+command**) or with `umm enrol-command`, and run the command it shows in
+Terminal on the Mac:
+
+```sh
+curl -fsSL https://umm.example.com/i/umm_ins_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX | sudo sh
+```
+
+For a batch, make one link good for N Macs (`-uses N`, or switch off "Single
+use"). The script verifies the signed release, installs the same files and
+daemons as `umm fleet install` (it shares the `agent.yaml` checksum rule, so
+fleet and the one-liner can manage the same Mac), enrols and waits for the
+first heartbeat. Remove it with
+`curl -fsSL https://umm.example.com/i/uninstall | sudo sh`. Details and the
+security model: [Usage: Add a Mac with one command](usage.md#add-a-mac-with-one-command).
+
 Where things run, and where secrets live:
 
 - `umm fleet` runs on the admin's own computer. It is **not** installed on the

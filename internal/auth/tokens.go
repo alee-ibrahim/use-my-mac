@@ -20,6 +20,8 @@ const (
 	PrefixAPIKey = "umm_key_"
 	PrefixAgent  = "umm_agt_"
 	PrefixEnrol  = "umm_enr_"
+	// PrefixInstall: one-line install tokens (enrolment secrets in an install URL).
+	PrefixInstall = "umm_ins_"
 )
 
 // NewSecret returns prefix + 32 random bytes (base64url).

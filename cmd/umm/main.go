@@ -39,6 +39,9 @@ Commands:
   cancel JOB                     cancel a job
   macs                           list Macs with live telemetry
   drain MAC [-off]               stop sending new work to a Mac (admin)
+  enrol-command [-profile P] [-label k=v] [-ttl 1h] [-uses N]
+                                 one-line install command for new Macs (admin)
+  install-tokens list | log ID | revoke ID   one-line install links (admin)
   enrol [-ttl-hours N]           mint a one-time enrolment token for a new Mac (admin)
   keys list | create NAME [-role app|viewer|admin] | revoke ID   (admin)
   fleet SUBCMD [flags] [HOST...] install/manage the agent across Macs over SSH (admin)
@@ -195,6 +198,10 @@ func run(ctx context.Context, cmd string, args []string) error {
 		return nil
 	case "keys":
 		return keys(ctx, c, args)
+	case "enrol-command", "enroll-command":
+		return enrolCommand(ctx, c, args)
+	case "install-tokens":
+		return installTokens(ctx, c, args)
 	}
 	fmt.Fprint(os.Stderr, usage)
 	return fmt.Errorf("unknown command %q", cmd)

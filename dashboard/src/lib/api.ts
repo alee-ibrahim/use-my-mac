@@ -214,6 +214,11 @@ export const api = {
   updates: () => request<UpdatesInfo>("GET", "/v1/updates"),
   saveUpdates: (s: UpdateSettings) => request<UpdatesInfo>("PUT", "/v1/updates", s),
   macUpdates: (id: string) => request<UpdateEvent[]>("GET", `/v1/macs/${id}/updates`),
+  installProfiles: () => request<InstallProfile[]>("GET", "/v1/install/profiles"),
+  installTokens: () => request<InstallToken[]>("GET", "/v1/install-tokens"),
+  createInstallToken: (r: InstallTokenRequest) => request<InstallToken>("POST", "/v1/install-tokens", r),
+  revokeInstallToken: (id: string) => request<void>("DELETE", `/v1/install-tokens/${id}`),
+  installEvents: (id: string) => request<InstallEvent[]>("GET", `/v1/install-tokens/${id}/events`),
   docs: () => request<DocInfo[]>("GET", "/v1/docs"),
   doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }
@@ -238,6 +243,40 @@ export function duration(seconds: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`
   return `${(seconds / 3600).toFixed(1)}h`
 }
+
+// One-line install.
+export type InstallProfile = {
+  name: string
+  labels?: Record<string, string>
+  runtimes: Record<string, string[]>
+  max_tasks: number
+  priority: string
+  service_label: string
+}
+export type InstallTokenRequest = {
+  profile: string
+  labels?: Record<string, string>
+  ttl_minutes: number
+  max_uses: number
+  note?: string
+}
+export type InstallToken = {
+  id: string
+  prefix: string
+  profile: InstallProfile
+  note?: string
+  created_by?: string
+  created_at: string
+  expires_at: string
+  max_uses: number
+  uses: number
+  revoked_at?: string
+  last_used_at?: string
+  state: string
+  token?: string
+  command?: string
+}
+export type InstallEvent = { at: string; kind: string; ip?: string; agent_id?: string; detail?: string }
 
 // An embedded documentation page (public, served at /docs).
 export type DocInfo = { slug: string; title: string; path: string }
