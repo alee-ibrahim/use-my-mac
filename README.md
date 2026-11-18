@@ -147,8 +147,11 @@ More examples, including map/reduce video encoding with the Go SDK and batched O
 - **Kubernetes:** Helm chart in [`deploy/helm/use-my-mac`](deploy/helm/use-my-mac). It runs a single
   replica on a PVC with optional external Postgres, S3 storage, a Gateway API `HTTPRoute` and a
   `ServiceMonitor`. Secrets come from an existing Secret and are never rendered by the chart.
-- **Container:** `docker build -t use-my-mac .` builds a distroless, non-root image with the dashboard
-  included.
+- **Container:** `ghcr.io/alee-ibrahim/use-my-mac:<version>` (linux/amd64 and linux/arm64), or
+  `docker build -t use-my-mac .`. A distroless, non-root image with the dashboard included.
+- **Releases:** each [GitHub release](https://github.com/alee-ibrahim/use-my-mac/releases) has the Mac
+  agent bundle (`umm-agent-darwin-arm64.tar.gz`), the `umm` CLI for macOS, Linux and Windows, a standalone
+  router with the dashboard (`umm-server-<os>-<arch>.tar.gz`) and `SHA256SUMS`.
 - **Config reference:** [`deploy/server.example.yaml`](deploy/server.example.yaml),
   [`deploy/mac/agent.example.yaml`](deploy/mac/agent.example.yaml).
 

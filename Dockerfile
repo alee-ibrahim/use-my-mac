@@ -1,21 +1,23 @@
 # syntax=docker/dockerfile:1
 # Router image: Go server + built dashboard on a distroless, non-root base.
 
-FROM node:24-alpine AS web
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web
 WORKDIR /web
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY dashboard/ ./
 RUN npm run build
 
-FROM golang:1.26-alpine AS build
+# Cross-compile on the build platform (pure Go, no cgo) instead of emulating.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/umm-server ./cmd/umm-server \
- && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/umm ./cmd/umm
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/umm-server ./cmd/umm-server \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/umm ./cmd/umm
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/umm-server /out/umm /usr/local/bin/
