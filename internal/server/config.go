@@ -10,6 +10,7 @@ import (
 
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/internal/engine"
+	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 )
 
 // Config is the router's configuration file. Secrets never live here: they
@@ -32,6 +33,8 @@ type Config struct {
 	Auth    AuthConfig      `yaml:"auth"`
 
 	Scheduler engine.Config `yaml:"scheduler"`
+
+	Updates UpdatesConfig `yaml:"updates"`
 
 	MaxUploadMB   int64  `yaml:"max_upload_mb"`
 	SecureCookies *bool  `yaml:"secure_cookies"`
@@ -70,6 +73,23 @@ func (a AuthConfig) APIKeyLoginAllowed(oidc bool) bool {
 func (a AuthConfig) AutoSignInEnabled(oidc bool) bool {
 	return oidc && (a.AutoSignIn == nil || *a.AutoSignIn)
 }
+
+// UpdatesConfig controls how the router helps agents update themselves.
+// What version they run is a runtime setting (dashboard Settings).
+type UpdatesConfig struct {
+	// Relay serves release artifacts to agents at /v1/agent/update/artifacts,
+	// cached in the blob storage. Default true.
+	Relay *bool `yaml:"relay"`
+	// ReleaseURL is where the relay fetches artifacts:
+	// <release_url>/<version>/<file>. Default: the project's GitHub releases.
+	ReleaseURL string `yaml:"release_url"`
+	// Offline: never fetch; serve only artifacts an admin uploaded
+	// (PUT /v1/updates/artifacts/<version>/<file>).
+	Offline bool `yaml:"offline"`
+}
+
+// RelayEnabled resolves Relay.
+func (u UpdatesConfig) RelayEnabled() bool { return u.Relay == nil || *u.Relay }
 
 // StorageConfig selects the blob backend.
 type StorageConfig struct {
@@ -171,6 +191,10 @@ func (c *Config) validate() error {
 	if s.BackoffMax <= 0 {
 		s.BackoffMax = d.BackoffMax
 	}
+	if c.Updates.ReleaseURL == "" {
+		c.Updates.ReleaseURL = selfupdate.DefaultReleaseURL
+	}
+	c.Updates.ReleaseURL = strings.TrimRight(c.Updates.ReleaseURL, "/")
 	if c.MaxUploadMB <= 0 {
 		c.MaxUploadMB = 20 * 1024
 	}

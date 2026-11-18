@@ -11,14 +11,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/agent"
 	"github.com/alee-ibrahim/use-my-mac/internal/agent/telemetry"
+	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 )
 
 const usage = `umm-agent — use-my-mac worker
@@ -28,6 +32,8 @@ Usage:
   umm-agent enrol     [-config FILE]   exchange a one-time enrolment token for a credential;
                                        the token is read from UMM_ENROL_TOKEN or stdin
   umm-agent telemetry [-config FILE]   print one telemetry snapshot as JSON (diagnostics)
+  umm-agent update    [-config FILE] [-label L] [-jitter D] [-dry-run]
+                                       one self-update cycle (root; its own LaunchDaemon runs it)
   umm-agent version
 
 Default config: /usr/local/etc/umm/agent.yaml (env UMM_AGENT_CONFIG)
@@ -57,6 +63,14 @@ func main() {
 	case "telemetry":
 		fs.Parse(args)
 		err = snapshot(*cfgPath)
+	case "update":
+		label := fs.String("label", "io.github.alee-ibrahim.umm-agent", "the agent's LaunchDaemon label")
+		bin := fs.String("bin", "/usr/local/bin/umm-agent", "the live agent binary")
+		stateDir := fs.String("state-dir", "/usr/local/var/umm-updater", "root-only updater state directory")
+		jitter := fs.Duration("jitter", 0, "sleep a random time up to this long first (spreads the fleet)")
+		dryRun := fs.Bool("dry-run", false, "download and verify, but do not install")
+		fs.Parse(args)
+		err = update(*cfgPath, *label, *bin, *stateDir, *jitter, *dryRun, *verbose)
 	case "version":
 		fmt.Println(agent.Version)
 	case "help", "-h", "--help":
@@ -135,4 +149,73 @@ func snapshot(path string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(t)
+}
+
+// update runs one self-update cycle. It must run as root (its LaunchDaemon
+// has no UserName): it replaces the root-owned agent binary.
+func update(path, label, bin, stateDir string, jitter time.Duration, dryRun, verbose bool) error {
+	lvl := slog.LevelInfo
+	if verbose {
+		lvl = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})).With("component", "updater")
+	if runtime.GOOS == "darwin" && os.Geteuid() != 0 && !dryRun {
+		return errors.New("update must run as root (it is started by its own LaunchDaemon)")
+	}
+	cfg, err := agent.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+	if !cfg.Update.UpdatesEnabled() {
+		log.Info("updates disabled in agent config (update.enabled: false)")
+		return nil
+	}
+	cred, err := cfg.LoadCredential()
+	if err != nil || cred == "" {
+		log.Info("agent not enrolled yet; nothing to do")
+		return nil
+	}
+	pub, err := selfupdate.ReleasePublicKey()
+	if cfg.Update.PublicKey != "" {
+		pub, err = selfupdate.ParsePublicKey(cfg.Update.PublicKey)
+	}
+	if err != nil {
+		return fmt.Errorf("release public key: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if jitter > 0 {
+		d := rand.N(jitter)
+		log.Debug("jitter", "sleep", d)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(d):
+		}
+	}
+	unlock, err := selfupdate.Lock(stateDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	router := &selfupdate.HTTPRouter{Server: cfg.Server, Credential: cred}
+	var sources []selfupdate.Source
+	switch cfg.Update.Source {
+	case "router":
+		sources = []selfupdate.Source{router.RelaySource()}
+	case "direct":
+		sources = []selfupdate.Source{selfupdate.DirectSource(cfg.Update.ReleaseURL, nil)}
+	default:
+		sources = []selfupdate.Source{router.RelaySource(), selfupdate.DirectSource(cfg.Update.ReleaseURL, nil)}
+	}
+	u := &selfupdate.Updater{
+		Router: router, Sources: sources, PublicKey: pub,
+		Service: selfupdate.Launchctl{Label: label, Plist: "/Library/LaunchDaemons/" + label + ".plist"},
+		BinPath: bin, StateDir: stateDir, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
+		VerifyTimeout: cfg.Update.VerifyTimeout, DryRun: dryRun, Log: log,
+	}
+	res, err := u.RunOnce(ctx)
+	log.Info("update cycle done", "action", res.Action, "from", res.From, "to", res.To, "message", res.Message)
+	return err
 }

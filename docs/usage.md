@@ -255,6 +255,10 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys |
 | `GET /v1/settings` | viewer, admin | scheduler weights and limits |
 | `PUT /v1/settings` | admin | change them at runtime |
+| `GET /v1/updates` | viewer, admin | agent update policy, router version, relay status |
+| `PUT /v1/updates` | admin | change the agent update policy (see [Agent updates](#agent-updates)) |
+| `GET /v1/macs/{id}/updates` | viewer, admin | a Mac's update history, newest first |
+| `PUT /v1/updates/artifacts/{version}/{file}` | admin | seed the relay cache (routers without internet) |
 | `GET /v1/docs`, `GET /v1/docs/{slug}` | public | these docs (index, raw Markdown) |
 | `GET /healthz` | public | liveness |
 | `GET /metrics` | public | Prometheus metrics |
@@ -291,6 +295,59 @@ that needs the sudo password), then `install`, `upgrade`, `status` and `uninstal
   power.
 - Deleting a Mac in the dashboard revokes its credential. Re-enrol it with a new token.
 
+## Agent updates
+
+Macs keep their agent up to date by themselves. A small root updater on each Mac (`umm-agent update`, its
+own LaunchDaemon) checks in with the router at boot and every 15 minutes. The router says which version the
+Mac should run; the updater installs it only if the release is **signed** with the project's release key.
+Running tasks are allowed to finish first, and if the new agent does not report in within two minutes the
+updater puts the previous one back. Nothing is shown on the Mac.
+
+**Which version.** By default every Mac runs the router's own version, so upgrading the router upgrades the
+fleet. In the dashboard (**Settings**, **Agent updates**) or with `PUT /v1/updates` an admin can:
+
+| Setting | Does |
+| --- | --- |
+| `paused` | stop all agent updates |
+| `target_version` | pin the fleet to a version, e.g. `v0.1.3`. Pinning is also the only way to go **back** to an older version |
+| `canary_version` | a version for the canary Macs only; the rest stay on the target |
+| `canary_percent`, `canary_macs` | who the canaries are: a stable share of the fleet and/or listed Mac IDs |
+| `drain_timeout_seconds` | how long to wait for running tasks (default 1 h); after that the agent restarts anyway and its tasks are requeued, not failed |
+
+```sh
+curl -X PUT -H "Authorization: Bearer $UMM_API_KEY" -H 'Content-Type: application/json' \
+  https://umm.example.com/v1/updates \
+  -d '{"canary_version":"v0.1.3","canary_percent":10,"canary_macs":[],"target_version":"","paused":false,"drain_timeout_seconds":0}'
+```
+
+A typical rollout: set the canary version, watch the canaries' **Version** column on the **Macs** page, then
+set the target to the same version (or clear both after upgrading the router).
+
+**Watching it.** The **Macs** page shows each agent's version, the version the router wants (`→ v0.1.3`) and
+the updater's last state (`downloading`, `draining`, `applying`, `succeeded`, `rolled back`, `refused`,
+`failed`); hover for details, click the version for the history. "no updater" means the Mac's updater has
+never checked in (see [Fleet install](fleet.md#agent-self-update) to add it). On the Mac:
+`/usr/local/var/log/umm-updater.log`, and `sudo umm-agent update -dry-run` checks and verifies without
+installing.
+
+**Where downloads come from.** By default the router fetches releases from GitHub once and serves them to
+the Macs (`/v1/agent/update/artifacts/...`), so Macs need no internet access. Router settings in
+`server.yaml`:
+
+```yaml
+updates:
+  relay: true          # false: Macs download from release_url themselves
+  release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
+  offline: false       # true: the router never fetches; upload the files yourself
+```
+
+For an offline router, upload `SHA256SUMS`, `SHA256SUMS.minisig` and `umm-agent-darwin-arm64.tar.gz` of a
+release with `PUT /v1/updates/artifacts/<version>/<file>` (admin key, raw body). The relay is only a cache:
+the Macs check the signature themselves.
+
+**On one Mac.** `update.enabled: false` in `/usr/local/etc/umm/agent.yaml` stops that Mac from updating;
+`update.source` picks `auto` (relay, else direct), `router` or `direct`.
+
 ## Troubleshooting
 
 | Symptom | Look at | Likely cause |
@@ -304,3 +361,4 @@ that needs the sudo password), then `install`, `upgrade`, `status` and `uninstal
 | Mac shows offline | `umm-agent telemetry` and the agent log on the Mac | network or proxy to the router, a revoked credential, or the daemon is not loaded |
 | Mac never `ready` | the Mac's state and reason in the dashboard | paused (`paused` file), drained, quarantined after repeated failures, on battery, or its user is busy |
 | Program not found or permission denied | the runtime path in `agent.yaml` | the path must be absolute and readable and executable by `_umm` |
+| Mac stays on an old version | its update state and history (click the version on the **Macs** page) | updates paused, a downgrade without a pinned version (`refused`), a version that rolled back (retried after 1 h, then 2 h, ... up to a day), or "no updater" on Macs installed before self-update |

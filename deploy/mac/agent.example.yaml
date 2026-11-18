@@ -54,3 +54,13 @@ yield:
   yield_on_battery: true
 
 max_log_bytes: 1048576
+
+# Self-update, done by the root updater (`umm-agent update`, its own
+# LaunchDaemon). The router decides the version; releases must carry a valid
+# minisign signature from the key built into the agent.
+update:
+  enabled: true           # false: never replace the binary
+  source: auto            # auto (router relay, else direct) | router | direct
+  # release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
+  # public_key: "RW..."   # only for forks that sign their own releases
+  verify_timeout: 2m      # new agent must heartbeat within this, else rollback

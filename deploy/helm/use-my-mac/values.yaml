@@ -59,6 +59,15 @@ auth:
 # Extra scheduler settings merged into server.yaml (see deploy/server.example.yaml).
 scheduler: {}
 
+# Agent self-update relay (see docs/design.md "Agent self-update"). The router
+# fetches signed agent releases from GitHub and caches them in its storage;
+# set relay: false to make Macs download directly, or offline: true to serve
+# only artifacts uploaded with PUT /v1/updates/artifacts/<version>/<file>.
+updates: {}
+#  relay: true
+#  release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
+#  offline: false
+
 service:
   type: ClusterIP
   port: 80

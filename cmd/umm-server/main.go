@@ -136,7 +136,7 @@ func serve(args []string) error {
 	}
 
 	m := metrics.New()
-	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Metrics: m, Logger: log, Config: cfg.Scheduler})
+	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Metrics: m, Logger: log, Config: cfg.Scheduler, Version: version})
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,8 @@ func serve(args []string) error {
 	}
 
 	srv := &server.Server{E: eng, Log: log, Metrics: m, SessionKey: []byte(cfg.SecretKey), WebDir: cfg.WebDir,
-		MaxUploadBytes: cfg.MaxUploadMB << 20, SecureCookies: strings.HasPrefix(cfg.PublicURL, "https://")}
+		MaxUploadBytes: cfg.MaxUploadMB << 20, SecureCookies: strings.HasPrefix(cfg.PublicURL, "https://"),
+		Updates: cfg.Updates}
 	if cfg.SecureCookies != nil {
 		srv.SecureCookies = *cfg.SecureCookies
 	}

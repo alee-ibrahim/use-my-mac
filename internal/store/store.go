@@ -194,6 +194,24 @@ var schema = []string{
 		score DOUBLE PRECISION NOT NULL DEFAULT 0,
 		PRIMARY KEY (task_id, attempt)
 	)`,
+	`CREATE TABLE IF NOT EXISTS agent_updates (
+		agent_id TEXT PRIMARY KEY,
+		state TEXT NOT NULL DEFAULT '',
+		from_version TEXT NOT NULL DEFAULT '',
+		to_version TEXT NOT NULL DEFAULT '',
+		message TEXT NOT NULL DEFAULT '',
+		at BIGINT NOT NULL DEFAULT 0,
+		checked_at BIGINT NOT NULL DEFAULT 0
+	)`,
+	`CREATE TABLE IF NOT EXISTS update_events (
+		agent_id TEXT NOT NULL,
+		ts BIGINT NOT NULL,
+		state TEXT NOT NULL,
+		from_version TEXT NOT NULL DEFAULT '',
+		to_version TEXT NOT NULL DEFAULT '',
+		message TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS update_events_agent ON update_events(agent_id, ts)`,
 	`CREATE TABLE IF NOT EXISTS task_logs (
 		task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 		attempt INTEGER NOT NULL,
@@ -364,6 +382,8 @@ func (s *Store) SetAgentHealth(ctx context.Context, id string, consec int, quara
 
 // DeleteAgent removes an agent (its credential stops working).
 func (s *Store) DeleteAgent(ctx context.Context, id string) error {
+	_, _ = s.exec(ctx, `DELETE FROM agent_updates WHERE agent_id=?`, id)
+	_, _ = s.exec(ctx, `DELETE FROM update_events WHERE agent_id=?`, id)
 	res, err := s.exec(ctx, `DELETE FROM agents WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -372,6 +392,110 @@ func (s *Store) DeleteAgent(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Agent updates
+// ---------------------------------------------------------------------------
+
+// AgentUpdate is the latest self-update status of one agent.
+type AgentUpdate struct {
+	AgentID, State, FromVersion, ToVersion, Message string
+	At, CheckedAt                                   int64
+}
+
+// UpdateEvent is one row of an agent's update history.
+type UpdateEvent struct {
+	TS                                     int64
+	State, FromVersion, ToVersion, Message string
+}
+
+// TouchUpdateCheck records that an agent's updater checked in.
+func (s *Store) TouchUpdateCheck(ctx context.Context, agentID string, now int64) error {
+	_, err := s.exec(ctx, `INSERT INTO agent_updates(agent_id, checked_at) VALUES(?, ?)
+		ON CONFLICT (agent_id) DO UPDATE SET checked_at = excluded.checked_at`, agentID, now)
+	return err
+}
+
+// GetAgentUpdate returns an agent's update status (ErrNotFound if none).
+func (s *Store) GetAgentUpdate(ctx context.Context, agentID string) (*AgentUpdate, error) {
+	var u AgentUpdate
+	err := s.queryRow(ctx, `SELECT agent_id, state, from_version, to_version, message, at, checked_at
+		FROM agent_updates WHERE agent_id = ?`, agentID).
+		Scan(&u.AgentID, &u.State, &u.FromVersion, &u.ToVersion, &u.Message, &u.At, &u.CheckedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &u, err
+}
+
+// ListAgentUpdates returns every agent's update status, keyed by agent ID.
+func (s *Store) ListAgentUpdates(ctx context.Context) (map[string]*AgentUpdate, error) {
+	rows, err := s.query(ctx, `SELECT agent_id, state, from_version, to_version, message, at, checked_at FROM agent_updates`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*AgentUpdate{}
+	for rows.Next() {
+		var u AgentUpdate
+		if err := rows.Scan(&u.AgentID, &u.State, &u.FromVersion, &u.ToVersion, &u.Message, &u.At, &u.CheckedAt); err != nil {
+			return nil, err
+		}
+		out[u.AgentID] = &u
+	}
+	return out, rows.Err()
+}
+
+// RecordUpdate stores an updater report as the agent's status and, when
+// event is true, appends it to the history (keeping the newest keep rows).
+func (s *Store) RecordUpdate(ctx context.Context, u *AgentUpdate, event bool, keep int) error {
+	_, err := s.exec(ctx, `INSERT INTO agent_updates(agent_id, state, from_version, to_version, message, at, checked_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (agent_id) DO UPDATE SET state = excluded.state, from_version = excluded.from_version,
+		to_version = excluded.to_version, message = excluded.message, at = excluded.at, checked_at = excluded.checked_at`,
+		u.AgentID, u.State, u.FromVersion, u.ToVersion, u.Message, u.At, u.CheckedAt)
+	if err != nil || !event {
+		return err
+	}
+	if _, err := s.exec(ctx, `INSERT INTO update_events(agent_id, ts, state, from_version, to_version, message)
+		VALUES(?, ?, ?, ?, ?, ?)`, u.AgentID, u.At, u.State, u.FromVersion, u.ToVersion, u.Message); err != nil {
+		return err
+	}
+	// Prune: keep the newest `keep` events of this agent.
+	var cutoff int64
+	err = s.queryRow(ctx, `SELECT ts FROM update_events WHERE agent_id = ? ORDER BY ts DESC LIMIT 1 OFFSET ?`,
+		u.AgentID, keep).Scan(&cutoff)
+	if err == nil {
+		_, err = s.exec(ctx, `DELETE FROM update_events WHERE agent_id = ? AND ts <= ?`, u.AgentID, cutoff)
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
+}
+
+// UpdateEvents returns an agent's update history, newest first.
+func (s *Store) UpdateEvents(ctx context.Context, agentID string, limit int) ([]UpdateEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.query(ctx, `SELECT ts, state, from_version, to_version, message FROM update_events
+		WHERE agent_id = ? ORDER BY ts DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UpdateEvent
+	for rows.Next() {
+		var e UpdateEvent
+		if err := rows.Scan(&e.TS, &e.State, &e.FromVersion, &e.ToVersion, &e.Message); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------

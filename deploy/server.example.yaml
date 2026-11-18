@@ -61,3 +61,10 @@ scheduler:
   quarantine_for: 10m
   weights: {presence: 3, load: 2, spread: 1.5, memory: 1, power: 1, thermal: 1, gpu: 1.5, capacity: 0.5}
   limits: {idle_full_seconds: 900, min_disk_free_mb: 2048, allow_battery: false, min_battery_percent: 40}
+
+# Agent self-update. Which version Macs run is set at runtime (dashboard
+# Settings, or PUT /v1/updates); by default it is this router's version.
+updates:
+  relay: true              # serve signed agent releases to Macs (cached in storage)
+  release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
+  offline: false           # true: never fetch; serve only uploaded artifacts

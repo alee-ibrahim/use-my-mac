@@ -85,6 +85,8 @@ type live struct {
 	seen time.Time
 	hb   api.Heartbeat
 	wake chan struct{}
+	// updDrainUntil: the updater has the Mac drained until then.
+	updDrainUntil time.Time
 }
 
 // Engine is safe for concurrent use.
@@ -101,6 +103,9 @@ type Engine struct {
 	placement map[string][]sched.Result
 	started   time.Time
 	kick      chan struct{}
+	// version is the router's own version; updates is the agent update policy.
+	version string
+	updates api.UpdateSettings
 }
 
 // Options for New.
@@ -111,6 +116,8 @@ type Options struct {
 	Logger  *slog.Logger
 	Now     func() time.Time
 	Config  Config
+	// Version is the router's version, the default target for agent updates.
+	Version string
 }
 
 const settingScheduler = "scheduler"
@@ -127,7 +134,12 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 	e := &Engine{
 		st: o.Store, blobs: o.Blobs, m: o.Metrics, log: o.Logger, now: o.Now, cfg: o.Config,
 		live: map[string]*live{}, placement: map[string][]sched.Result{}, kick: make(chan struct{}, 1),
+		version: o.Version,
 	}
+	if e.version == "" {
+		e.version = "dev"
+	}
+	e.loadUpdateSettings(ctx)
 	e.started = e.now()
 	if v, err := e.st.GetSetting(ctx, settingScheduler); err == nil {
 		var s SchedulerSettings
@@ -344,6 +356,9 @@ func (e *Engine) Heartbeat(ctx context.Context, agentID string, hb api.Heartbeat
 	})
 
 	resp := api.HeartbeatResponse{Drain: a.Drain || a.OptedOut}
+	if !resp.Drain && e.updateDrainingLocked(agentID, now) {
+		resp.Drain, resp.DrainReason = true, "updating"
+	}
 	for _, id := range hb.Running {
 		t, err := e.st.GetTask(ctx, id)
 		if err != nil || t.AgentID != agentID || t.State != api.StateRunning || a.OptedOut {
@@ -829,7 +844,7 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 	var out []sched.Candidate
 	for _, a := range agents {
 		c := sched.Candidate{
-			ID: a.ID, Online: e.online(a.ID, now), Drain: a.Drain, OptedOut: a.OptedOut,
+			ID: a.ID, Online: e.online(a.ID, now), Drain: a.Drain || e.updateDrainingLocked(a.ID, now), OptedOut: a.OptedOut,
 			Quarantined: a.QuarantinedUntil > ms(now), MaxTasks: a.MaxTasks,
 			Active: active[a.ID], ReservedMB: reserved[a.ID],
 		}

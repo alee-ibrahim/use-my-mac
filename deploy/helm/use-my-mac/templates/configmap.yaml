@@ -39,3 +39,6 @@ data:
     {{- with .Values.scheduler }}
     scheduler: {{- toYaml . | nindent 6 }}
     {{- end }}
+    {{- with .Values.updates }}
+    updates: {{- toYaml . | nindent 6 }}
+    {{- end }}

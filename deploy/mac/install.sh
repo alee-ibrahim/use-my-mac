@@ -9,6 +9,8 @@
 #     script, or from $UMM_AGENT_BINARY)
 #   * writes /usr/local/etc/umm/agent.yaml (only if it does not exist)
 #   * installs a LaunchDaemon that runs the agent as _umm
+#   * installs the root updater LaunchDaemon (signed self-updates; see
+#     docs/design.md "Agent self-update")
 #   * enrols the Mac with a one-time token (prompted, or UMM_ENROL_TOKEN)
 #
 # Secrets are never passed as arguments: the enrolment token is read from the
@@ -23,6 +25,8 @@ ETC="/usr/local/etc/umm"
 VAR="/usr/local/var/umm"
 LOG="/usr/local/var/log/umm"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
+UPD_PLIST="/Library/LaunchDaemons/${LABEL}.updater.plist"
+UPD_STATE="/usr/local/var/umm-updater"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -111,6 +115,12 @@ fi
 PLIST_SRC="$HERE/${LABEL}.plist"
 [ -f "$PLIST_SRC" ] || die "missing $PLIST_SRC"
 install -m 0644 -o root -g wheel "$PLIST_SRC" "$PLIST"
+UPD_SRC="$HERE/${LABEL}.updater.plist"
+if [ -f "$UPD_SRC" ]; then
+  install -d -m 0755 -o root -g wheel /usr/local/var /usr/local/var/log
+  install -d -m 0700 -o root -g wheel "$UPD_STATE"
+  install -m 0644 -o root -g wheel "$UPD_SRC" "$UPD_PLIST"
+fi
 
 # --- enrol ---------------------------------------------------------------
 if [ ! -s "$ETC/credential" ]; then
@@ -134,5 +144,9 @@ fi
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST"
-echo "umm-agent installed and running (logs: $LOG/agent.log)"
+if [ -f "$UPD_PLIST" ]; then
+  launchctl bootout system "$UPD_PLIST" 2>/dev/null || true
+  launchctl bootstrap system "$UPD_PLIST" || echo "warning: could not load the updater daemon" >&2
+fi
+echo "umm-agent installed and running (logs: $LOG/agent.log, updater: /usr/local/var/log/umm-updater.log)"
 echo "Pause work on this Mac at any time:  sudo touch $ETC/paused   (remove the file to resume)"

@@ -12,6 +12,7 @@ import (
 
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
 	"github.com/alee-ibrahim/use-my-mac/internal/sched"
+	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 	"github.com/alee-ibrahim/use-my-mac/internal/storage"
 	"github.com/alee-ibrahim/use-my-mac/internal/store"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
@@ -369,6 +370,11 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 			running[t.AgentID] = append(running[t.AgentID], t.ID)
 		}
 	}
+	updates, err := e.st.ListAgentUpdates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	us := e.UpdateSettings()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
@@ -383,6 +389,7 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		if !m.Online {
 			m.AgentState = "offline"
 		}
+		m.Update = macUpdate(updates[a.ID], selfupdate.ResolveTarget(us, e.version, a.ID).Version)
 		_ = json.Unmarshal([]byte(a.Runtimes), &m.Runtimes)
 		_ = json.Unmarshal([]byte(a.Labels), &m.Labels)
 		if a.Telemetry != "" {

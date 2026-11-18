@@ -3,7 +3,8 @@ name: release
 # Push a tag like v0.1.0 to publish:
 #   - ghcr.io/<owner>/use-my-mac:<version> (linux/amd64 + linux/arm64)
 #   - a GitHub release with the Mac agent bundle, the umm CLI, standalone
-#     router tarballs and SHA256SUMS.
+#     router tarballs, SHA256SUMS and SHA256SUMS.minisig (signed; agents
+#     refuse unsigned updates).
 on:
   push:
     tags: ["v*"]
@@ -104,6 +105,18 @@ jobs:
           done
 
           cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # Agents only install releases whose SHA256SUMS carries a valid minisign
+      # signature from the key built into them (internal/selfupdate/
+      # release-signing.pub). No key, no release: relsign refuses to sign
+      # without one, and verify checks the result against the embedded key.
+      - name: sign
+        env:
+          UMM_RELEASE_SIGNING_KEY: ${{ secrets.UMM_RELEASE_SIGNING_KEY }}
+        run: |
+          set -eu
+          go run ./tools/relsign sign -version "$TAG" release/SHA256SUMS
+          go run ./tools/relsign verify -version "$TAG" release/SHA256SUMS
+          cat release/SHA256SUMS.minisig
       - name: publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

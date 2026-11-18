@@ -41,6 +41,41 @@ export type Mac = {
   running: string[]
   telemetry?: Telemetry
   version?: string
+  update?: MacUpdate
+}
+
+export type MacUpdate = {
+  state?: string
+  from_version?: string
+  to_version?: string
+  message?: string
+  at?: string
+  checked_at?: string
+  desired?: string
+}
+
+export type UpdateEvent = {
+  at: string
+  state: string
+  from_version?: string
+  to_version?: string
+  message?: string
+}
+
+export type UpdateSettings = {
+  paused: boolean
+  target_version: string
+  canary_version: string
+  canary_percent: number
+  canary_macs: string[]
+  drain_timeout_seconds: number
+}
+
+export type UpdatesInfo = {
+  settings: UpdateSettings
+  router_version: string
+  relay: boolean
+  release_url?: string
 }
 
 export type TaskSpec = {
@@ -176,6 +211,9 @@ export const api = {
   revokeKey: (id: string) => request<void>("DELETE", `/v1/api-keys/${id}`),
   settings: () => request<Settings>("GET", "/v1/settings"),
   saveSettings: (s: Settings) => request<Settings>("PUT", "/v1/settings", s),
+  updates: () => request<UpdatesInfo>("GET", "/v1/updates"),
+  saveUpdates: (s: UpdateSettings) => request<UpdatesInfo>("PUT", "/v1/updates", s),
+  macUpdates: (id: string) => request<UpdateEvent[]>("GET", `/v1/macs/${id}/updates`),
   docs: () => request<DocInfo[]>("GET", "/v1/docs"),
   doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }

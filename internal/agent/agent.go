@@ -39,13 +39,15 @@ type Agent struct {
 	blobHTTP  *http.Client // for signed/presigned URLs (no bearer)
 	goos      string
 
-	mu       sync.Mutex
-	yield    *Yield
-	state    string
-	reason   string
-	drain    bool
-	running  map[string]*run
-	capacity chan struct{}
+	mu     sync.Mutex
+	yield  *Yield
+	state  string
+	reason string
+	drain  bool
+	// drainReason is the router's reason for a drain ("" = admin).
+	drainReason string
+	running     map[string]*run
+	capacity    chan struct{}
 	// lastTel is the latest telemetry (for adaptive priority).
 	lastTel api.Telemetry
 	haveTel bool
@@ -244,6 +246,9 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 		state, reason = api.AgentDraining, "paused locally"
 	} else if a.drain && state == api.AgentReady {
 		state, reason = api.AgentDraining, "drained by admin"
+		if a.drainReason != "" {
+			reason = a.drainReason
+		}
 	}
 	prev := a.state
 	a.state, a.reason = state, reason
@@ -277,7 +282,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	a.mu.Lock()
 	wasDrain := a.drain
-	a.drain = resp.Drain
+	a.drain, a.drainReason = resp.Drain, resp.DrainReason
 	for _, id := range resp.Cancel {
 		if r := a.running[id]; r != nil {
 			a.log.Info("router cancelled task", "task", id)

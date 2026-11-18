@@ -160,6 +160,88 @@ inputs `from: {task, output}` resolve to the producing task's output URL at disp
   Optionally `sandbox-exec` denies writes outside the work dir. Logs are capped per attempt.
 - **Server hardening:** distroless non-root image, read-only root filesystem, request size limits,
   `nosniff`, `X-Frame-Options: DENY` for the UI.
+- **Agent updates** are installed by a separate root updater and only if signed (next section).
+
+## Agent self-update
+
+The agent runs as the unprivileged `_umm` user and `/usr/local/bin/umm-agent` is root-owned, so the agent
+cannot replace itself, and should not be able to. Updates are done by a **root updater**: the same binary
+run as `umm-agent update` by its own LaunchDaemon (`<agent label>.updater`, no `UserName`, `RunAtLoad` plus
+`StartInterval` 900 s, up to 2 min of random jitter per run). It needs no sudo, so the fleet's sudoers
+drop-in is unchanged. One cycle:
+
+```text
+check ──(nothing to do / paused / refused)──▶ exit
+  │ install vX
+download SHA256SUMS + .minisig + bundle ──(bad signature / checksum / wrong version)──▶ report failed, exit
+  │
+drain: report "draining" (router drains the Mac) until no task runs or drain_timeout passes
+  │
+save previous binary, write state "pending", atomic swap, launchctl kickstart -k the agent
+  │
+wait ≤ verify_timeout (2 min) for a heartbeat with version vX received after the swap
+  ├─ yes ─▶ report succeeded
+  └─ no ──▶ restore previous binary, restart, report rolled_back, back off vX (1 h, 2 h, … 24 h)
+```
+
+**Policy (router).** The desired version comes from the router: `GET /v1/agent/update` (agent credential)
+returns the target, whether a downgrade is allowed, the drain timeout and the router's live view of this
+agent (version, running tasks, last heartbeat in router time). Admins set `paused`, `target_version`
+(default: the router's own version), `canary_version` with `canary_percent` (a stable hash of the Mac ID)
+and `canary_macs`, and `drain_timeout_seconds`, in Settings or `PUT /v1/updates`. A router built from a
+non-release version (`dev`) proposes nothing unless a target is pinned. Agents already report their version
+in every heartbeat; the updater reports each state change to `POST /v1/agent/update/report`. The router
+keeps the latest state per Mac and the last 50 changes (dashboard: Macs, Version column and history).
+
+**Downgrades** are refused unless an admin pinned that version (target or canary). A git-describe build
+(`v0.1.1-3-gabc1234`) sorts above its tag, and a non-release build (`dev`) is only replaced by a pinned
+version.
+
+**Signing.** Releases are signed with **minisign** (Ed25519, BLAKE2b-prehashed). The release workflow
+signs `SHA256SUMS` with the secret key from the `UMM_RELEASE_SIGNING_KEY` Actions secret
+(`tools/relsign`; it refuses to run without a key, so an unsigned release cannot be published) and the
+trusted comment `use-my-mac release <version> file:SHA256SUMS`. The public key is
+`internal/selfupdate/release-signing.pub`, compiled into the agent (`agent.yaml` `update.public_key` can
+override it for forks; the file is root-owned). Verification is pure Go, before anything is installed:
+
+1. the `.minisig` exists and verifies with the pinned key (signature and trusted-comment signature);
+2. the trusted comment names exactly the version being installed, so an older signed `SHA256SUMS` cannot be
+   replayed as a newer release;
+3. the bundle's SHA-256 matches its line in `SHA256SUMS`;
+4. `umm-agent` is extracted from the bundle into a root-only staging dir and must report that version.
+
+Anyone can check a release by hand with `minisign -Vm SHA256SUMS -P <key from release-signing.pub>`.
+
+**Downloads.** With the relay on (default) the router fetches the three artifacts from the release host
+once, caches them in its blob storage under `agent-releases/<version>/` and serves them to agents at
+`/v1/agent/update/artifacts/<version>/<file>` (agent credential, allowlisted names only). Without internet on
+the router, set `updates.offline` and upload the files with `PUT /v1/updates/artifacts/...`; with
+`updates.relay: false` agents download from `update.release_url` (GitHub by default). In `auto` mode the
+updater falls back to the release host when the relay fails. The relay is not trusted: a router or cache that
+serves a different file fails verification.
+
+**Draining.** A `draining` or `applying` report drains the Mac for 3 minutes, refreshed while the updater
+waits, so a dead updater cannot leave a Mac drained. The agent sees `drain_reason: updating`, finishes its
+tasks and takes no new work; after `drain_timeout_seconds` (1 h by default) the agent is restarted anyway and
+its tasks are requeued as `lost` (no failure counted).
+
+**On the Mac.** `/usr/local/var/umm-updater/` (root, 0700) holds `staging/`, `previous/umm-agent` (one
+previous version) and `state.json`. The swap writes `/usr/local/bin/.umm-agent.new` and renames it over the
+live binary, so the running agent keeps its file and launchd starts the new one. `state.json` records a
+pending update before the swap: if the updater dies or the Mac reboots mid-update, the next run (at boot)
+finishes the verification or rolls back, and discards it if someone else (e.g. `umm fleet upgrade`) replaced
+the binary meanwhile. A file lock stops two cycles overlapping. Log: `/usr/local/var/log/umm-updater.log`.
+Nothing is shown to the Mac's user.
+
+**Updating the updater.** The updater is the agent binary, so a new release updates both: the next cycle
+runs the new code. The LaunchDaemon plist itself only changes with `install.sh` or `umm fleet
+install/upgrade`. If a release ever broke the updater while the agent still heartbeats, `umm fleet upgrade`
+repairs it.
+
+**Trust summary.** Root code only runs what the release key signed, for the version the router asked for.
+A compromised router can hold updates back, or (only by pinning) roll Macs back to an older signed release;
+it cannot make them run unsigned code. The signing key lives only in the Actions secret and an offline
+backup.
 
 ## Failure modes
 
@@ -175,6 +257,9 @@ inputs `from: {task, output}` resolve to the producing task's output URL at disp
 | Router restarts | live state is rebuilt from heartbeats | running tasks are kept for one `heartbeat_timeout` grace period, then requeued if their agent does not report them |
 | Upstream task fails | dependency check | dependents `cancelled`, job `failed` |
 | Status report lost on the network | agent retries 5× | if still lost: deadline + grace marks a timeout |
+| New agent version does not start or heartbeat | updater waits `verify_timeout` | previous binary restored, `rolled_back` reported, that version retried after 1 h, 2 h, … 24 h |
+| Updater dies or the Mac reboots mid-update | pending state in `state.json` | next run (at boot) finishes verification or rolls back |
+| Release unsigned, tampered or for another version | signature / checksum / trusted comment | nothing installed, `failed` reported |
 
 Placement uses at-least-once semantics: a task may run more than once (e.g. a partitioned agent keeps
 running briefly). Tasks should be idempotent; outputs are overwritten per key.
