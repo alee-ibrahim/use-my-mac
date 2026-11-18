@@ -1,0 +1,115 @@
+name: release
+
+# Push a tag like v0.1.0 to publish:
+#   - ghcr.io/<owner>/use-my-mac:<version> (linux/amd64 + linux/arm64)
+#   - a GitHub release with the Mac agent bundle, the umm CLI, standalone
+#     router tarballs and SHA256SUMS.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: existing tag to (re)publish, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.TAG }}
+            type=raw,value=latest,enable=${{ !contains(env.TAG, '-') }}
+          labels: |
+            org.opencontainers.image.licenses=Apache-2.0
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.TAG }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: dashboard
+        run: make web
+      - name: build
+        run: |
+          set -eu
+          V="$TAG"
+          LD="-s -w -X main.version=$V"
+          mkdir -p release
+
+          # Mac agent bundle (binary, install scripts, launchd plist).
+          make dist-mac VERSION="$V"
+          cp dist/umm-agent-darwin-arm64.tar.gz release/
+
+          # umm CLI.
+          for t in darwin/arm64 linux/amd64 windows/amd64; do
+            os=${t%/*}; arch=${t#*/}; ext=""; [ "$os" = windows ] && ext=.exe
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LD" \
+              -o "release/umm-$os-$arch$ext" ./cmd/umm
+          done
+
+          # Standalone router (umm-server + dashboard) for running without a container.
+          for t in darwin/arm64 linux/amd64; do
+            os=${t%/*}; arch=${t#*/}; d="umm-server-$os-$arch"
+            mkdir -p "dist/$d"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LD" -o "dist/$d/umm-server" ./cmd/umm-server
+            cp -r dashboard/dist "dist/$d/web"
+            cp deploy/server.example.yaml LICENSE NOTICE "dist/$d/"
+            tar -C dist -czf "release/$d.tar.gz" "$d"
+          done
+
+          cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "$TAG" --generate-notes --verify-tag
+          fi
