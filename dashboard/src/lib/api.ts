@@ -39,8 +39,17 @@ export type Mac = {
   // Allowlisted runtimes this Mac cannot run (program missing, not executable,
   // or a task could not start it). Tasks needing them are not placed here.
   unavailable_runtimes?: UnavailableRuntime[]
+  // Effective labels: the agent's own (agent_labels) with the router-side
+  // labels an admin set (admin_labels) taking precedence.
   labels: Record<string, string>
+  agent_labels?: Record<string, string>
+  admin_labels?: Record<string, string>
+  reservation?: MacReservation
+  // Effective concurrency; max_tasks_set is the admin's setting (0 = the
+  // agent's own) and agent_max_tasks the agent's hard limit.
   max_tasks: number
+  max_tasks_set?: number
+  agent_max_tasks?: number
   running: string[]
   telemetry?: Telemetry
   version?: string
@@ -49,6 +58,22 @@ export type Mac = {
   // Why the agent is in its state (e.g. why it is unhealthy).
   state_reason?: string
   isolation?: Isolation
+}
+
+// A Mac reserved for some owners only runs their tasks.
+export type MacReservation = {
+  owners?: string[]
+  owner_names?: Record<string, string>
+  until?: string
+  note?: string
+  by?: string
+  mine: boolean
+}
+
+export type MacReservationRequest = {
+  owners: string[]
+  hours?: number
+  note?: string
 }
 
 // How a Mac keeps tasks away from its users' data.
@@ -110,8 +135,23 @@ export type TaskSpec = {
   runtime: string
   args?: string[]
   depends_on?: string[]
-  resources?: { ram_mb?: number; gpu?: boolean; expected_seconds?: number }
+  resources?: {
+    ram_mb?: number
+    gpu?: boolean
+    expected_seconds?: number
+    labels?: Record<string, string>
+  }
   outputs?: { name: string }[]
+  macs?: string[]
+  prefer?: { labels?: Record<string, string>; macs?: string[]; bonus?: number }
+}
+
+export type Cleanup = {
+  after_download?: boolean
+  after_hours?: number
+  keep_inputs?: boolean
+  keep_outputs?: boolean
+  delete_job?: boolean
 }
 
 export type Attempt = {
@@ -144,6 +184,8 @@ export type Task = {
   phase?: string
   percent?: number
   progress?: TaskProgress
+  // Why a pending task has no Mac yet (reserved Macs, pinned Macs).
+  waiting?: string
   placement?: {
     id: string
     ok: boolean
@@ -165,6 +207,8 @@ export type Job = {
   percent?: number
   phase?: string
   tasks?: Task[]
+  cleanup?: Cleanup
+  cleaned_at?: string
 }
 
 // Latest live report from the Mac running a task. percent is within the
@@ -287,8 +331,19 @@ export const api = {
   macs: () => request<Mac[]>("GET", "/v1/macs"),
   patchMac: (
     id: string,
-    patch: { drain?: boolean; opted_out?: boolean; name?: string }
+    patch: {
+      drain?: boolean
+      opted_out?: boolean
+      name?: string
+      max_tasks?: number
+    }
   ) => request<void>("PATCH", `/v1/macs/${id}`, patch),
+  setMacLabels: (id: string, labels: Record<string, string>) =>
+    request<void>("PUT", `/v1/macs/${id}/labels`, { labels }),
+  reserveMac: (id: string, r: MacReservationRequest) =>
+    request<void>("PUT", `/v1/macs/${id}/reservation`, r),
+  unreserveMac: (id: string) =>
+    request<void>("DELETE", `/v1/macs/${id}/reservation`),
   deleteMac: (id: string) => request<void>("DELETE", `/v1/macs/${id}`),
   enrolToken: (ttl_hours: number) =>
     request<{ token: string; expires_at: string }>(
@@ -393,7 +448,10 @@ export const api = {
     request<void>("POST", `/v1/install-tokens/${id}/purge`),
   purgeInstallTokens: () =>
     request<PurgeResult>("POST", "/v1/install-tokens/purge"),
-  deleteJob: (id: string) => request<void>("DELETE", `/v1/jobs/${id}`),
+  // Deletes a job (cancelling it first if it runs); inputs also deletes the
+  // input files its owner uploaded, unless another unfinished job uses them.
+  deleteJob: (id: string, inputs = false) =>
+    request<void>("DELETE", `/v1/jobs/${id}${inputs ? "?inputs=true" : ""}`),
   purgeJobs: (older_than_days: number, states?: string[]) =>
     request<PurgeResult>("POST", "/v1/jobs/purge", { older_than_days, states }),
   doc: (slug: string) =>

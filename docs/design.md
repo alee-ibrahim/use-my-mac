@@ -21,12 +21,15 @@ anchor), `internal/server` (HTTP),
 
 ## Data model
 
-- **Job:** a name, labels, an owner (the API key or OIDC subject that submitted it) and a set of tasks.
-  Job state is derived: `queued`, `running`, then `succeeded`, `failed` or `cancelled`.
-- **Task:** `runtime` (an allowlisted name), `args`, `env`, `inputs`, `outputs`, `resources`
-  (`ram_mb`, `gpu`, `expected_seconds`, `disk_mb`, `labels`), `timeout_seconds`, `max_retries` and
-  `depends_on`. States: `blocked`, `pending`, `assigned`, `running`, then `succeeded`, `failed` or
+- **Job:** a name, labels, an owner (the API key or OIDC subject that submitted it), an optional cleanup
+  policy and a set of tasks. Job state is derived: `queued`, `running`, then `succeeded`, `failed` or
   `cancelled`.
+- **Task:** `runtime` (an allowlisted name), `args`, `env`, `inputs`, `outputs`, `resources`
+  (`ram_mb`, `gpu`, `expected_seconds`, `disk_mb`, `labels`), `macs` (hard pin), `prefer` (soft),
+  `timeout_seconds`, `max_retries` and `depends_on`. States: `blocked`, `pending`, `assigned`, `running`,
+  then `succeeded`, `failed` or `cancelled`.
+- **Stored file:** a blob in router storage with an owner (`blobs` table): app uploads (`uploads/<key>`,
+  owned by the uploader) and task outputs (`jobs/<job>/<task>/<output>`, owned by the job's owner).
 - **Attempt:** one try of a task on one Mac, with its placement score and outcome: `succeeded`, `failed`,
   `timeout`, `yielded`, `lost` or `cancelled`.
 
@@ -49,12 +52,27 @@ scheduler:
 
 ### Hard filters
 
-A Mac is skipped (with a reason shown in the dashboard) if it is offline, drained, opted out, quarantined,
+A Mac is skipped (with a reason shown in the dashboard) if the task is pinned to other Macs (`macs`), it is
+reserved for other owners, or it is offline, drained, opted out, quarantined,
 or not `ready` (yielding, cooldown, paused, unhealthy). It is also skipped if it is excluded for this task, lacks the
 runtime (or has it allowlisted but unavailable: the agent's preflight failed, or a task could not execute it), has non-matching labels or is at `max_tasks`. Resource reasons: the task needs more RAM than the Mac
 has, or free memory minus RAM reserved by our other tasks on it is too small. Machine-state reasons: critical
 memory pressure, critical thermal state, too little free disk, or running on battery (unless
 `allow_battery`, and then only above `min_battery_percent`).
+
+**Labels, reservations and concurrency set on the router.** A Mac's labels for matching are its agent's
+labels overlaid with `admin_labels` that admins set on the router (stored on the `agents` row; admin wins on
+a key both set). A reservation (`reserved_for`: owners, optional `reserved_until`) makes the Mac skip every
+task whose job owner is not listed; an expired reservation is ignored without being cleared. Pins and
+reservations are checked first, so the reason shown is the one that matters to that owner. At submit the
+router refuses `macs` entries that match no Mac, or only Macs reserved for others (`403`). When no Mac takes
+a task the router explains it in the task's `waiting` field (memory only): it re-scores the Macs that were
+skipped only for their reservation with the reservation removed, and if one of them would have fit it says
+"only Macs reserved for other owners could run it now"; for a pinned task it lists its Macs and why each was
+skipped. `max_tasks_set` (admin, 0 = unset) goes to the agent in every heartbeat response; the agent runs
+`min(max_tasks_set, max_tasks_limit)` (its own `agent.yaml` hard cap, default 8) and reports the limit, so the
+router places against the same number at once. Agents that do not report a limit keep their own
+`max_tasks`.
 
 **Work space.** Each agent reports the disk space it has for work (`work_space_bytes`: free space on its
 work volume, less the reserve kept for the Mac's user) and what it would have with no task running
@@ -80,6 +98,9 @@ Settings.
 | thermal | nominal 1.0 · fair 0.6 · serious 0.15 | 1 |
 | gpu | `1 − GPU utilisation` (only for `gpu: true` tasks; unknown = 0.5) | 1.5 |
 | capacity | CPU cores / largest Mac's cores | 0.5 |
+
+A soft `prefer` (labels and/or Macs) then adds its `bonus` (default 25 points) to matching Macs' scores, so
+they win when they are free while the others still take work (the score can then exceed 100).
 
 Ties break on Mac ID, so placement is deterministic. Every decision is kept, with a per-factor breakdown,
 and shown under a task's **Placement** tab.
@@ -148,6 +169,26 @@ Completion deletes the row; the scheduler loop aborts uploads older than 24 hour
 
 **Chunked downloads.** The router serves local blobs with `http.ServeContent`, so `Range` works. Agents and
 the CLI download in parallel ranges and fall back to one stream when the server ignores `Range`.
+
+**Ownership.** The `blobs` table records each stored file's owner, kind, job and task, size and when it was
+first downloaded in full. Uploads are recorded on `PUT /v1/blobs` and on multipart completion; outputs when
+their task succeeds. Reads, overwrites and use as a job input are limited to the owner and admins (an admin
+overwrite keeps the owner). Blobs from before tracking have no row and keep the old behaviour. A file is *in
+use* while a non-terminal task reads it (uploads) or its job is unfinished (outputs); in-use files are never
+deleted.
+
+**Deleting jobs and files.** Deleting a job cancels it first when it runs (agents stop the tasks on their next
+heartbeat), then deletes the rows, the outputs in storage, unfinished output uploads and the ownership rows.
+Signed `PUT`s to a deleted job's outputs are refused, and the outputs are deleted once more ten minutes later
+(memory only), in case an agent's upload straddled the delete. With `inputs` the owner's input files that no
+unfinished job uses go too.
+
+**Cleanup policies.** A job's `cleanup` is stored with it and checked every minute once the job has finished:
+`after_hours` from `finished_at`, or `after_download` for a succeeded job whose *results* (stored outputs no
+task of the job consumes) have all been downloaded in full and nothing has been downloaded for two minutes.
+Output downloads are counted per file: a `200` covers the file, `206` ranges add up (in memory) to its size.
+Running it deletes inputs and outputs (unless kept) or the whole job, sets `cleaned_at` and writes
+`job.cleaned` to the activity log.
 
 ## Live progress
 
@@ -479,10 +520,15 @@ Postgres):
 ## Activity log and cleanup
 
 `events` holds notable fleet events (enrolments, yields, quarantines, failed or cancelled jobs, update
-results) and an audit trail of admin changes: keys created, revoked and deleted; Macs, jobs and install links
-deleted; bulk purges and retention changes, each with the acting subject. Deletes only remove leftovers: a
-key must be revoked first, an install link must be revoked, expired or used up, and a job must be finished
-(`409` otherwise). Deleting a Mac revokes its credential (the row with the credential hash is gone) and
+results) and an audit trail of changes: keys created, revoked and deleted; Macs, jobs, stored files and
+install links deleted (by admins or, for their own jobs and files, by app keys); router labels, reservations
+and `max_tasks` changes; cleanup policies run; bulk purges and retention changes, each with the acting
+subject. Deletes of admin records only remove leftovers: a key must be revoked first and an install link must
+be revoked, expired or used up (`409` otherwise). Jobs are cancelled first, and files still in use are kept.
+
+**Schema changes.** Tables are created with `CREATE TABLE IF NOT EXISTS`; columns added later are listed in
+`store.columns` and added at start-up when missing (`ALTER TABLE ... ADD COLUMN` with a constant default:
+`IF NOT EXISTS` on Postgres, a `pragma_table_info` check on SQLite), so an older database upgrades in place. Deleting a Mac revokes its credential (the row with the credential hash is gone) and
 removes its metrics; its past attempts stay with their jobs.
 
 ## Failure modes

@@ -33,7 +33,7 @@ umm keys create reporting -role viewer
 
 | Role | Can |
 | --- | --- |
-| `app` | submit jobs, upload inputs, see and cancel **its own** jobs |
+| `app` | submit jobs, upload inputs, see, cancel and delete **its own** jobs and stored files |
 | `viewer` | read everything (jobs, Macs, settings); no changes |
 | `admin` | everything, including Macs, enrolment tokens, API keys and settings |
 
@@ -105,6 +105,13 @@ umm macs                            # quick check
 | `umm logs TASK [-attempt N]` | task logs (all attempts by default) |
 | `umm download TASK OUTPUT [-o FILE] [-concurrency 4]` | download an output (parallel byte ranges, with progress) |
 | `umm cancel JOB` | cancel a job |
+| `umm jobs rm JOB... [-inputs]` | delete your jobs; running ones are cancelled first. `-inputs` also deletes the input files you uploaded for them |
+| `umm jobs rm -finished [-state failed] [-older-than 7d] [-inputs]` | delete all your finished jobs (admins: everyone's, or `-owner`) |
+| `umm files [-kind upload\|output] [-job JOB] [-prefix P]` | your stored files: uploads and your jobs' outputs, with size and whether a job still needs them |
+| `umm files rm KEY...` / `umm files rm -all [filters]` | delete stored files; files an unfinished job needs are kept |
+| `umm macs label MAC k=v... [-rm K]` | router-side labels (admin), see [Choosing Macs](#choosing-macs) |
+| `umm macs reserve MAC -for KEY_ID[,...] [-hours N] [-note X]` / `unreserve MAC` | reserve a Mac for some API keys (admin) |
+| `umm macs max-tasks MAC N` | how many tasks a Mac runs at once (admin; 0 = its own setting) |
 | `umm macs` | Macs with live telemetry |
 | `umm drain MAC [-off]` | stop sending new work to a Mac (admin) |
 | `umm rename MAC NAME` | rename a Mac on the router (admin) |
@@ -147,12 +154,17 @@ umm download TASK_ID enc.mp4
 | `env` | extra environment variables. `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` and `LD_*` are not allowed |
 | `inputs` | files placed in `in/` before the task starts. Each has a `name` and exactly one of `url`, `blob` or `from` (the CLI also accepts `file`) |
 | `outputs` | files the task must write to `out/NAME`. `optional: true` allows a missing file; `url` sends it straight to your own PUT URL |
-| `resources` | `ram_mb`, `gpu`, `expected_seconds`, `disk_mb` (scratch space), `disk_estimate_mb` (total work space: inputs, outputs and scratch; default twice the inputs plus `disk_mb`), `labels` (all must match the Mac's labels) |
+| `resources` | `ram_mb`, `gpu`, `expected_seconds`, `disk_mb` (scratch space), `disk_estimate_mb` (total work space: inputs, outputs and scratch; default twice the inputs plus `disk_mb`), `labels` (all must match the Mac's labels: its agent's own and those an admin set on the router) |
+| `macs` | run only on these Macs (IDs or names). See [Choosing Macs](#choosing-macs) |
+| `prefer` | soft placement: `{labels: {...}, macs: [...], bonus: 25}`. Matching Macs get a score bonus; the others still take work |
 | `timeout_seconds` | limit for one attempt (router default if 0) |
 | `max_retries` | failed attempts retried before giving up (router default if unset). Yields and lost Macs do not count |
 | `depends_on` | task keys that must succeed first |
 
 A task's standard output and error are its logs. Small results can simply be printed.
+
+The job itself can also set `macs` and `prefer` (the default for tasks that set none) and `cleanup` (see
+[Cleaning up](#cleaning-up)).
 
 ### Progress
 
@@ -231,9 +243,10 @@ part, `Direct` (send parts straight to S3 with presigned URLs instead of through
 `OnUpload`, which hands you the upload ID so that `ResumeUpload` can finish an interrupted upload later.
 `UploadBlob` and `DownloadOutput` still stream a file in one request.
 
-The client also has `Job`, `Jobs`, `CancelJob`, `Task`, `Logs`, `Macs` and the admin calls (`PatchMac`,
-`CreateEnrolmentToken`, `CreateAPIKey`, `APIKeys`, `RevokeAPIKey`). `examples/video-transcode/` in the
-repository is a complete map/reduce program.
+The client also has `Job`, `Jobs`, `CancelJob`, `RemoveJob`, `PurgeJobs`, `Files`, `DeleteFile`,
+`DeleteFiles`, `Task`, `Logs`, `Macs` and the admin calls (`PatchMac`, `SetMacLabels`, `ReserveMac`,
+`UnreserveMac`, `SetMacMaxTasks`, `CreateEnrolmentToken`, `CreateAPIKey`, `APIKeys`, `RevokeAPIKey`).
+`examples/video-transcode/` in the repository is a complete map/reduce program.
 
 ## Map/reduce jobs
 
@@ -306,6 +319,45 @@ would take a long time anyway. Split it by time instead:
 
    The reduce task holds all parts and the result (twice the output size), so it needs one Mac with that
    much room; for a very large result, have your app concatenate from storage instead.
+
+## Choosing Macs
+
+By default the scheduler picks the best Mac for each task (see [Design](design.md#scheduling)). Four things
+narrow or steer that:
+
+- **Labels.** `resources.labels` must all match a Mac's labels. A Mac's labels are those in its `agent.yaml`
+  plus **router labels** an admin sets on the dashboard's Mac page (**Placement**, **Edit**), with `umm macs
+  label MAC class=studio` or `PUT /v1/macs/{id}/labels`. Router labels win when both set the same key, and
+  apply at once, with no change on the Mac.
+- **`macs`** on a task or job pins it to those Macs (IDs or names). Unknown names are refused at submit.
+- **Reservations.** An admin can reserve a Mac for one or more owners (API keys, or `user:<subject>` for
+  single sign-on users), optionally until a time: `umm macs reserve studio-1 -for key_abc,key_def -hours 48
+  -note "bulk encode"`, the Mac page, or `PUT /v1/macs/{id}/reservation`. A reserved Mac only runs those
+  owners' tasks. Their tasks still go anywhere else too; to keep them on the reserved Macs, pin them with a
+  label (e.g. a router label `pool=encode` on those Macs) or `macs`. Only the owners can pin to a reserved
+  Mac (`403` for anyone else). Apps see a reserved Mac with `reservation.mine` set when it is theirs; only
+  admins and viewers see who it is reserved for. A task that only reserved Macs could run waits, and its
+  `waiting` field (the dashboard shows it on the task) says so: `only Macs reserved for other owners could
+  run it now: studio-1`.
+- **`prefer`** is soft: `prefer: {labels: {class: studio}}` adds `bonus` (default 25, on the 0-100 score) to
+  matching Macs, so they win when they are free, while the other Macs still take work. Nobody has to drain
+  anything.
+
+```yaml
+name: encode-batch
+prefer: {labels: {class: studio}}      # every task: studio Macs first
+tasks:
+  - key: part-1
+    runtime: ffmpeg
+    macs: [studio-1, studio-2]         # this one only there (must be allowed to use them)
+    ...
+```
+
+**Tasks at once.** A Mac runs `max_tasks` tasks at once (`agent.yaml`, default 1). An admin can change it from
+the router: the Mac page, `umm macs max-tasks studio-1 4` or `PATCH /v1/macs/{id}` `{"max_tasks": 4}` (0
+goes back to the Mac's own value). The agent applies it on its next heartbeat, capped at `max_tasks_limit`
+in its `agent.yaml` (default 8), so the Mac's owner keeps the final say. Lowering it never stops running
+tasks. Agents from before this setting keep their own `max_tasks`.
 
 ## Runtimes
 
@@ -454,6 +506,48 @@ Agents set the part size and parallelism in `agent.yaml` (`transfer: {part_size_
 Uploads that are never completed are aborted, and their parts deleted, after 24 hours. A part can be up to
 5 GiB and an upload up to 10,000 parts; the router's `max_upload_mb` still limits the whole file.
 
+### Who owns what
+
+Every file the router stores has an owner: an upload belongs to the key (or user) that uploaded it, a task
+output to the job's owner. Only the owner and admins can read, overwrite or use an upload as a job input;
+another app key gets `404` reading it and `403` writing or using it. Files stored before the router tracked
+owners have none recorded and keep working as before (any app key can use them; only admins can delete them).
+
+### Cleaning up
+
+Bulk runs leave inputs and outputs on the router until someone deletes them. Owners (app keys) and admins
+can:
+
+- **Delete a job** (`umm jobs rm JOB`, `DELETE /v1/jobs/{id}`, the SDK's `RemoveJob`, or the dashboard): a
+  queued or running job is cancelled first (its Macs stop the tasks), then the job, its tasks, logs and
+  stored outputs are deleted. With `-inputs` (`?inputs=true`) the input files its owner uploaded go too,
+  unless another unfinished job uses them. `umm jobs rm -finished [-state failed] [-older-than 7d]` (`POST
+  /v1/jobs/purge`) deletes many at once; app keys only ever touch their own jobs.
+- **Delete stored files** (`umm files`, `GET /v1/files`, `DELETE /v1/files/{key}`, `POST /v1/files/delete`):
+  list your uploads and outputs with their size, then delete them by key (`uploads/...`, `jobs/...`, or the
+  blob key you uploaded) or all at once with a filter. A file an unfinished job still needs is kept (`409`,
+  or listed under `skipped`).
+- **Let the job clean up after itself** with `cleanup` in the job spec:
+
+  ```yaml
+  name: encode-batch
+  cleanup:
+    after_download: true   # once the job succeeded and every result was downloaded in full
+    after_hours: 48        # or 48 hours after it finished (any final state), whichever comes first
+    # keep_inputs: true    # keep the uploaded inputs
+    # keep_outputs: true   # keep the outputs
+    # delete_job: true     # delete the job record too
+  tasks: [...]
+  ```
+
+  *Results* are the stored outputs that no other task of the job consumes (a reduce's input is not a result).
+  A download counts once every byte of the file was served (parallel ranges add up); cleanup then waits two
+  quiet minutes. Failed and cancelled jobs are only cleaned by `after_hours`, so you can retry them with the
+  same inputs. Inputs are only deleted when the job's owner uploaded them and no unfinished job uses them.
+  The job shows `cleaned_at` afterwards; the activity log records `job.cleaned`.
+
+Every delete is written to the activity log with who did it (`job.deleted`, `jobs.purged`, `files.deleted`).
+
 ## The dashboard
 
 The router serves the dashboard at its root URL. It works on a phone: the sidebar becomes a menu, tables
@@ -470,12 +564,14 @@ Viewers see everything read-only; only admins get the buttons that change or del
 - **Macs**: the fleet with live telemetry. Open a Mac for its charts (CPU split between our tasks and its
   user, GPU and memory, tasks running, availability), its task history, events and update history. Admins
   can rename, drain, opt out or delete it (delete asks first; deleting revokes the Mac's credential and removes its
-  history). Install links are listed below the Macs; used, expired and revoked ones can be deleted one by one
+  history). The Mac's **Placement** card shows its agent and router labels, its reservation and how many
+  tasks it runs at once; admins change them with **Edit**. Reserved Macs carry a *reserved* badge in the
+  list. Install links are listed below the Macs; used, expired and revoked ones can be deleted one by one
   or with **Clear old**.
 - **Jobs**: filter by state; open a job for its timeline (every attempt of every task on the Mac that ran it,
-  by task or by Mac, coloured by outcome), its tasks, and a task's attempts, logs and placement scores. Admins
-  can cancel a job and delete finished jobs (tick several, or **Delete old jobs** for everything finished more
-  than N days ago).
+  by task or by Mac, coloured by outcome), its tasks, and a task's attempts, logs, placement scores and why it
+  is still waiting. Admins can cancel a job and delete jobs (a running one is cancelled first; optionally with
+  its input files), tick several, or **Delete old jobs** for everything finished more than N days ago.
 - **Activity**: enrolments, yields, quarantines, failed jobs, agent update results and every admin change
   (created, revoked and deleted keys, deleted Macs, jobs and install links, retention changes), with who did
   it.
@@ -485,8 +581,9 @@ Viewers see everything read-only; only admins get the buttons that change or del
   one-off cleanup buttons.
 
 The CLI has the same cleanup: `umm keys delete ID` / `umm keys purge`, `umm install-tokens delete ID` /
-`umm install-tokens purge`, `umm macs delete MAC`, `umm jobs delete JOB` / `umm jobs purge -older-than 30d
-[-state failed]`, plus `umm metrics`, `umm events [-kind mac.]` and `umm retention [set -jobs-days 90]`.
+`umm install-tokens purge`, `umm macs delete MAC`, `umm jobs rm JOB` / `umm jobs rm -finished -older-than 30d
+[-state failed]` (or the older `umm jobs delete` / `umm jobs purge`), `umm files rm`, plus `umm metrics`,
+`umm events [-kind mac.]` and `umm retention [set -jobs-days 90]`.
 
 ## API reference
 
@@ -499,6 +596,11 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/jobs?state=&limit=` | any | list jobs (apps see only their own) |
 | `GET /v1/jobs/{id}` | any | a job, its tasks and state counts |
 | `POST /v1/jobs/{id}/cancel` | app, admin | cancel a job |
+| `DELETE /v1/jobs/{id}?inputs=true` | app (own), admin | delete a job with its tasks, logs and stored outputs, cancelling it first if it runs; `inputs` also deletes its owner's input files not used by an unfinished job |
+| `POST /v1/jobs/purge` | app (own), admin | `{"older_than_days": 0, "states": ["failed"], "inputs": true, "owner": "key:..."}` → `{"deleted": n}`; apps always purge only their own jobs, `owner` is for admins |
+| `GET /v1/files?kind=&job=&prefix=&owner=&limit=` | app, admin | stored files you own (`owner`: admins may name another owner or `*`), with `in_use` |
+| `DELETE /v1/files/{key}` | app (own), admin | delete one stored file (`uploads/...`, `jobs/...` or a blob key); `409` while an unfinished job needs it |
+| `POST /v1/files/delete` | app (own), admin | `{"keys": [...]}` or a filter `{"prefix", "kind", "job_id", "all": true}` → `{deleted, bytes, skipped}` |
 | `GET /v1/tasks/{id}` | any | a task with its attempts and placement scores |
 | `GET /v1/tasks/{id}/logs?attempt=N` | any | logs as plain text (all attempts when `attempt` is 0 or missing) |
 | `GET /v1/tasks/{id}/outputs/{name}` | any | download an output |
@@ -512,7 +614,9 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/jobs/stream?state=&limit=` | any | server-sent events: `jobs` (the list), then `job` and `removed` as jobs change |
 | `GET /v1/blobs/{key}` | app, admin | download a blob |
 | `GET /v1/macs` | any | Macs with state and live telemetry |
-| `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}` or `{"name": "Lab Mac 2"}` |
+| `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}`, `{"name": "Lab Mac 2"}` or `{"max_tasks": 4}` (0 = the agent's own) |
+| `PUT /v1/macs/{id}/labels` | admin | `{"labels": {"class": "studio"}}` replaces the router-side labels |
+| `PUT` / `DELETE /v1/macs/{id}/reservation` | admin | `{"owners": ["key_..."], "hours": 48, "note": "..."}` (or `until`, RFC 3339) reserves the Mac; `DELETE` removes it |
 | `DELETE /v1/macs/{id}` | admin | delete a Mac: revokes its credential and removes its metrics history |
 | `POST /v1/enrolment-tokens` | admin | one-time token for a new Mac |
 | `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys (`purge` below deletes them) |
@@ -546,8 +650,6 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/metrics/macs/{id}?range=7d` | viewer, admin | one Mac's time series |
 | `GET /v1/macs/{id}/attempts?limit=` | viewer, admin | a Mac's task history, newest first |
 | `GET /v1/jobs/{id}/timeline` | any | every attempt of a job's tasks, with Mac and times |
-| `DELETE /v1/jobs/{id}` | admin | delete a finished job with its tasks, logs and stored outputs (`409` while it runs) |
-| `POST /v1/jobs/purge` | admin | `{"older_than_days": 30, "states": ["failed"]}` → `{"deleted": n}` |
 | `POST /v1/api-keys/{id}/purge` | admin | delete a revoked key (`409` while active) |
 | `POST /v1/api-keys/purge` | admin | delete every revoked key |
 | `POST /v1/install-tokens/{id}/purge` | admin | delete a used, expired or revoked install link and its audit log |
@@ -709,7 +811,9 @@ the Macs check the signature themselves.
 
 | Symptom | Look at | Likely cause |
 | --- | --- | --- |
-| Task stays `pending` | the task's **Placement** tab in the dashboard: every Mac and why it was skipped | no Mac has the runtime, not enough RAM or disk, labels don't match, all Macs busy, yielding, drained or offline |
+| Task stays `pending` | the task's **Placement** tab in the dashboard: every Mac and why it was skipped; its `waiting` field | no Mac has the runtime, not enough RAM or disk, labels don't match, all Macs busy, yielding, drained or offline; only Macs reserved for other owners fit; its pinned `macs` are busy or unavailable |
+| `403 ... belongs to another owner` | the blob key | another app key uploaded that blob; use your own key or a different blob key |
+| `409 ... still needs it` deleting a file | `umm files` (`IN USE`) | an unfinished job reads it; cancel or delete that job first |
 | Task keeps moving between Macs | attempts with outcome `yielded` | the Macs' users are busy. Normal; it runs when a Mac is quiet. Long tasks prefer idle Macs if you set `expected_seconds` |
 | Task shows `running` with no percentage | the task's output | the task reports nothing: print `UMM_PROGRESS=N` or write `$UMM_PROGRESS_FILE` (see [Progress](#progress)) |
 | `umm watch` or the dashboard updates only every few seconds | proxies between you and the router | the proxy buffers server-sent events, so clients fall back to polling. Turn off buffering for the `/v1/jobs/` streams |

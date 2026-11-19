@@ -19,6 +19,7 @@ import {
   PageHeader,
   RangePicker,
 } from "@/components/ops"
+import { MacPlacementCard } from "@/components/mac-placement"
 import { StateBadge } from "@/components/state-badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -261,6 +262,14 @@ export function MacDetailPage({ id, admin }: { id: string; admin: boolean }) {
           </CardContent>
         </Card>
       </section>
+
+      {m && (
+        <MacPlacementCard
+          m={m}
+          admin={admin}
+          onChanged={() => void macs.refresh()}
+        />
+      )}
 
       {series.error && (
         <Alert variant="destructive">

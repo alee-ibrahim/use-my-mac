@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 import { ArrowLeftIcon, Trash2Icon, XCircleIcon } from "lucide-react"
 import { Bar, BarChart, CartesianGrid, Cell, XAxis, YAxis } from "recharts"
@@ -9,6 +9,8 @@ import { StateBadge } from "@/components/state-badge"
 import { progressText, TaskProgress } from "@/components/task-progress"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import {
   Card,
   CardAction,
@@ -63,6 +65,16 @@ import {
 } from "@/lib/api"
 import { href, useLive, useNow, usePolling } from "@/lib/hooks"
 import { progress } from "@/pages/jobs"
+
+// cleanupText says when a job's cleanup policy will delete its files.
+function cleanupText(job: Job) {
+  const c = job.cleanup
+  if (!c) return ""
+  const when: string[] = []
+  if (c.after_download) when.push("once its results are downloaded")
+  if (c.after_hours) when.push(`${c.after_hours} h after it finished`)
+  return when.join(" or ")
+}
 
 // Outcome groups for the timeline, in categorical slot order.
 const outcomeGroups = [
@@ -264,6 +276,11 @@ function TaskBody({ task, logs }: { task?: Task; logs?: string }) {
           <TaskProgress task={task} />
         </div>
       )}
+      {task.waiting && (
+        <Alert className="mx-4 mb-2 w-auto">
+          <AlertDescription>Waiting: {task.waiting}</AlertDescription>
+        </Alert>
+      )}
       <Tabs defaultValue="attempts" className="px-4 pb-4">
         <TabsList>
           <TabsTrigger value="attempts">Attempts</TabsTrigger>
@@ -435,6 +452,7 @@ export function JobDetailPage({ id, admin }: { id: string; admin: boolean }) {
   const [taskId, setTaskId] = useState<string>()
   const [by, setBy] = useState<"task" | "mac">("task")
   const [confirm, ask] = useConfirm()
+  const inputsRef = useRef(false)
   const mobile = useIsMobile()
   const now = useNow(5000)
 
@@ -504,6 +522,8 @@ export function JobDetailPage({ id, admin }: { id: string; admin: boolean }) {
           job && (
             <span className="font-mono text-xs">
               {job.id} · {job.owner}
+              {job.cleanup &&
+                ` · files deleted ${job.cleaned_at ? since(job.cleaned_at) : cleanupText(job)}`}
             </span>
           )
         }
@@ -531,24 +551,44 @@ export function JobDetailPage({ id, admin }: { id: string; admin: boolean }) {
             Cancel job
           </Button>
         )}
-        {admin && job && terminal(job.state) && (
+        {admin && job && (
           <Button
             variant="destructive"
             size="sm"
             className="max-md:h-10"
-            onClick={() =>
+            onClick={() => {
+              inputsRef.current = false
               ask({
-                title: "Delete this job?",
-                description:
-                  "The job, its tasks, logs and stored outputs are deleted for good.",
+                title: terminal(job.state)
+                  ? "Delete this job?"
+                  : "Cancel and delete this job?",
+                description: (
+                  <>
+                    {terminal(job.state)
+                      ? "The job, its tasks, logs and stored outputs are deleted for good."
+                      : "Running tasks are stopped, then the job, its tasks, logs and stored outputs are deleted for good."}
+                    <span className="mt-3 flex items-center gap-2 text-foreground">
+                      <Checkbox
+                        id="delete-inputs"
+                        onCheckedChange={(v) =>
+                          (inputsRef.current = v === true)
+                        }
+                      />
+                      <Label htmlFor="delete-inputs" className="font-normal">
+                        Also delete its input files (unless another job still
+                        uses them)
+                      </Label>
+                    </span>
+                  </>
+                ),
                 action: "Delete job",
                 run: async () => {
-                  await api.deleteJob(id)
+                  await api.deleteJob(id, inputsRef.current)
                   location.hash = href("jobs")
                   return "Job deleted"
                 },
               })
-            }
+            }}
           >
             <Trash2Icon data-icon="inline-start" />
             Delete
