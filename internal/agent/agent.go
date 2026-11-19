@@ -8,6 +8,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -906,7 +908,12 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 			continue
 		}
 		p := filepath.Join(workdir, "out", o.Name)
-		if err := a.upload(ctx, as, o, p, sizes[i], m); err != nil {
+		// Hash the file while it uploads (a second read, in parallel).
+		sum := make(chan hashResult, 1)
+		go func() { d, err := fileSHA256(ctx, p); sum <- hashResult{d, err} }()
+		err := a.upload(ctx, as, o, p, sizes[i], m)
+		h := <-sum
+		if err != nil {
 			if ctx.Err() != nil {
 				return a.stopped(ctx, upd, "")
 			}
@@ -914,6 +921,14 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 			return upd
 		}
 		upd.Outputs = append(upd.Outputs, o.Name)
+		if h.err == nil {
+			if upd.OutputSHA256 == nil {
+				upd.OutputSHA256 = map[string]string{}
+			}
+			upd.OutputSHA256[o.Name] = h.digest
+		} else {
+			a.log.Warn("hash output", "task", as.TaskID, "output", o.Name, "err", h.err)
+		}
 	}
 	upd.Outcome = api.OutcomeSucceeded
 	return upd
@@ -1012,6 +1027,37 @@ func (a *Agent) upload(ctx context.Context, as api.Assignment, o api.AssignedOut
 		return a.uploadParts(ctx, as, o.Name, f, size, partSize, m)
 	}
 	return transfer.Put(ctx, a.blobHTTP, o.URL, nil, transfer.CountingReader(f, m), size)
+}
+
+type hashResult struct {
+	digest string
+	err    error
+}
+
+// fileSHA256 returns the hex SHA-256 of a file.
+func fileSHA256(ctx context.Context, path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 func (a *Agent) uploadParts(ctx context.Context, as api.Assignment, name string, f *os.File, size, partSize int64, m *transfer.Meter) error {

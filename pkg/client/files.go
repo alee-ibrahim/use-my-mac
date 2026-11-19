@@ -2,8 +2,14 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -85,6 +91,36 @@ func (c *Client) UnreserveMac(ctx context.Context, macID string) error {
 // to the agent's own max_tasks. The agent caps it at its max_tasks_limit.
 func (c *Client) SetMacMaxTasks(ctx context.Context, macID string, n int) error {
 	return c.PatchMac(ctx, macID, api.MacPatch{MaxTasks: &n})
+}
+
+// ErrNoChecksum: the router has no SHA-256 for that output (it was produced
+// by an agent from before output checksums).
+var ErrNoChecksum = errors.New("no checksum recorded for this output")
+
+// VerifyOutputFile checks a downloaded output against the SHA-256 the Mac
+// computed when it uploaded it.
+func (c *Client) VerifyOutputFile(ctx context.Context, taskID, name, path string) error {
+	t, err := c.Task(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	want := t.OutputSHA256[name]
+	if want == "" {
+		return ErrNoChecksum
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("%s: SHA-256 %s does not match the Mac's %s", path, got, want)
+	}
+	return nil
 }
 
 func escapeKey(k string) string {

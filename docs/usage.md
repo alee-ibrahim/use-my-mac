@@ -166,6 +166,23 @@ A task's standard output and error are its logs. Small results can simply be pri
 The job itself can also set `macs` and `prefer` (the default for tasks that set none) and `cleanup` (see
 [Cleaning up](#cleaning-up)).
 
+### Submitting safely more than once
+
+A feeder that crashes, or times out waiting for the router's answer, cannot know whether its job went in.
+Give the job a `client_id` (or send an `Idempotency-Key` header; `umm submit -client-id ID`): it is unique per
+owner, and submitting the same spec again with it returns the existing job (`200`, `"existing": true`)
+instead of a second one (`201`). The same `client_id` with a different spec is refused (`409`). Tasks can
+have their own `client_id`, unique per owner across jobs: a task whose `client_id` already exists is left out
+and listed under `existing_tasks` (task, job and state), so a re-sent batch only adds what is missing. If
+every task exists, nothing is created and the response is the job of the first one. A new task cannot depend
+on one left out that way. Deleting a job frees its client IDs.
+
+### Output checksums
+
+The Mac computes each output's SHA-256 while it uploads it. A task's `output_sha256` (and `sha256` in
+`GET /v1/files`) has it; `umm download` checks the downloaded file against it (`-no-verify` skips that) and
+the SDK's `VerifyOutputFile` does the same. Outputs made by agents from before this have none.
+
 ### Progress
 
 While a task runs, its Mac reports what it is doing about once a second: `downloading` its inputs, `running`,
@@ -592,7 +609,7 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | Method and path | Role | Does |
 | --- | --- | --- |
 | `GET /v1/me` | any | who you are and your role |
-| `POST /v1/jobs` | app, admin | submit a job (body: job spec); returns the job (`201`) |
+| `POST /v1/jobs` | app, admin | submit a job (body: job spec); returns the job (`201`), or the existing one (`200`, `existing: true`) for a repeated `client_id` / `Idempotency-Key` |
 | `GET /v1/jobs?state=&limit=` | any | list jobs (apps see only their own) |
 | `GET /v1/jobs/{id}` | any | a job, its tasks and state counts |
 | `POST /v1/jobs/{id}/cancel` | app, admin | cancel a job |
