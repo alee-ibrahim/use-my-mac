@@ -93,6 +93,11 @@ func hmacSHA256(key []byte, data string) []byte {
 
 // Presign returns a SigV4 query-string presigned URL.
 func (s *S3) Presign(method, key string, ttl time.Duration) (string, error) {
+	return s.presign(method, key, ttl, nil)
+}
+
+// presign signs extra query parameters (uploadId, partNumber, ...) too.
+func (s *S3) presign(method, key string, ttl time.Duration, extra map[string]string) (string, error) {
 	if s.AccessKey == "" || s.SecretKey == "" {
 		return "", errors.New("s3: missing credentials")
 	}
@@ -118,6 +123,9 @@ func (s *S3) Presign(method, key string, ttl time.Duration) (string, error) {
 		"X-Amz-Date":          amzDate,
 		"X-Amz-Expires":       strconv.Itoa(int(ttl / time.Second)),
 		"X-Amz-SignedHeaders": "host",
+	}
+	for k, v := range extra {
+		q[k] = v
 	}
 	keys := make([]string, 0, len(q))
 	for k := range q {
@@ -160,7 +168,11 @@ func (s *S3) UploadURL(_ context.Context, key string, ttl time.Duration) (string
 }
 
 func (s *S3) do(ctx context.Context, method, key string, body io.Reader, size int64) (*http.Response, error) {
-	u, err := s.Presign(method, key, 15*time.Minute)
+	return s.doQ(ctx, method, key, nil, body, size)
+}
+
+func (s *S3) doQ(ctx context.Context, method, key string, extra map[string]string, body io.Reader, size int64) (*http.Response, error) {
+	u, err := s.presign(method, key, 15*time.Minute, extra)
 	if err != nil {
 		return nil, err
 	}

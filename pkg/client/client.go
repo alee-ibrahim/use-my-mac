@@ -159,7 +159,9 @@ func (c *Client) DownloadOutput(ctx context.Context, taskID, name string, w io.W
 	return io.Copy(w, resp.Body)
 }
 
-// UploadBlob stores an input blob that tasks can reference as Input.Blob.
+// UploadBlob stores an input blob that tasks can reference as Input.Blob,
+// with one streamed PUT. Upload/UploadFile send big files in parallel
+// parts with progress and per-part retries.
 func (c *Client) UploadBlob(ctx context.Context, key string, r io.Reader, size int64) error {
 	resp, err := c.req(ctx, http.MethodPut, "/v1/blobs/"+key, r, size, "application/octet-stream")
 	if err != nil {
@@ -203,8 +205,15 @@ func (c *Client) RevokeAPIKey(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/api-keys/"+url.PathEscape(id), nil, nil)
 }
 
-// WaitJob polls until the job reaches a terminal state or ctx ends.
+// WaitJob waits until the job reaches a terminal state or ctx ends,
+// calling progress with every update. It follows the router's live stream
+// and falls back to polling every `every` when streaming is not available.
 func (c *Client) WaitJob(ctx context.Context, id string, every time.Duration, progress func(*api.Job)) (*api.Job, error) {
+	return c.WatchJob(ctx, id, every, progress)
+}
+
+// pollJob polls until the job reaches a terminal state or ctx ends.
+func (c *Client) pollJob(ctx context.Context, id string, every time.Duration, progress func(*api.Job)) (*api.Job, error) {
 	if every <= 0 {
 		every = 2 * time.Second
 	}

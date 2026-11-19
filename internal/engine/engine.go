@@ -132,6 +132,13 @@ type Engine struct {
 	h                hist
 	retention        api.Retention
 	retentionDefault api.Retention
+
+	// Live progress of running attempts (see progress.go).
+	progMu sync.Mutex
+	prog   map[string]*taskProg
+	// Change subscribers (SSE streams).
+	subMu sync.Mutex
+	subs  map[chan string]struct{}
 }
 
 // Options for New.
@@ -164,6 +171,7 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 		st: o.Store, blobs: o.Blobs, m: o.Metrics, log: o.Logger, now: o.Now, cfg: o.Config,
 		live: map[string]*live{}, placement: map[string][]sched.Result{}, kick: make(chan struct{}, 1),
 		version: o.Version, retentionDefault: o.Retention,
+		prog: map[string]*taskProg{}, subs: map[chan string]struct{}{},
 	}
 	e.h.last = o.Now()
 	if e.version == "" {
@@ -199,9 +207,14 @@ func (e *Engine) Kick() {
 func (e *Engine) Run(ctx context.Context) {
 	t := time.NewTicker(e.cfg.TickInterval)
 	defer t.Stop()
+	lastSweep := time.Time{}
 	for {
 		if err := e.Tick(ctx); err != nil && ctx.Err() == nil {
 			e.log.Error("scheduler tick", "err", err)
+		}
+		if now := e.now(); now.Sub(lastSweep) > uploadSweepEvery {
+			lastSweep = now
+			e.ExpireUploads(ctx)
 		}
 		select {
 		case <-ctx.Done():
@@ -558,6 +571,7 @@ func (e *Engine) resolve(ctx context.Context, t *store.Task, spec api.TaskSpec, 
 		}
 		as.Inputs = append(as.Inputs, api.AssignedInput{Name: in.Name, URL: u})
 	}
+	_, multipart := storage.MultipartOf(e.blobs)
 	for _, o := range spec.Outputs {
 		u := o.URL
 		if u == "" {
@@ -567,7 +581,8 @@ func (e *Engine) resolve(ctx context.Context, t *store.Task, spec api.TaskSpec, 
 				return as, err
 			}
 		}
-		as.Outputs = append(as.Outputs, api.AssignedOutput{Name: o.Name, URL: u, Optional: o.Optional})
+		as.Outputs = append(as.Outputs, api.AssignedOutput{Name: o.Name, URL: u, Optional: o.Optional,
+			Multipart: multipart && o.URL == ""})
 	}
 	return as, nil
 }
@@ -627,6 +642,7 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		if err := e.st.FinishAttempt(ctx, t.ID, t.Attempt, api.OutcomeSucceeded, "", ms(now)); err != nil {
 			return err
 		}
+		e.dropProgress(t.ID)
 		t.State, t.FinishedAt, t.ExitCode, t.Error = api.StateSucceeded, ms(now), u.ExitCode, ""
 		t.Outputs = jsonStr(nonNil(u.Outputs))
 		if err := e.st.UpdateTask(ctx, t); err != nil {
@@ -673,6 +689,7 @@ func excludedMap(t *store.Task) map[string]int64 {
 
 // requeueLocked ends the current attempt without counting a failure.
 func (e *Engine) requeueLocked(ctx context.Context, t *store.Task, outcome, msg string, exclude time.Duration, now time.Time) {
+	e.dropProgress(t.ID)
 	if t.State == api.StateRunning && t.Attempt > 0 {
 		_ = e.st.FinishAttempt(ctx, t.ID, t.Attempt, outcome, msg, ms(now))
 		e.outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
@@ -700,6 +717,7 @@ func (e *Engine) requeueLocked(ctx context.Context, t *store.Task, outcome, msg 
 
 // failLocked counts a failure: retry with backoff on another Mac, or give up.
 func (e *Engine) failLocked(ctx context.Context, t *store.Task, outcome, msg string, exit *int, now time.Time) {
+	e.dropProgress(t.ID)
 	if t.State == api.StateRunning && t.Attempt > 0 {
 		_ = e.st.FinishAttempt(ctx, t.ID, t.Attempt, outcome, msg, ms(now))
 		e.outcome(outcome, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
@@ -987,6 +1005,7 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 
 // updateJobLocked recomputes a job's state from its tasks.
 func (e *Engine) updateJobLocked(ctx context.Context, jobID string, now time.Time) {
+	defer e.notify(jobID)
 	j, err := e.st.GetJob(ctx, jobID)
 	if err != nil || api.IsTerminal(j.State) {
 		return

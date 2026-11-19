@@ -120,7 +120,13 @@ type Job struct {
 	CreatedAt  time.Time         `json:"created_at"`
 	FinishedAt *time.Time        `json:"finished_at,omitempty"`
 	Counts     map[string]int    `json:"counts"`
-	Tasks      []Task            `json:"tasks,omitempty"`
+	// Percent is the job's overall progress (0-100): finished tasks count
+	// 100, running tasks their own Percent, waiting tasks 0.
+	Percent float64 `json:"percent"`
+	// Phase summarises what the job is doing now: queued, starting,
+	// downloading, running, uploading or done.
+	Phase string `json:"phase,omitempty"`
+	Tasks []Task `json:"tasks,omitempty"`
 }
 
 // Task is the server's view of a task.
@@ -142,6 +148,116 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	Attempts    []Attempt  `json:"attempts,omitempty"`
 	OutputsDone []string   `json:"outputs_done,omitempty"`
+	// Phase is queued, starting, downloading, running, uploading or done.
+	Phase string `json:"phase,omitempty"`
+	// Percent is the task's overall progress (0-100). Downloading inputs
+	// covers 0-5, running 5-95 and uploading outputs 95-100.
+	Percent float64 `json:"percent"`
+	// Progress is the latest live report from the agent running the task
+	// (nil when the task is not running or the agent sent none yet).
+	Progress *TaskProgress `json:"progress,omitempty"`
+}
+
+// Task phases (live progress).
+const (
+	PhaseQueued      = "queued"      // waiting for dependencies or a Mac
+	PhaseStarting    = "starting"    // handed to a Mac, no report yet
+	PhaseDownloading = "downloading" // the Mac is fetching inputs
+	PhaseRunning     = "running"     // the process is running
+	PhaseUploading   = "uploading"   // the Mac is pushing outputs
+	PhaseDone        = "done"        // finished (any terminal state)
+)
+
+// TaskProgress is a live progress report from the agent running a task.
+// Agents send it at most about once a second while something changes.
+type TaskProgress struct {
+	Attempt int    `json:"attempt"`
+	Phase   string `json:"phase"`
+	// Percent is the progress within the phase (0-100), -1 when unknown.
+	// While running it comes from the task itself (UMM_PROGRESS=<n> lines
+	// on stdout/stderr, the $UMM_PROGRESS_FILE file, or a built-in parser
+	// such as the one for ffmpeg).
+	Percent float64 `json:"percent"`
+	// BytesDone/BytesTotal/BytesPerSec describe transfers (downloading and
+	// uploading phases).
+	BytesDone   int64   `json:"bytes_done,omitempty"`
+	BytesTotal  int64   `json:"bytes_total,omitempty"`
+	BytesPerSec float64 `json:"bytes_per_sec,omitempty"`
+	Message     string  `json:"message,omitempty"`
+	// UpdatedAt is set by the router when the report arrives.
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Multipart uploads
+// ---------------------------------------------------------------------------
+
+// Part sizes for multipart uploads. S3 needs at least 5 MiB per part
+// (except the last) and at most 10,000 parts.
+const (
+	MinPartSize     = 5 << 20
+	DefaultPartSize = 8 << 20
+	MaxPartSize     = 5 << 30
+	MaxParts        = 10000
+)
+
+// UploadRequest starts a multipart upload of a blob (POST /v1/uploads).
+type UploadRequest struct {
+	// Key is the blob key, as later used in Input.Blob.
+	Key  string `json:"key"`
+	Size int64  `json:"size"`
+	// PartSize defaults to 8 MiB; the router raises it when the file would
+	// need more than 10,000 parts.
+	PartSize int64 `json:"part_size,omitempty"`
+	// Direct asks for part URLs that go straight to object storage
+	// (presigned S3 URLs) instead of through the router. The router falls
+	// back to relay when its backend cannot do that.
+	Direct bool `json:"direct,omitempty"`
+}
+
+// Upload is the state of a multipart upload. Clients PUT each part's bytes
+// to URLs[n] (parts are numbered from 1; any order, in parallel), then
+// POST /v1/uploads/{id}/complete. A URL starting with "/" is on the router
+// and needs the usual Authorization; any other URL is presigned and must be
+// sent without it. GET /v1/uploads/{id} lists the parts already stored and
+// fresh URLs for the rest, which is how an interrupted upload resumes.
+type Upload struct {
+	ID       string `json:"id"`
+	Key      string `json:"key"`
+	Size     int64  `json:"size"`
+	PartSize int64  `json:"part_size"`
+	Parts    int    `json:"parts"`
+	Direct   bool   `json:"direct"`
+	// Done lists the part numbers already stored.
+	Done []int `json:"done"`
+	// URLs maps part number to upload URL for every part not yet stored.
+	URLs      map[int]string `json:"urls,omitempty"`
+	ExpiresAt time.Time      `json:"expires_at"`
+}
+
+// PartSizeOf returns the size of part n (1-based) of an upload.
+func PartSizeOf(size, partSize int64, n int) int64 {
+	off := int64(n-1) * partSize
+	if off >= size {
+		return 0
+	}
+	return min(partSize, size-off)
+}
+
+// PartCount is the number of parts for size bytes.
+func PartCount(size, partSize int64) int {
+	if size <= 0 || partSize <= 0 {
+		return 0
+	}
+	return int((size + partSize - 1) / partSize)
+}
+
+// OutputUploadRequest is how an agent starts a multipart upload of a task
+// output (POST /v1/agent/tasks/{id}/outputs/{name}/upload).
+type OutputUploadRequest struct {
+	Attempt  int   `json:"attempt"`
+	Size     int64 `json:"size"`
+	PartSize int64 `json:"part_size,omitempty"`
 }
 
 // Attempt records one try of a task on one Mac.
@@ -336,6 +452,10 @@ type AssignedOutput struct {
 	Name     string `json:"name"`
 	URL      string `json:"url"`
 	Optional bool   `json:"optional,omitempty"`
+	// Multipart: the output goes to router storage, so the agent may upload
+	// a large file in parallel parts (POST
+	// /v1/agent/tasks/{id}/outputs/{name}/upload) instead of one PUT to URL.
+	Multipart bool `json:"multipart,omitempty"`
 }
 
 // PollResponse returns zero or more assignments.

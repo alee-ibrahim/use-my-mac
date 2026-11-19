@@ -183,6 +183,8 @@ More examples, including map/reduce video encoding with the Go SDK and batched O
 | `GET /v1/tasks/{id}/logs` | logs (all attempts) |
 | `GET /v1/tasks/{id}/outputs/{name}` | download an output |
 | `PUT /v1/blobs/{key}` | upload an input |
+| `POST /v1/uploads` ... `/complete` | upload a big input in parallel, resumable parts |
+| `GET /v1/jobs/{id}/stream` | live job state and task progress (server-sent events) |
 | `GET /v1/macs`, `PATCH /v1/macs/{id}` | fleet, drain / opt-out (admin) |
 | `POST /v1/enrolment-tokens` | one-time Mac enrolment token (admin) |
 | `GET/POST/DELETE /v1/api-keys` | app keys (admin) |

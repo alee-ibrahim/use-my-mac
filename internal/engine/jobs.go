@@ -181,6 +181,7 @@ func (e *Engine) SubmitJob(ctx context.Context, owner string, spec api.JobSpec) 
 		return nil, err
 	}
 	e.log.Info("job submitted", "job", j.ID, "name", j.Name, "tasks", len(rows), "owner", owner)
+	e.notify(j.ID)
 	e.Kick()
 	return e.Job(ctx, j.ID, false)
 }
@@ -209,6 +210,7 @@ func (e *Engine) CancelJob(ctx context.Context, id string) (*api.Job, error) {
 				_ = e.st.FinishAttempt(ctx, t.ID, t.Attempt, api.OutcomeCancelled, "job cancelled", ms(now))
 				e.wakeAgent(t.AgentID)
 			}
+			e.dropProgress(t.ID)
 			t.State, t.FinishedAt, t.Error = api.StateCancelled, ms(now), "job cancelled"
 			if err := e.st.UpdateTask(ctx, t); err != nil {
 				e.mu.Unlock()
@@ -234,6 +236,15 @@ func (e *Engine) agentNames(ctx context.Context) map[string]string {
 		}
 	}
 	return out
+}
+
+func (e *Engine) taskView(t *store.Task) api.Task {
+	v := taskView(t)
+	if t.State == api.StateRunning {
+		v.Progress = e.progressOf(t.ID, t.Attempt)
+	}
+	v.Phase, v.Percent = phaseOf(t.State, v.Progress)
+	return v
 }
 
 func taskView(t *store.Task) api.Task {
@@ -265,13 +276,15 @@ func (e *Engine) Job(ctx context.Context, id string, withTasks bool) (*api.Job, 
 	if v.Counts, err = e.st.TaskCounts(ctx, id); err != nil {
 		return nil, err
 	}
+	sum, phases := e.jobRunning(id)
+	v.Percent, v.Phase = jobProgress(v.State, v.Counts, sum, phases)
 	if withTasks {
 		ts, err := e.st.TasksByJob(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		for _, t := range ts {
-			v.Tasks = append(v.Tasks, taskView(t))
+			v.Tasks = append(v.Tasks, e.taskView(t))
 		}
 	}
 	return v, nil
@@ -306,7 +319,7 @@ func (e *Engine) Task(ctx context.Context, id string) (*TaskDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &TaskDetail{Task: taskView(t)}
+	d := &TaskDetail{Task: e.taskView(t)}
 	att, err := e.st.Attempts(ctx, id)
 	if err != nil {
 		return nil, err

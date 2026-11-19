@@ -64,7 +64,28 @@ type Config struct {
 	// Update configures the root updater (`umm-agent update`). The agent
 	// itself ignores it.
 	Update UpdateConfig `yaml:"update"`
+
+	// ProgressParsers picks how a runtime's output is read for progress:
+	// "auto" (default: the ffmpeg parser when the executable is ffmpeg),
+	// "ffmpeg" or "none". UMM_PROGRESS=<n> lines and $UMM_PROGRESS_FILE
+	// always work.
+	ProgressParsers map[string]string `yaml:"progress_parsers"`
+
+	// Transfer tunes input downloads and output uploads.
+	Transfer TransferConfig `yaml:"transfer"`
 }
+
+// TransferConfig sets chunked transfer parameters.
+type TransferConfig struct {
+	// PartSizeMB is the size of each upload part / download range
+	// (default 8, minimum 5).
+	PartSizeMB int `yaml:"part_size_mb"`
+	// Concurrency is the number of parts or ranges in flight (default 4).
+	Concurrency int `yaml:"concurrency"`
+}
+
+// PartSize in bytes.
+func (t TransferConfig) PartSize() int64 { return int64(t.PartSizeMB) << 20 }
 
 // UpdateConfig is read by the root updater. agent.yaml is root-owned, so the
 // unprivileged agent cannot change where updates come from or which key
@@ -184,6 +205,25 @@ func (c *Config) Normalize() error {
 	}
 	if c.MaxLogBytes <= 0 {
 		c.MaxLogBytes = 1 << 20
+	}
+	for rt, mode := range c.ProgressParsers {
+		switch mode {
+		case ParserAuto, ParserFFmpeg, ParserNone:
+		default:
+			return fmt.Errorf("progress_parsers.%s must be auto, ffmpeg or none", rt)
+		}
+	}
+	if c.Transfer.PartSizeMB == 0 {
+		c.Transfer.PartSizeMB = 8
+	}
+	if c.Transfer.PartSizeMB < 5 || c.Transfer.PartSizeMB > 5120 {
+		return fmt.Errorf("transfer.part_size_mb must be between 5 and 5120")
+	}
+	if c.Transfer.Concurrency <= 0 {
+		c.Transfer.Concurrency = 4
+	}
+	if c.Transfer.Concurrency > 32 {
+		c.Transfer.Concurrency = 32
 	}
 	switch c.Update.Source {
 	case "":

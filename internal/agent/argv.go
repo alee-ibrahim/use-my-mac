@@ -94,6 +94,8 @@ func TaskEnv(workdir, taskID string, attempt int, agentEnv, taskEnv map[string]s
 		"UMM_OUT":     filepath.Join(workdir, "out"),
 		"UMM_TASK_ID": taskID,
 		"UMM_ATTEMPT": fmt.Sprint(attempt),
+		// Tasks may write their progress (0-100) here.
+		"UMM_PROGRESS_FILE": filepath.Join(workdir, ProgressFileName),
 	}
 	for k, v := range agentEnv {
 		env[k] = v

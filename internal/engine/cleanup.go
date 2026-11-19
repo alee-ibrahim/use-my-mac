@@ -133,6 +133,7 @@ func (e *Engine) deleteJob(ctx context.Context, id string) error {
 		delete(e.placement, t.ID)
 	}
 	e.mu.Unlock()
+	e.notify(id)
 	return nil
 }
 

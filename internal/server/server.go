@@ -148,6 +148,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/install-tokens/{id}/events", s.need(roleAdmin, s.installTokenEvents))
 
 	s.opsRoutes(mux)
+	s.uploadRoutes(mux)
 
 	// One-line install (no auth header: the token in the path is the secret).
 	mux.HandleFunc("GET /i/uninstall", s.uninstallScript)
@@ -440,10 +441,8 @@ func (s *Server) taskOutput(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	defer rc.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+r.PathValue("name")+`"`)
-	io.Copy(w, rc)
+	serveBlob(w, r, rc)
 }
 
 func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
@@ -471,9 +470,7 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	defer rc.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	io.Copy(w, rc)
+	serveBlob(w, r, rc)
 }
 
 func (s *Server) listMacs(w http.ResponseWriter, r *http.Request) {
@@ -678,6 +675,10 @@ func (s *Server) signedBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
+		if !signedPartAllowed(l, key) {
+			writeErr(w, http.StatusNotFound, "upload not found (finished, aborted or expired)")
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, s.MaxUploadBytes)
 		if err := l.Put(r.Context(), key, r.Body, r.ContentLength); err != nil {
 			s.fail(w, err)
@@ -690,9 +691,7 @@ func (s *Server) signedBlob(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		defer rc.Close()
-		w.Header().Set("Content-Type", "application/octet-stream")
-		io.Copy(w, rc)
+		serveBlob(w, r, rc)
 	}
 }
 
