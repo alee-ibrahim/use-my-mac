@@ -31,19 +31,26 @@ type runtimeFault struct {
 }
 
 // macFault returns why an agent's failure report is the Mac's fault rather
-// than the task's ("" = it is the task's). Older agents only send the exit
-// code, so a bare 127 ("command not found") counts too.
-func macFault(u api.TaskUpdate) string {
-	if u.Outcome != api.OutcomeFailed {
-		return ""
+// than the task's ("" = it is the task's), and whether it is about the
+// task's runtime. Older agents only send the exit code, so a bare 127
+// ("command not found") counts too.
+func macFault(u api.TaskUpdate) (why string, runtime bool) {
+	if u.Outcome != api.OutcomeFailed && u.Outcome != api.OutcomeTimeout {
+		return "", false
 	}
 	if u.RuntimeUnavailable != "" {
-		return u.RuntimeUnavailable
+		return u.RuntimeUnavailable, true
+	}
+	if u.MacFault != "" {
+		return u.MacFault, false
+	}
+	if u.Outcome != api.OutcomeFailed {
+		return "", false
 	}
 	if u.ExitCode != nil && *u.ExitCode == 127 {
-		return nz(u.Error, "exit status 127") + " (command not found)"
+		return nz(u.Error, "exit status 127") + " (command not found)", true
 	}
-	return ""
+	return "", false
 }
 
 func (e *Engine) loadFaultsLocked(ctx context.Context, agentID string, l *live) {
@@ -145,10 +152,12 @@ func nonNilUnavail(s []api.UnavailableRuntime) []api.UnavailableRuntime {
 	return s
 }
 
-// runtimeFaultLocked handles an attempt that failed because the Mac could
-// not execute the task's runtime: mark the runtime unavailable there and
-// reschedule the task elsewhere without counting a failure. After
-// MaxMacFaults such attempts the task's attempts count as normal failures.
+// runtimeFaultLocked handles an attempt that failed because of the Mac: it
+// could not execute the task's runtime (runtime != "": mark the runtime
+// unavailable there) or failed for its own reasons (runtime == "": disk
+// full, unhealthy). The task is rescheduled elsewhere without counting a
+// failure. After MaxMacFaults such attempts the task's attempts count as
+// normal failures.
 func (e *Engine) runtimeFaultLocked(ctx context.Context, t *store.Task, agentID, runtime, why string, exit *int, now time.Time) {
 	name := agentID
 	if a, err := e.st.GetAgent(ctx, agentID); err == nil {
@@ -164,7 +173,11 @@ func (e *Engine) runtimeFaultLocked(ctx context.Context, t *store.Task, agentID,
 		}
 	}
 	msg := "runtime " + runtime + " unavailable on " + name + ": " + why
-	e.log.Warn("runtime unavailable on Mac; rescheduling task elsewhere", "agent", agentID, "mac", name,
+	event := api.EventRuntimeUnavailable
+	if runtime == "" {
+		msg, event = "Mac fault on "+name+": "+why, api.EventMacFault
+	}
+	e.log.Warn("Mac fault; rescheduling task elsewhere", "agent", agentID, "mac", name,
 		"runtime", runtime, "task", t.ID, "reason", why)
 
 	prior := 0
@@ -176,11 +189,11 @@ func (e *Engine) runtimeFaultLocked(ctx context.Context, t *store.Task, agentID,
 		}
 	}
 	if prior >= e.cfg.MaxMacFaults {
-		e.Audit(ctx, api.EventRuntimeUnavailable, "", agentID, msg+" (task "+t.Key+": Mac-fault limit "+
+		e.Audit(ctx, event, "", agentID, msg+" (task "+t.Key+": Mac-fault limit "+
 			strconv.Itoa(e.cfg.MaxMacFaults)+" reached, counted as a failure)")
 		e.failLocked(ctx, t, api.OutcomeFailed, msg+" (Mac-fault limit reached)", exit, now)
 		return
 	}
-	e.Audit(ctx, api.EventRuntimeUnavailable, "", agentID, msg+" (task "+t.Key+" rescheduled)")
+	e.Audit(ctx, event, "", agentID, msg+" (task "+t.Key+" rescheduled)")
 	e.requeueLocked(ctx, t, api.OutcomeUnavailable, msg, e.cfg.YieldExclude, now)
 }

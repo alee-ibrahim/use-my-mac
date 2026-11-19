@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/alee-ibrahim/use-my-mac/internal/agent"
 	"github.com/alee-ibrahim/use-my-mac/internal/agent/telemetry"
+	"github.com/alee-ibrahim/use-my-mac/internal/hostprep"
 	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 )
 
@@ -33,7 +35,10 @@ Usage:
                                        the token is read from UMM_ENROL_TOKEN or stdin
   umm-agent telemetry [-config FILE]   print one telemetry snapshot as JSON (diagnostics)
   umm-agent update    [-config FILE] [-label L] [-jitter D] [-dry-run]
-                                       one self-update cycle (root; its own LaunchDaemon runs it)
+                                       one self-update cycle (root; its own LaunchDaemon runs it);
+                                       also re-applies "prepare"
+  umm-agent prepare   [-config FILE]   set up the work volume and task network policy (root;
+                                       the installers and the updater run it)
   umm-agent version
 
 Default config: /usr/local/etc/umm/agent.yaml (env UMM_AGENT_CONFIG)
@@ -71,6 +76,10 @@ func main() {
 		dryRun := fs.Bool("dry-run", false, "download and verify, but do not install")
 		fs.Parse(args)
 		err = update(*cfgPath, *label, *bin, *stateDir, *jitter, *dryRun, *verbose)
+	case "prepare":
+		stateDir := fs.String("state-dir", "/usr/local/var/umm-updater", "root-only state directory")
+		fs.Parse(args)
+		err = prepare(*cfgPath, *stateDir, *verbose)
 	case "version":
 		fmt.Println(agent.Version)
 	case "help", "-h", "--help":
@@ -101,6 +110,9 @@ func run(path string, verbose bool) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	for _, w := range cfg.Warnings {
+		log.Warn("config", "warning", w)
+	}
 	log.Info("umm-agent starting", "server", cfg.Server, "name", cfg.Name, "runtimes", cfg.RuntimeNames(),
 		"max_tasks", cfg.MaxTasks, "priority", cfg.Priority, "version", agent.Version)
 	ag := agent.New(cfg, cred, nil, log)
@@ -174,6 +186,61 @@ func snapshot(path string) error {
 	return enc.Encode(t)
 }
 
+// prepare runs the root-side host preparation once.
+func prepare(path, stateDir string, verbose bool) error {
+	lvl := slog.LevelInfo
+	if verbose {
+		lvl = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})).With("component", "prepare")
+	if runtime.GOOS != "darwin" {
+		log.Info("nothing to prepare off macOS")
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("prepare must run as root")
+	}
+	cfg, err := agent.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+	st := prepareHost(cfg, stateDir, log)
+	if st == nil {
+		return errors.New("host preparation did not run (see the log)")
+	}
+	fmt.Fprintf(os.Stderr, "work volume: %s %s\ntask network: %s (applied: %v) %s\n",
+		st.WorkVolume.State, st.WorkVolume.Reason, st.Network.Mode, st.Network.Applied, st.Network.Reason)
+	return nil
+}
+
+// prepareHost sets up the work volume and the pf anchor and writes the
+// status file the agent reads. Problems are logged and recorded there.
+func prepareHost(cfg *agent.Config, stateDir string, log *slog.Logger) *hostprep.Status {
+	unlock, err := selfupdate.Lock(filepath.Join(stateDir, "prepare"))
+	if err != nil {
+		log.Warn("host preparation skipped", "err", err)
+		return nil
+	}
+	defer unlock()
+	hc, err := cfg.HostPrep(filepath.Join(stateDir, "prepare"))
+	if err != nil {
+		log.Warn("host preparation skipped", "err", err)
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	st := hostprep.Prepare(ctx, hc, hostprep.Host{
+		Run: hostprep.ExecRunner, Fstab: "/etc/fstab", BootTime: hostprep.BootTime, Mounted: hostprep.IsMountPoint,
+		Lookup: func(ctx context.Context, host string) ([]string, error) {
+			return net.DefaultResolver.LookupHost(ctx, host)
+		},
+		Log: log,
+	})
+	log.Info("host prepared", "work_volume", st.WorkVolume.State, "volume_note", st.WorkVolume.Reason,
+		"task_network", st.Network.Mode, "network_applied", st.Network.Applied, "network_note", st.Network.Reason)
+	return &st
+}
+
 // update runs one self-update cycle. It must run as root (its LaunchDaemon
 // has no UserName): it replaces the root-owned agent binary.
 func update(path, label, bin, stateDir string, jitter time.Duration, dryRun, verbose bool) error {
@@ -188,6 +255,12 @@ func update(path, label, bin, stateDir string, jitter time.Duration, dryRun, ver
 	cfg, err := agent.LoadConfig(path)
 	if err != nil {
 		return err
+	}
+	// Host preparation first, every cycle, whatever the update settings:
+	// it is how enrolled Macs get the work volume and network policy, and
+	// how both come back after a reboot.
+	if runtime.GOOS == "darwin" && !dryRun {
+		prepareHost(cfg, stateDir, log)
 	}
 	if !cfg.Update.UpdatesEnabled() {
 		log.Info("updates disabled in agent config (update.enabled: false)")

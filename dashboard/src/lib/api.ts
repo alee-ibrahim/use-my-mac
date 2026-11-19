@@ -46,6 +46,21 @@ export type Mac = {
   version?: string
   update?: MacUpdate
   created_at?: string
+  // Why the agent is in its state (e.g. why it is unhealthy).
+  state_reason?: string
+  isolation?: Isolation
+}
+
+// How a Mac keeps tasks away from its users' data.
+export type Isolation = {
+  work_volume?: string // "dedicated" or "system"
+  work_volume_note?: string
+  network?: string // "allow" or "deny"
+  home_dirs?: string // "ok", "exposed" or "unchecked"
+  work_space_bytes: number
+  work_capacity_bytes: number
+  system_free_bytes?: number
+  reserve_bytes?: number
 }
 
 export type UnavailableRuntime = {
@@ -129,7 +144,13 @@ export type Task = {
   phase?: string
   percent?: number
   progress?: TaskProgress
-  placement?: { id: string; ok: boolean; reason?: string; score: number; parts?: Record<string, number> }[]
+  placement?: {
+    id: string
+    ok: boolean
+    reason?: string
+    score: number
+    parts?: Record<string, number>
+  }[]
 }
 
 export type Job = {
@@ -190,7 +211,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T> {
   const res = await fetch(path, {
     method,
     credentials: "same-origin",
@@ -212,11 +237,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   if (res.status === 204) return undefined as T
   const ct = res.headers.get("content-type") ?? ""
-  return (ct.includes("application/json") ? res.json() : res.text()) as Promise<T>
+  return (
+    ct.includes("application/json") ? res.json() : res.text()
+  ) as Promise<T>
 }
 
 // How the dashboard may be signed in to. apikey = API-key sign-in allowed.
-export type AuthConfig = { oidc: boolean; apikey: boolean; auto_sign_in: boolean }
+export type AuthConfig = {
+  oidc: boolean
+  apikey: boolean
+  auto_sign_in: boolean
+}
 
 // Starts single sign-on and returns to `ret` (sanitised again by the server).
 export function ssoURL(ret = "/") {
@@ -229,52 +260,94 @@ export const api = {
   logout: () => request<void>("POST", "/auth/logout"),
   me: () => request<Me>("GET", "/v1/me"),
   macs: () => request<Mac[]>("GET", "/v1/macs"),
-  patchMac: (id: string, patch: { drain?: boolean; opted_out?: boolean; name?: string }) =>
-    request<void>("PATCH", `/v1/macs/${id}`, patch),
+  patchMac: (
+    id: string,
+    patch: { drain?: boolean; opted_out?: boolean; name?: string }
+  ) => request<void>("PATCH", `/v1/macs/${id}`, patch),
   deleteMac: (id: string) => request<void>("DELETE", `/v1/macs/${id}`),
   enrolToken: (ttl_hours: number) =>
-    request<{ token: string; expires_at: string }>("POST", "/v1/enrolment-tokens", { ttl_hours }),
+    request<{ token: string; expires_at: string }>(
+      "POST",
+      "/v1/enrolment-tokens",
+      { ttl_hours }
+    ),
   jobs: (state = "", limit = 200) =>
-    request<Job[]>("GET", `/v1/jobs?limit=${limit}${state ? `&state=${state}` : ""}`),
+    request<Job[]>(
+      "GET",
+      `/v1/jobs?limit=${limit}${state ? `&state=${state}` : ""}`
+    ),
   job: (id: string) => request<Job>("GET", `/v1/jobs/${id}`),
   cancelJob: (id: string) => request<Job>("POST", `/v1/jobs/${id}/cancel`),
   task: (id: string) => request<Task>("GET", `/v1/tasks/${id}`),
   logs: (id: string) => request<string>("GET", `/v1/tasks/${id}/logs`),
   keys: () => request<APIKey[]>("GET", "/v1/api-keys"),
-  createKey: (name: string, role: string) => request<APIKey>("POST", "/v1/api-keys", { name, role }),
+  createKey: (name: string, role: string) =>
+    request<APIKey>("POST", "/v1/api-keys", { name, role }),
   revokeKey: (id: string) => request<void>("DELETE", `/v1/api-keys/${id}`),
   settings: () => request<Settings>("GET", "/v1/settings"),
   saveSettings: (s: Settings) => request<Settings>("PUT", "/v1/settings", s),
   updates: () => request<UpdatesInfo>("GET", "/v1/updates"),
-  saveUpdates: (s: UpdateSettings) => request<UpdatesInfo>("PUT", "/v1/updates", s),
-  macUpdates: (id: string) => request<UpdateEvent[]>("GET", `/v1/macs/${id}/updates`),
-  installProfiles: () => request<InstallProfile[]>("GET", "/v1/install/profiles"),
+  saveUpdates: (s: UpdateSettings) =>
+    request<UpdatesInfo>("PUT", "/v1/updates", s),
+  macUpdates: (id: string) =>
+    request<UpdateEvent[]>("GET", `/v1/macs/${id}/updates`),
+  installProfiles: () =>
+    request<InstallProfile[]>("GET", "/v1/install/profiles"),
   installTokens: () => request<InstallToken[]>("GET", "/v1/install-tokens"),
-  createInstallToken: (r: InstallTokenRequest) => request<InstallToken>("POST", "/v1/install-tokens", r),
-  revokeInstallToken: (id: string) => request<void>("DELETE", `/v1/install-tokens/${id}`),
-  installEvents: (id: string) => request<InstallEvent[]>("GET", `/v1/install-tokens/${id}/events`),
+  createInstallToken: (r: InstallTokenRequest) =>
+    request<InstallToken>("POST", "/v1/install-tokens", r),
+  revokeInstallToken: (id: string) =>
+    request<void>("DELETE", `/v1/install-tokens/${id}`),
+  installEvents: (id: string) =>
+    request<InstallEvent[]>("GET", `/v1/install-tokens/${id}/events`),
   access: () => request<AccessPolicy>("GET", "/v1/access"),
-  putAccessRule: (r: AccessRuleRequest) => request<AccessRule>("POST", "/v1/access/rules", r),
-  deleteAccessRule: (id: string) => request<void>("DELETE", `/v1/access/rules/${encodeURIComponent(id)}`),
-  setAccessDefault: (role: string) => request<AccessPolicy>("PUT", "/v1/access/default", { role }),
+  putAccessRule: (r: AccessRuleRequest) =>
+    request<AccessRule>("POST", "/v1/access/rules", r),
+  deleteAccessRule: (id: string) =>
+    request<void>("DELETE", `/v1/access/rules/${encodeURIComponent(id)}`),
+  setAccessDefault: (role: string) =>
+    request<AccessPolicy>("PUT", "/v1/access/default", { role }),
   setGroupName: (id: string, name: string) =>
-    request<void>("PUT", `/v1/access/groups/${encodeURIComponent(id)}`, { name }),
+    request<void>("PUT", `/v1/access/groups/${encodeURIComponent(id)}`, {
+      name,
+    }),
   accessUsers: () => request<AccessUser[]>("GET", "/v1/access/users"),
   setUserRole: (subject: string, role: string) =>
-    request<void>("PUT", `/v1/access/users/${encodeURIComponent(subject)}/role`, { role }),
-  accessAudit: () => request<AccessEvent[]>("GET", "/v1/access/audit?limit=200"),
+    request<void>(
+      "PUT",
+      `/v1/access/users/${encodeURIComponent(subject)}/role`,
+      { role }
+    ),
+  accessAudit: () =>
+    request<AccessEvent[]>("GET", "/v1/access/audit?limit=200"),
   docs: () => request<DocInfo[]>("GET", "/v1/docs"),
   // Operations: metrics history, activity log, retention, cleanup.
   summary: () => request<Summary>("GET", "/v1/metrics/summary"),
   fleetSeries: (range: string, step = 0) =>
-    request<Series>("GET", `/v1/metrics/fleet?range=${range}${step ? `&step=${step}` : ""}`),
+    request<Series>(
+      "GET",
+      `/v1/metrics/fleet?range=${range}${step ? `&step=${step}` : ""}`
+    ),
   macSeries: (id: string, range: string) =>
-    request<Series>("GET", `/v1/metrics/macs/${encodeURIComponent(id)}?range=${range}`),
-  macSparks: (window = "1h") => request<MacSparks>("GET", `/v1/metrics/macs?window=${window}`),
+    request<Series>(
+      "GET",
+      `/v1/metrics/macs/${encodeURIComponent(id)}?range=${range}`
+    ),
+  macSparks: (window = "1h") =>
+    request<MacSparks>("GET", `/v1/metrics/macs?window=${window}`),
   macAttempts: (id: string, limit = 100) =>
-    request<MacAttempt[]>("GET", `/v1/macs/${encodeURIComponent(id)}/attempts?limit=${limit}`),
-  jobTimeline: (id: string) => request<TimelineAttempt[]>("GET", `/v1/jobs/${encodeURIComponent(id)}/timeline`),
-  events: (q: { kind?: string; target?: string; limit?: number; before?: string } = {}) => {
+    request<MacAttempt[]>(
+      "GET",
+      `/v1/macs/${encodeURIComponent(id)}/attempts?limit=${limit}`
+    ),
+  jobTimeline: (id: string) =>
+    request<TimelineAttempt[]>(
+      "GET",
+      `/v1/jobs/${encodeURIComponent(id)}/timeline`
+    ),
+  events: (
+    q: { kind?: string; target?: string; limit?: number; before?: string } = {}
+  ) => {
     const p = new URLSearchParams()
     if (q.kind) p.set("kind", q.kind)
     if (q.target) p.set("target", q.target)
@@ -283,15 +356,19 @@ export const api = {
     return request<OpsEvent[]>("GET", `/v1/events?${p}`)
   },
   retention: () => request<Retention>("GET", "/v1/retention"),
-  saveRetention: (r: Retention) => request<Retention>("PUT", "/v1/retention", r),
+  saveRetention: (r: Retention) =>
+    request<Retention>("PUT", "/v1/retention", r),
   deleteKey: (id: string) => request<void>("POST", `/v1/api-keys/${id}/purge`),
   purgeKeys: () => request<PurgeResult>("POST", "/v1/api-keys/purge"),
-  deleteInstallToken: (id: string) => request<void>("POST", `/v1/install-tokens/${id}/purge`),
-  purgeInstallTokens: () => request<PurgeResult>("POST", "/v1/install-tokens/purge"),
+  deleteInstallToken: (id: string) =>
+    request<void>("POST", `/v1/install-tokens/${id}/purge`),
+  purgeInstallTokens: () =>
+    request<PurgeResult>("POST", "/v1/install-tokens/purge"),
   deleteJob: (id: string) => request<void>("DELETE", `/v1/jobs/${id}`),
   purgeJobs: (older_than_days: number, states?: string[]) =>
     request<PurgeResult>("POST", "/v1/jobs/purge", { older_than_days, states }),
-  doc: (slug: string) => request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
+  doc: (slug: string) =>
+    request<string>("GET", `/v1/docs/${encodeURIComponent(slug)}`),
 }
 
 export function bytes(n: number | undefined): string {
@@ -347,7 +424,13 @@ export type InstallToken = {
   token?: string
   command?: string
 }
-export type InstallEvent = { at: string; kind: string; ip?: string; agent_id?: string; detail?: string }
+export type InstallEvent = {
+  at: string
+  kind: string
+  ip?: string
+  agent_id?: string
+  detail?: string
+}
 
 // An embedded documentation page (public, served at /docs).
 export type DocInfo = { slug: string; title: string; path: string }
@@ -365,7 +448,12 @@ export type AccessRule = {
   created_at?: string
   updated_at?: string
 }
-export type AccessRuleRequest = { kind: string; value: string; role: string; name?: string }
+export type AccessRuleRequest = {
+  kind: string
+  value: string
+  role: string
+  name?: string
+}
 export type AccessPolicy = {
   default_role: string
   config_default_role: string
@@ -388,7 +476,12 @@ export type AccessUser = {
   rule_id?: string
   source?: string
 }
-export type AccessEvent = { at: string; actor: string; action: string; detail: string }
+export type AccessEvent = {
+  at: string
+  actor: string
+  action: string
+  detail: string
+}
 
 // Metrics history. Points carry "t" (bucket start, Unix ms) and, when the
 // bucket has data, the fields below.
@@ -400,7 +493,12 @@ export type Series = {
   resolution_seconds: number
   points: Point[]
 }
-export type MacSparks = { from: string; to: string; step_seconds: number; macs: Record<string, Point[]> }
+export type MacSparks = {
+  from: string
+  to: string
+  step_seconds: number
+  macs: Record<string, Point[]>
+}
 export type Window = {
   succeeded: number
   failed: number
@@ -414,7 +512,10 @@ export type Window = {
 }
 export type Summary = {
   at: string
-  macs: Record<"total" | "online" | "busy" | "idle" | "yielded" | "draining" | "offline", number>
+  macs: Record<
+    "total" | "online" | "busy" | "idle" | "yielded" | "draining" | "offline",
+    number
+  >
   tasks: Record<"running" | "queued" | "blocked", number>
   jobs: Record<"queued" | "running", number>
   last_24h: Window
@@ -422,7 +523,14 @@ export type Summary = {
   router_version: string
   history_start?: string
 }
-export type OpsEvent = { id: string; at: string; kind: string; actor?: string; target?: string; message: string }
+export type OpsEvent = {
+  id: string
+  at: string
+  kind: string
+  actor?: string
+  target?: string
+  message: string
+}
 export type Retention = {
   jobs_days: number
   events_days: number
@@ -444,12 +552,16 @@ export type TimelineAttempt = {
 }
 export type MacAttempt = TimelineAttempt & { job_id: string; job_name: string }
 
-export const terminal = (state: string) => ["succeeded", "failed", "cancelled"].includes(state)
+export const terminal = (state: string) =>
+  ["succeeded", "failed", "cancelled"].includes(state)
 
 // compact formats 1,284 / 12.9K / 4.2M.
 export function compact(n: number | undefined): string {
   if (n === undefined || Number.isNaN(n)) return "–"
-  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(n)
 }
 
 export function percent(ratio: number | undefined): string {

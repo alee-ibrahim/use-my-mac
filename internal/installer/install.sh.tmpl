@@ -9,7 +9,8 @@
 # key below and the bundle's SHA-256 (any failure stops here, nothing is
 # installed); then installs like deploy/mac/install.sh: hidden non-admin
 # _umm user, /usr/local/bin/umm-agent, agent.yaml, the agent LaunchDaemon and
-# the root updater LaunchDaemon; enrols with the token in this script (handed
+# the root updater LaunchDaemon; creates the hidden work volume (`umm-agent
+# prepare`); enrols with the token in this script (handed
 # to the agent from a root-only file over stdin, never in argv); and waits for
 # the first heartbeat. Nothing is shown to the Mac's user.
 set -eu
@@ -186,6 +187,13 @@ if [ ! -s "$ETC/credential" ]; then
 else
   say "already enrolled; upgrading and repairing"
 fi
+
+# --- work volume and task network policy (root) -----------------------------
+# A hidden (nobrowse), quota-limited APFS volume for the work dir, and the
+# optional pf anchor for task_network: deny. Failure is not fatal: the agent
+# then works in a plain directory and reports why. The root updater re-applies
+# this every cycle.
+"$BIN" prepare -config "$ETC/agent.yaml" || say "warning: host preparation failed; the agent reports why"
 
 # --- (re)load ----------------------------------------------------------------
 self() {

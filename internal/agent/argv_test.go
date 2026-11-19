@@ -31,20 +31,19 @@ func TestSubstituteArgs(t *testing.T) {
 
 func TestBuildArgv(t *testing.T) {
 	rt := []string{"/opt/homebrew/bin/ffmpeg"}
-	got := strings.Join(BuildArgv("darwin", "background", false, "/w", rt, []string{"-y"}), " ")
+	got := strings.Join(BuildArgv("darwin", "background", rt, []string{"-y"}), " ")
 	if got != "/usr/sbin/taskpolicy -b /opt/homebrew/bin/ffmpeg -y" {
 		t.Errorf("darwin background: %s", got)
 	}
-	got = strings.Join(BuildArgv("darwin", "utility", true, "/w", rt, nil), " ")
-	if !strings.HasPrefix(got, "/usr/sbin/taskpolicy -c utility /usr/bin/nice -n 10 /usr/bin/sandbox-exec -p (version 1)") ||
-		!strings.Contains(got, `(subpath "/w")`) || !strings.HasSuffix(got, "/opt/homebrew/bin/ffmpeg") {
-		t.Errorf("darwin utility+sandbox: %s", got)
+	got = strings.Join(BuildArgv("darwin", "utility", rt, nil), " ")
+	if got != "/usr/sbin/taskpolicy -c utility /usr/bin/nice -n 10 /opt/homebrew/bin/ffmpeg" {
+		t.Errorf("darwin utility: %s", got)
 	}
-	got = strings.Join(BuildArgv("linux", "background", true, "/w", rt, nil), " ")
+	got = strings.Join(BuildArgv("linux", "background", rt, nil), " ")
 	if got != "/usr/bin/nice -n 19 /opt/homebrew/bin/ffmpeg" {
 		t.Errorf("linux: %s", got)
 	}
-	if got := BuildArgv("darwin", "none", false, "/w", rt, nil); len(got) != 1 {
+	if got := BuildArgv("darwin", "none", rt, nil); len(got) != 1 {
 		t.Errorf("none: %v", got)
 	}
 }

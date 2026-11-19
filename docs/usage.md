@@ -146,7 +146,7 @@ umm download TASK_ID enc.mp4
 | `env` | extra environment variables. `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` and `LD_*` are not allowed |
 | `inputs` | files placed in `in/` before the task starts. Each has a `name` and exactly one of `url`, `blob` or `from` (the CLI also accepts `file`) |
 | `outputs` | files the task must write to `out/NAME`. `optional: true` allows a missing file; `url` sends it straight to your own PUT URL |
-| `resources` | `ram_mb`, `gpu`, `expected_seconds`, `disk_mb`, `labels` (all must match the Mac's labels) |
+| `resources` | `ram_mb`, `gpu`, `expected_seconds`, `disk_mb` (scratch space), `disk_estimate_mb` (total work space: inputs, outputs and scratch; default twice the inputs plus `disk_mb`), `labels` (all must match the Mac's labels) |
 | `timeout_seconds` | limit for one attempt (router default if 0) |
 | `max_retries` | failed attempts retried before giving up (router default if unset). Yields and lost Macs do not count |
 | `depends_on` | task keys that must succeed first |
@@ -268,6 +268,44 @@ The map tasks spread across the Macs. The reduce runs when all of them have succ
 for good, its dependents are cancelled and the job ends `failed`. Cycles and unknown references are rejected
 when you submit.
 
+### Huge single files
+
+A task needs room on one Mac for its inputs and outputs: by default the router assumes twice the input size
+(set `resources.disk_estimate_mb` to override) and only places it on a Mac with that much work space. A
+task that no Mac could ever hold fails at once with "no Mac has enough work space". A single 500 GB video
+will usually not fit on one Mac mini (a 512 GB disk keeps at least 15 % or 50 GiB for its user), and one Mac
+would take a long time anyway. Split it by time instead:
+
+1. **Split where the file is**, without re-encoding (stream copy runs at disk speed):
+
+   ```sh
+   ffmpeg -i big.mov -map 0 -c copy -f segment -segment_time 600 -reset_timestamps 1 seg%04d.mov
+   ```
+
+   Upload the segments (`umm upload`) and submit one map task per segment, as above. Cuts land on
+   keyframes, so segments are close to, not exactly, 600 s.
+2. **Or let each map task read only its own time range** from storage, so nothing is pre-split and each Mac
+   downloads only that part. ffmpeg seeks over HTTP with `Range` requests (MP4/MOV need the index at the
+   front: `-movflags +faststart`; MKV and MPEG-TS work as they are):
+
+   ```text
+   ffmpeg -ss 3600 -t 600 -i "$SRC_URL" -c:v hevc_videotoolbox ... {out:part.mov}
+   ```
+
+   Give the URL to the task in `env` (e.g. `SRC_URL`, a presigned URL valid for the job's duration) and
+   allowlist a small wrapper script that calls ffmpeg with it, rather than putting the URL in `args`
+   where other users of the Mac could see it in the process list. Do not list it as an `input`, or the agent
+   downloads the whole file. With `task_network: deny` the storage host must be in `task_network_allow`.
+   Set `disk_estimate_mb` to about twice one part's output, since the router cannot size a URL.
+3. **Reduce** by joining the parts with the concat demuxer, also without re-encoding:
+
+   ```text
+   ffmpeg -f concat -safe 0 -i parts.txt -c copy {out:final.mov}
+   ```
+
+   The reduce task holds all parts and the result (twice the output size), so it needs one Mac with that
+   much room; for a very large result, have your app concatenate from storage instead.
+
 ## Runtimes
 
 Each Mac lists what it may run in `/usr/local/etc/umm/agent.yaml` (or the `runtimes` key of a `umm fleet`
@@ -297,6 +335,28 @@ runtimes:
   count as normal failures, so it cannot bounce forever.
 - Tasks run as the hidden non-admin `_umm` user at background priority (`taskpolicy -b`), in a fresh private
   work dir that is deleted afterwards. Install the tools they need where that user can read them.
+
+### Isolation settings
+
+```yaml
+work_volume:            # hidden APFS volume mounted at work_dir (macOS; created by the root side)
+  enabled: true
+  name: umm-work
+  quota: auto           # auto = disk size minus min_free_disk, or a fixed size such as 400g
+min_free_disk:          # kept free for the Mac's user: the larger of the two
+  min: 50GiB
+  percent: 15
+task_network: allow     # deny: _umm may only reach the router and task_network_allow (pf)
+task_network_allow: []  # e.g. [s3.example.com, 198.51.100.0/24]
+home_check:
+  root: /Users          # the Mac refuses work while a home here is readable by _umm
+  ignore: [Shared]
+```
+
+The Mac is shown **unhealthy** (with the reason) and gets no work while a user's home folder is open to
+`_umm`, free disk is below `min_free_disk`, the work volume is not mounted, or `task_network: deny` is not
+in force. The root updater applies these within one update cycle (15 minutes), including on Macs enrolled
+before; `sudo umm-agent prepare` applies them at once. See [design.md](design.md#task-isolation).
 
 ## Storage
 

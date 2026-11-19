@@ -36,9 +36,28 @@ stop_grace: 10s
 priority: adaptive
 priority_idle: 5m
 
-# Optional: run tasks under sandbox-exec so they can only write in their
-# work dir.
-sandbox: false
+# Task isolation (docs/design.md "Task isolation"). sandbox-exec is no
+# longer supported; an old "sandbox: true" is ignored with a warning.
+#
+# A hidden APFS volume for work_dir, created by the root side (installers and
+# the updater): quota "auto" = disk size minus min_free_disk, or e.g. 400g.
+work_volume:
+  enabled: true
+  name: umm-work
+  quota: auto
+# Kept free for the Mac's user (the larger of the two). Below it the Mac takes
+# no work and stops running tasks; tasks are placed by this free work space.
+min_free_disk:
+  min: 50GiB
+  percent: 15
+# deny: tasks (and the agent, as the same user) may only reach the router and
+# these hosts/CIDRs (TCP/UDP, pf anchor loaded by root). Default allow.
+task_network: allow
+task_network_allow: []
+# The Mac refuses work while any home folder here is readable by _umm.
+home_check:
+  root: /Users
+  ignore: [Shared]
 
 # While this file exists the Mac takes no work and stops running tasks.
 pause_file: /usr/local/etc/umm/paused

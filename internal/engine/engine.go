@@ -122,8 +122,10 @@ type Engine struct {
 	cfg       Config
 	live      map[string]*live
 	placement map[string][]sched.Result
-	started   time.Time
-	kick      chan struct{}
+	// diskNeed caches each task's work-space need (bytes).
+	diskNeed map[string]uint64
+	started  time.Time
+	kick     chan struct{}
 	// version is the router's own version; updates is the agent update policy.
 	version string
 	updates api.UpdateSettings
@@ -169,7 +171,7 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 	}
 	e := &Engine{
 		st: o.Store, blobs: o.Blobs, m: o.Metrics, log: o.Logger, now: o.Now, cfg: o.Config,
-		live: map[string]*live{}, placement: map[string][]sched.Result{}, kick: make(chan struct{}, 1),
+		live: map[string]*live{}, placement: map[string][]sched.Result{}, diskNeed: map[string]uint64{}, kick: make(chan struct{}, 1),
 		version: o.Version, retentionDefault: o.Retention,
 		prog: map[string]*taskProg{}, subs: map[chan string]struct{}{},
 	}
@@ -653,8 +655,12 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		}
 		e.outcome(api.OutcomeSucceeded, now.Sub(time.UnixMilli(t.StartedAt)).Seconds())
 	case api.OutcomeFailed, api.OutcomeTimeout:
-		if why := macFault(u); why != "" {
-			e.runtimeFaultLocked(ctx, t, agentID, spec.Runtime, why, u.ExitCode, now)
+		if why, isRuntime := macFault(u); why != "" {
+			rt := ""
+			if isRuntime {
+				rt = spec.Runtime
+			}
+			e.runtimeFaultLocked(ctx, t, agentID, rt, why, u.ExitCode, now)
 			break
 		}
 		msg := u.Error
@@ -917,12 +923,18 @@ func (e *Engine) Tick(ctx context.Context) error {
 func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, now time.Time) []sched.Candidate {
 	active := map[string]int{}
 	reserved := map[string]int{}
+	disk := map[string]uint64{}
 	for _, t := range tasks {
 		if t.State == api.StateAssigned || t.State == api.StateRunning {
 			active[t.AgentID]++
 			var s api.TaskSpec
 			_ = json.Unmarshal([]byte(t.Spec), &s)
 			reserved[t.AgentID] += s.Resources.RAMMB
+			if n, ok := e.diskNeed[t.ID]; ok {
+				disk[t.AgentID] += n
+			} else {
+				disk[t.AgentID] += sched.DiskNeed(s.Resources, 0)
+			}
 		}
 	}
 	maxCPU := 0
@@ -931,10 +943,13 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 		c := sched.Candidate{
 			ID: a.ID, Online: e.online(a.ID, now), Drain: a.Drain || e.updateDrainingLocked(a.ID, now), OptedOut: a.OptedOut,
 			Quarantined: a.QuarantinedUntil > ms(now), MaxTasks: a.MaxTasks,
-			Active: active[a.ID], ReservedMB: reserved[a.ID],
+			Active: active[a.ID], ReservedMB: reserved[a.ID], ReservedDisk: disk[a.ID],
 		}
 		if l := e.live[a.ID]; l != nil {
 			c.AgentState, c.Telemetry, c.Runtimes, c.Labels = l.hb.State, l.hb.Telemetry, l.runtimes, l.hb.Labels
+			if iso := l.hb.Isolation; iso != nil {
+				c.WorkKnown, c.WorkSpace, c.WorkCapacity = true, iso.WorkSpaceBytes, iso.WorkCapacityBytes
+			}
 			if len(l.unavail) > 0 {
 				c.Unavailable = map[string]string{}
 				for _, u := range l.unavail {
@@ -983,9 +998,17 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 		for i := range cs {
 			cs[i].Excluded = ex[cs[i].ID] > ms(now)
 		}
-		best, all := sched.Pick(cs, sched.Need{Runtime: spec.Runtime, Resources: spec.Resources}, e.cfg.Weights, e.cfg.Limits)
+		need := e.diskNeedLocked(ctx, t, spec)
+		best, all := sched.Pick(cs, sched.Need{Runtime: spec.Runtime, Resources: spec.Resources, DiskBytes: need},
+			e.cfg.Weights, e.cfg.Limits)
 		e.placement[t.ID] = all
 		if best == nil {
+			if ok, biggest, _ := sched.FitsAnywhere(cs, spec.Runtime, need); !ok {
+				e.failNoSpaceLocked(ctx, t, fmt.Sprintf("no Mac has enough work space: the task needs %s, the largest Mac "+
+					"holds %s (split the work into smaller tasks, or set resources.disk_estimate_mb if the estimate is wrong)",
+					sched.GiB(need), sched.GiB(biggest)), now)
+				jobs[t.JobID] = true
+			}
 			continue
 		}
 		t.State, t.AgentID, t.AssignedAt, t.Score = api.StateAssigned, best.ID, ms(now), best.Score
@@ -995,12 +1018,53 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 		c := &cands[idx[best.ID]]
 		c.Active++
 		c.ReservedMB += spec.Resources.RAMMB
+		c.ReservedDisk += need
 		jobs[t.JobID] = true
 		e.m.Assigned(best.ID)
 		e.h.count("assigned", 1)
 		e.wakeAgent(best.ID)
 	}
 	return nil
+}
+
+// diskNeedLocked returns (and caches) a task's work-space need: its
+// DiskEstimateMB, or twice the size of the inputs the router can size
+// (blobs and upstream outputs in its storage; plain URLs count 0) plus
+// DiskMB.
+func (e *Engine) diskNeedLocked(ctx context.Context, t *store.Task, spec api.TaskSpec) uint64 {
+	if n, ok := e.diskNeed[t.ID]; ok {
+		return n
+	}
+	var in uint64
+	if sz, ok := e.blobs.(storage.Sizer); ok && spec.Resources.DiskEstimateMB <= 0 {
+		for _, i := range spec.Inputs {
+			key := i.Blob
+			if i.From != nil {
+				key = OutputKey(t.JobID, i.From.Task, i.From.Output)
+			}
+			if key == "" {
+				continue
+			}
+			if n, err := sz.Size(ctx, key); err == nil && n > 0 {
+				in += uint64(n)
+			}
+		}
+	}
+	n := sched.DiskNeed(spec.Resources, in)
+	e.diskNeed[t.ID] = n
+	return n
+}
+
+// failNoSpaceLocked fails a task for good: no Mac could ever hold it.
+func (e *Engine) failNoSpaceLocked(ctx context.Context, t *store.Task, msg string, now time.Time) {
+	t.State, t.FinishedAt, t.Error = api.StateFailed, ms(now), msg
+	t.AgentID, t.AssignedAt, t.StartedAt, t.DeadlineAt = "", 0, 0, 0
+	if err := e.st.UpdateTask(ctx, t); err != nil {
+		e.log.Error("fail task", "task", t.ID, "err", err)
+		return
+	}
+	delete(e.diskNeed, t.ID)
+	e.log.Warn("task failed: no Mac has enough work space", "task", t.ID, "reason", msg)
 }
 
 // updateJobLocked recomputes a job's state from its tasks.
@@ -1022,6 +1086,7 @@ func (e *Engine) updateJobLocked(ctx context.Context, jobID string, now time.Tim
 			if ts, err := e.st.TasksByJob(ctx, jobID); err == nil {
 				for _, t := range ts {
 					delete(e.placement, t.ID)
+					delete(e.diskNeed, t.ID)
 				}
 			}
 		}

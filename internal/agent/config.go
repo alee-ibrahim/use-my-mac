@@ -3,13 +3,20 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"math"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/alee-ibrahim/use-my-mac/internal/hostprep"
 )
 
 // Config is the agent's YAML configuration. It holds no secrets: the agent
@@ -47,9 +54,35 @@ type Config struct {
 	// has not touched the keyboard or mouse for this long counts as away,
 	// so tasks run at utility. Default 5m.
 	PriorityIdle time.Duration `yaml:"priority_idle"`
-	// Sandbox wraps tasks in sandbox-exec so they can only write inside
-	// their work dir (macOS only; optional).
-	Sandbox bool `yaml:"sandbox"`
+	// Sandbox is no longer supported (sandbox-exec is deprecated). An old
+	// config that sets it gets a warning and it is ignored; isolation comes
+	// from the _umm user, the home-directory check, the work volume and the
+	// optional network policy instead.
+	Sandbox *bool `yaml:"sandbox"`
+	// Warnings are config problems that do not stop the agent (logged at
+	// startup).
+	Warnings []string `yaml:"-"`
+
+	// WorkVolume is the dedicated APFS volume mounted at WorkDir, created
+	// by the root installer/updater (macOS).
+	WorkVolume WorkVolumeConfig `yaml:"work_volume"`
+	// MinFreeDisk is the disk space always kept free for the Mac's user.
+	// Below it the Mac takes no work, and running tasks are stopped (a Mac
+	// fault, not a task failure).
+	MinFreeDisk MinFreeDiskConfig `yaml:"min_free_disk"`
+	// TaskNetwork: "allow" (default) or "deny": the agent's user (and so
+	// every task) may only reach the router and TaskNetworkAllow, enforced
+	// by a pf anchor the root updater loads. The Mac refuses work while
+	// "deny" is set but not in force.
+	TaskNetwork      string   `yaml:"task_network"`
+	TaskNetworkAllow []string `yaml:"task_network_allow"`
+	// HomeCheck: the agent refuses work while any user home directory is
+	// readable or traversable by its own user.
+	HomeCheck HomeCheckConfig `yaml:"home_check"`
+	// HostStatusFile is written by the root side (`umm-agent prepare` and
+	// the updater) and read by the agent. Default: host.json next to the
+	// config file.
+	HostStatusFile string `yaml:"host_status_file"`
 	// PauseFile: while this file exists the Mac takes no work and stops
 	// running tasks (a local opt-out switch for the Mac's owner).
 	PauseFile string `yaml:"pause_file"`
@@ -73,6 +106,43 @@ type Config struct {
 
 	// Transfer tunes input downloads and output uploads.
 	Transfer TransferConfig `yaml:"transfer"`
+}
+
+// WorkVolumeConfig configures the dedicated work volume.
+type WorkVolumeConfig struct {
+	// Enabled: nil = true on macOS.
+	Enabled *bool `yaml:"enabled"`
+	// Name of the APFS volume. Default umm-work.
+	Name string `yaml:"name"`
+	// Quota: auto (default: the disk's size minus the min_free_disk
+	// reserve) or a fixed size such as 400g. Applied when the volume is
+	// created.
+	Quota string `yaml:"quota"`
+}
+
+// On reports whether the work volume is wanted.
+func (w WorkVolumeConfig) On() bool { return w.Enabled == nil || *w.Enabled }
+
+// MinFreeDiskConfig is the reserve kept free for the Mac's user: the larger
+// of Min and Percent of the system disk.
+type MinFreeDiskConfig struct {
+	// Min, e.g. 50GiB. Default 50GiB on macOS, 0 elsewhere.
+	Min string `yaml:"min"`
+	// Percent of the disk. Default 15 on macOS, 0 elsewhere.
+	Percent *float64 `yaml:"percent"`
+
+	MinBytes uint64 `yaml:"-"`
+}
+
+// HomeCheckConfig configures the home-directory exposure check.
+type HomeCheckConfig struct {
+	// Root holding the home directories. Default /Users on macOS, "" (off)
+	// elsewhere.
+	Root string `yaml:"root"`
+	// Ignore lists entries of Root that are not homes. Default [Shared].
+	Ignore []string `yaml:"ignore"`
+	// Disabled turns the check off.
+	Disabled bool `yaml:"disabled"`
 }
 
 // TransferConfig sets chunked transfer parameters.
@@ -122,6 +192,9 @@ func LoadConfig(path string) (*Config, error) {
 	c := &Config{}
 	if err := yaml.Unmarshal(b, c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if c.HostStatusFile == "" {
+		c.HostStatusFile = filepath.Join(filepath.Dir(path), "host.json")
 	}
 	return c, c.Normalize()
 }
@@ -235,7 +308,106 @@ func (c *Config) Normalize() error {
 	if c.Update.VerifyTimeout <= 0 {
 		c.Update.VerifyTimeout = 2 * time.Minute
 	}
+	return c.normalizeIsolation(runtime.GOOS)
+}
+
+func (c *Config) normalizeIsolation(goos string) error {
+	if c.Sandbox != nil && *c.Sandbox {
+		c.Warnings = append(c.Warnings, "sandbox: true is no longer supported (sandbox-exec is deprecated) and is ignored; "+
+			"see docs/design.md \"Task isolation\"")
+	}
+	mac := goos == "darwin"
+	if c.WorkVolume.Name == "" {
+		c.WorkVolume.Name = "umm-work"
+	}
+	if c.WorkVolume.Quota == "" {
+		c.WorkVolume.Quota = "auto"
+	}
+	if c.WorkVolume.On() {
+		if err := hostprep.ValidVolume(hostprep.VolumeConfig{Name: c.WorkVolume.Name, Quota: c.WorkVolume.Quota}); err != nil {
+			return err
+		}
+	}
+	if c.MinFreeDisk.Min == "" && mac {
+		c.MinFreeDisk.Min = "50GiB"
+	}
+	if c.MinFreeDisk.Min != "" {
+		n, err := ParseSize(c.MinFreeDisk.Min)
+		if err != nil {
+			return fmt.Errorf("min_free_disk.min: %w", err)
+		}
+		c.MinFreeDisk.MinBytes = n
+	}
+	if c.MinFreeDisk.Percent == nil {
+		p := 0.0
+		if mac {
+			p = 15
+		}
+		c.MinFreeDisk.Percent = &p
+	}
+	if p := *c.MinFreeDisk.Percent; p < 0 || p >= 90 {
+		return fmt.Errorf("min_free_disk.percent must be between 0 and 90")
+	}
+	switch c.TaskNetwork {
+	case "":
+		c.TaskNetwork = "allow"
+	case "allow", "deny":
+	default:
+		return fmt.Errorf("task_network must be allow or deny")
+	}
+	if c.HomeCheck.Root == "" && mac && !c.HomeCheck.Disabled {
+		c.HomeCheck.Root = "/Users"
+	}
+	if c.HomeCheck.Ignore == nil {
+		c.HomeCheck.Ignore = []string{"Shared"}
+	}
 	return nil
+}
+
+// Reserve returns the hostprep reserve settings.
+func (c *Config) Reserve() hostprep.ReserveConfig {
+	r := hostprep.ReserveConfig{MinBytes: c.MinFreeDisk.MinBytes}
+	if c.MinFreeDisk.Percent != nil {
+		r.Percent = *c.MinFreeDisk.Percent
+	}
+	return r
+}
+
+// HostPrep returns the root-side preparation settings. The agent's user is
+// whoever owns the credential file (the installers make it _umm's).
+func (c *Config) HostPrep(stateDir string) (hostprep.Config, error) {
+	uid, gid := hostprep.Owner(c.CredentialFile)
+	if uid <= 0 {
+		return hostprep.Config{}, fmt.Errorf("cannot tell the agent's user: %s must exist and be owned by it", c.CredentialFile)
+	}
+	allow := append([]string{}, c.TaskNetworkAllow...)
+	if u, err := url.Parse(c.Server); err == nil && u.Hostname() != "" {
+		allow = append([]string{u.Hostname()}, allow...)
+	}
+	return hostprep.Config{
+		WorkDir: c.WorkDir, AgentUID: uid, AgentGID: gid,
+		Volume: hostprep.VolumeConfig{Enabled: c.WorkVolume.On(), Name: c.WorkVolume.Name, Quota: c.WorkVolume.Quota,
+			Reserve: c.Reserve()},
+		Network:    hostprep.NetworkConfig{Mode: c.TaskNetwork, Allow: allow},
+		StatusFile: c.HostStatusFile, StateDir: stateDir,
+	}, nil
+}
+
+var sizeRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]I?B?|B)?$`)
+
+// ParseSize parses sizes such as 50GiB, 50G, 512MiB or 1048576 (bytes).
+// K/M/G/T are binary (1024-based) with or without the "i".
+func ParseSize(s string) (uint64, error) {
+	m := sizeRe.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(s)))
+	if m == nil {
+		return 0, fmt.Errorf("invalid size %q (use e.g. 50GiB)", s)
+	}
+	f, _ := strconv.ParseFloat(m[1], 64)
+	mult := 1.0
+	if m[2] != "" && m[2] != "B" {
+		mult = math.Pow(1024, float64(strings.IndexByte("KMGT", m[2][0])+1))
+	}
+	return uint64(f * mult), nil
 }
 
 // RuntimeNames returns the allowlisted runtime names, sorted.

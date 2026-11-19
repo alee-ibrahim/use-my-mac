@@ -12,6 +12,8 @@
 #   * installs the root updater LaunchDaemon (signed self-updates; see
 #     docs/design.md "Agent self-update")
 #   * enrols the Mac with a one-time token (prompted, or UMM_ENROL_TOKEN)
+#   * creates the hidden work volume and, if configured, the task network
+#     policy (`umm-agent prepare`; see docs/design.md "Task isolation")
 #
 # Secrets are never passed as arguments: the enrolment token is read from the
 # environment or typed at the prompt, and the credential is stored in a 0600
@@ -155,6 +157,8 @@ if [ ! -s "$ETC/credential" ]; then
     exit 0
   fi
 fi
+
+"$BIN" prepare -config "$ETC/agent.yaml" || echo "warning: host preparation failed; the agent reports why" >&2
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST"

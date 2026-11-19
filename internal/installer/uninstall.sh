@@ -29,6 +29,16 @@ for pass in updater agent; do
 done
 rm -f "$R/usr/local/bin/umm-agent" "$R/usr/local/bin/.umm-agent.new" "$R/usr/local/bin/.umm-agent.install"
 rm -rf "$R/usr/local/var/umm-updater"
+# Work volume (its fstab line names it) and the task network pf anchor.
+FSTAB="$R/etc/fstab"
+if [ -f "$FSTAB" ] && grep -q '# use-my-mac work volume$' "$FSTAB"; then
+  for u in $(sed -n 's/^UUID=\([0-9A-Fa-f-]*\) .*# use-my-mac work volume$/\1/p' "$FSTAB"); do
+    diskutil unmount force "$u" >/dev/null 2>&1 || true
+    diskutil apfs deleteVolume "$u" >/dev/null 2>&1 || true
+  done
+  sed -i '' '/# use-my-mac work volume$/d' "$FSTAB" 2>/dev/null || true
+fi
+pfctl -a com.apple/250.use-my-mac -F all >/dev/null 2>&1 || true
 
 if [ "${1:-}" = "--purge" ]; then
   rm -rf "$R/usr/local/etc/umm" "$R/usr/local/var/umm" "$R/usr/local/var/log/umm" "$R/usr/local/var/log/umm-updater.log"

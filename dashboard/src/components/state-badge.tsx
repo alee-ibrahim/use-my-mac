@@ -1,6 +1,9 @@
 import { Badge } from "@/components/ui/badge"
 
-const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
+const variants: Record<
+  string,
+  "default" | "secondary" | "destructive" | "outline"
+> = {
   ready: "default",
   succeeded: "default",
   running: "secondary",
@@ -15,6 +18,7 @@ const variants: Record<string, "default" | "secondary" | "destructive" | "outlin
   lost: "secondary",
   unavailable: "secondary",
   offline: "destructive",
+  unhealthy: "destructive",
   failed: "destructive",
   timeout: "destructive",
   cancelled: "outline",
@@ -34,5 +38,9 @@ const variants: Record<string, "default" | "secondary" | "destructive" | "outlin
 
 // StateBadge renders a job/task/Mac/attempt state with the official Badge.
 export function StateBadge({ state }: { state: string }) {
-  return <Badge variant={variants[state] ?? "outline"}>{state ? state.replaceAll("_", " ") : "unknown"}</Badge>
+  return (
+    <Badge variant={variants[state] ?? "outline"}>
+      {state ? state.replaceAll("_", " ") : "unknown"}
+    </Badge>
+  )
 }

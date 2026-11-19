@@ -90,6 +90,9 @@ const (
 	EventRetention      = "retention.changed"
 	// EventRuntimeUnavailable: a task could not execute a runtime on a Mac.
 	EventRuntimeUnavailable = "mac.runtime_unavailable"
+	// EventMacFault: an attempt failed because of the Mac (disk full,
+	// unhealthy), not the task.
+	EventMacFault = "mac.fault"
 )
 
 // Retention controls background pruning. Zero means "keep forever" for

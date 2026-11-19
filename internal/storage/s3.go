@@ -226,3 +226,19 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+// Size returns a blob's size (HEAD).
+func (s *S3) Size(ctx context.Context, key string) (int64, error) {
+	resp, err := s.do(ctx, http.MethodHead, key, nil, -1)
+	if err != nil {
+		return 0, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, ErrNotFound
+	}
+	if resp.StatusCode/100 != 2 {
+		return 0, fmt.Errorf("s3 head: %s", resp.Status)
+	}
+	return resp.ContentLength, nil
+}

@@ -88,8 +88,15 @@ type Resources struct {
 	GPU bool `json:"gpu,omitempty"`
 	// ExpectedSeconds lets the scorer prefer quiet, powerful Macs for long work.
 	ExpectedSeconds int `json:"expected_seconds,omitempty"`
-	// DiskMB is scratch space needed in the work dir.
+	// DiskMB is scratch space needed in the work dir on top of the inputs
+	// and outputs.
 	DiskMB int `json:"disk_mb,omitempty"`
+	// DiskEstimateMB is the task's total work-space need (inputs, outputs
+	// and scratch). Default: twice the size of its inputs (as far as the
+	// router knows them: blobs and upstream outputs; plain URLs count 0)
+	// plus DiskMB. The router places the task only on a Mac with that much
+	// room, and fails it if no Mac could ever fit it.
+	DiskEstimateMB int `json:"disk_estimate_mb,omitempty"`
 	// Labels must all match the agent's labels (e.g. {"chip":"m2"}).
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -318,6 +325,11 @@ const (
 	AgentBusyUser = "yielding" // the user is busy; not accepting, stopping tasks
 	AgentCooldown = "cooldown" // recently yielded; waiting for the user to calm down
 	AgentDraining = "draining" // admin drain / local opt-out
+	// AgentUnhealthy: the Mac is not safe or able to run work (user home
+	// directories readable by the agent's user, low disk, work volume not
+	// mounted, network policy not applied). Reason says why. It is a Mac
+	// fault: running tasks are left alone, new ones are refused.
+	AgentUnhealthy = "unhealthy"
 )
 
 // Mac is the server's view of an enrolled agent.
@@ -344,6 +356,39 @@ type Mac struct {
 	// the reason. Runtimes lists only the ones it can run; the scheduler
 	// never places a task needing an unavailable runtime here.
 	UnavailableRuntimes []UnavailableRuntime `json:"unavailable_runtimes,omitempty"`
+	// StateReason explains AgentState (e.g. why a Mac is unhealthy).
+	StateReason string `json:"state_reason,omitempty"`
+	// Isolation is how this Mac isolates tasks (nil for older agents or
+	// while the Mac is offline).
+	Isolation *Isolation `json:"isolation,omitempty"`
+}
+
+// Isolation describes how a Mac keeps tasks away from its users' data.
+type Isolation struct {
+	// WorkVolume: "dedicated" (a quota-limited APFS volume of its own),
+	// "system" (a directory on the system volume: creating the volume
+	// failed or is turned off) or "" (unknown).
+	WorkVolume string `json:"work_volume,omitempty"`
+	// WorkVolumeNote says why the work dir is not on a dedicated volume.
+	WorkVolumeNote string `json:"work_volume_note,omitempty"`
+	// Network: "allow" or "deny" (tasks may only reach the router and the
+	// configured hosts; enforced by a pf anchor installed by root).
+	Network string `json:"network,omitempty"`
+	// HomeDirs: "ok", "exposed" (some are readable by the agent's user; the
+	// Mac refuses work) or "unchecked".
+	HomeDirs string `json:"home_dirs,omitempty"`
+	// WorkSpaceBytes is the disk space available for new work now: free
+	// space on the work volume, less the reserve kept for the Mac's user.
+	// The router only places a task here if its disk need fits.
+	WorkSpaceBytes uint64 `json:"work_space_bytes"`
+	// WorkCapacityBytes is the space work could use with no task running
+	// (WorkSpaceBytes plus what running tasks use). A task needing more than
+	// any Mac's capacity fails instead of waiting forever.
+	WorkCapacityBytes uint64 `json:"work_capacity_bytes"`
+	// SystemFreeBytes and ReserveBytes: free space on the system volume and
+	// the part of it kept for the Mac's user.
+	SystemFreeBytes uint64 `json:"system_free_bytes,omitempty"`
+	ReserveBytes    uint64 `json:"reserve_bytes,omitempty"`
 }
 
 // UnavailableRuntime is an allowlisted runtime that a Mac cannot run.
@@ -416,6 +461,8 @@ type Heartbeat struct {
 	// runtime it marked unavailable after an exec failure once a newer
 	// preflight reports the runtime as available again.
 	PreflightID int64 `json:"preflight_id,omitempty"`
+	// Isolation reports the Mac's task isolation (see Isolation).
+	Isolation *Isolation `json:"isolation,omitempty"`
 }
 
 // HeartbeatResponse tells the agent what to stop.
@@ -473,8 +520,9 @@ const (
 	OutcomeCancelled = "cancelled"
 	OutcomeTimeout   = "timeout"
 	// OutcomeUnavailable: the Mac could not execute the task's runtime
-	// (program missing or not executable, exit 127). That is the Mac's
-	// fault, so it does not count against the task's max_retries.
+	// (program missing or not executable, exit 127) or failed it for its
+	// own reasons (disk full, unhealthy). That is the Mac's fault, so it
+	// does not count against the task's max_retries.
 	OutcomeUnavailable = "unavailable"
 )
 
@@ -490,6 +538,12 @@ type TaskUpdate struct {
 	// 127 from the launcher). The router then treats the attempt as a Mac
 	// fault. Routers also treat a bare exit code 127 this way.
 	RuntimeUnavailable string `json:"runtime_unavailable,omitempty"`
+	// MacFault is set (with the reason) when the attempt failed because of
+	// the Mac rather than the task: the work volume ran out of space or hit
+	// its quota, or the Mac became unhealthy before the task started. The
+	// router treats it like RuntimeUnavailable (attempt "unavailable", no
+	// failure counted) without marking a runtime unavailable.
+	MacFault string `json:"mac_fault,omitempty"`
 }
 
 // LogChunk is a piece of a task's stdout/stderr.

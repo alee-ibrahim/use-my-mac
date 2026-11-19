@@ -16,6 +16,9 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 install -m 0755 -o root -g wheel "$STAGE/umm-agent" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 
+# Work volume and task network policy (the updater also does this each cycle).
+"$BIN" prepare || echo "warning: host preparation failed; the agent reports why" >&2
+
 if ! launchctl kickstart -k "system/${LABEL}" 2>/dev/null; then
   # Not loaded (or kickstart refused): load it. Same bootout race as install.
   launchctl bootout "system/${LABEL}" 2>/dev/null || true
