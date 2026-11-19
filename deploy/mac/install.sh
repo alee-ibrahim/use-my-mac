@@ -158,7 +158,7 @@ if [ ! -s "$ETC/credential" ]; then
   fi
 fi
 
-"$BIN" prepare -config "$ETC/agent.yaml" || echo "warning: host preparation failed; the agent reports why" >&2
+"$BIN" prepare -config "$ETC/agent.yaml" -label "$LABEL" || echo "warning: host preparation failed; the agent reports why" >&2
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST"

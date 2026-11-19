@@ -13,9 +13,11 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 [ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
 
 launchctl bootout "system/${LABEL}.updater" 2>/dev/null || true
+launchctl bootout "system/${LABEL}.runtimes" 2>/dev/null || true
+rm -f "/Library/LaunchDaemons/${LABEL}.runtimes.plist"
 launchctl bootout "system/${LABEL}" 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/${LABEL}.updater.plist" "$PLIST" /usr/local/bin/umm-agent /usr/local/bin/.umm-agent.new
-rm -rf /usr/local/var/umm-updater
+rm -rf /usr/local/var/umm-updater /usr/local/var/umm-runtimes
 # Work volume (its fstab line names it) and the task network pf anchor.
 FSTAB="/etc/fstab"
 if [ -f "$FSTAB" ] && grep -q '# use-my-mac work volume$' "$FSTAB"; then

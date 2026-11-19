@@ -205,6 +205,28 @@ func (c *Client) RevokeAPIKey(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/api-keys/"+url.PathEscape(id), nil, nil)
 }
 
+// Runtimes returns the managed runtime catalog with fleet status.
+func (c *Client) Runtimes(ctx context.Context) (*api.RuntimeCatalog, error) {
+	var rc api.RuntimeCatalog
+	return &rc, c.do(ctx, http.MethodGet, "/v1/runtimes", nil, &rc)
+}
+
+// PublishRuntime adds or replaces a signed runtime package (admin).
+func (c *Client) PublishRuntime(ctx context.Context, p api.RuntimePublish) (*api.RuntimeCatalogEntry, error) {
+	var e api.RuntimeCatalogEntry
+	return &e, c.do(ctx, http.MethodPut, "/v1/runtimes", p, &e)
+}
+
+// DeleteRuntime removes a package from the catalog (admin).
+func (c *Client) DeleteRuntime(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/runtimes/"+url.PathEscape(name), nil, nil)
+}
+
+// SetRuntimePrewarm turns fleet-wide pre-installation on or off (admin).
+func (c *Client) SetRuntimePrewarm(ctx context.Context, name string, on bool) error {
+	return c.do(ctx, http.MethodPut, "/v1/runtimes/"+url.PathEscape(name)+"/prewarm", api.RuntimePrewarm{Prewarm: on}, nil)
+}
+
 // WaitJob waits until the job reaches a terminal state or ctx ends,
 // calling progress with every update. It follows the router's live stream
 // and falls back to polling every `every` when streaming is not available.

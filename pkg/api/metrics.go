@@ -93,6 +93,8 @@ const (
 	// EventMacFault: an attempt failed because of the Mac (disk full,
 	// unhealthy), not the task.
 	EventMacFault = "mac.fault"
+	// Managed runtime catalog changes (publish, remove, prewarm).
+	EventRuntimeCatalog = "runtime.catalog"
 )
 
 // Retention controls background pruning. Zero means "keep forever" for

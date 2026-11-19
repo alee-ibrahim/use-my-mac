@@ -60,12 +60,19 @@ type Candidate struct {
 	// Unavailable maps allowlisted runtimes the Mac cannot run to the
 	// reason (preflight failure or exec fault). They never match.
 	Unavailable map[string]string
-	Labels      map[string]string
-	MaxTasks    int
-	Active      int // our tasks assigned or running on it
-	ReservedMB  int // RAM reserved by those tasks
-	Telemetry   api.Telemetry
-	FleetMaxCPU int // largest CPU count in the fleet (for the capacity factor)
+	// Installable lists runtimes the Mac does not have yet but can install
+	// on demand (managed runtimes). Packages are the managed packages it has
+	// installed (current version); InstallablePackages the ones it can
+	// install.
+	Installable         []string
+	Packages            map[string]bool
+	InstallablePackages []string
+	Labels              map[string]string
+	MaxTasks            int
+	Active              int // our tasks assigned or running on it
+	ReservedMB          int // RAM reserved by those tasks
+	Telemetry           api.Telemetry
+	FleetMaxCPU         int // largest CPU count in the fleet (for the capacity factor)
 	// Work space reported by the agent (WorkKnown false for older agents):
 	// available now, and with no task running.
 	WorkKnown    bool
@@ -77,7 +84,9 @@ type Candidate struct {
 
 // Need is what the task requires.
 type Need struct {
-	Runtime   string
+	Runtime string
+	// Requires lists managed runtime packages the task needs.
+	Requires  []string
 	Resources api.Resources
 	// DiskBytes is the task's work-space need (see DiskNeed).
 	DiskBytes uint64
@@ -101,7 +110,7 @@ func FitsAnywhere(cs []Candidate, runtime string, need uint64) (ok bool, biggest
 		return true, 0, false
 	}
 	for _, c := range cs {
-		if !contains(c.Runtimes, runtime) {
+		if !contains(c.Runtimes, runtime) && !contains(c.Installable, runtime) {
 			continue
 		}
 		if !c.WorkKnown {
@@ -119,6 +128,11 @@ func FitsAnywhere(cs []Candidate, runtime string, need uint64) (ok bool, biggest
 // GiB formats bytes for reasons.
 func GiB(b uint64) string { return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30)) }
 
+// InstallPenalty scales the score of a Mac that would first have to
+// install a managed runtime, so Macs that already have it are preferred
+// while the others still qualify.
+const InstallPenalty = 0.7
+
 // Result is the outcome of scoring one candidate.
 type Result struct {
 	ID     string             `json:"id" yaml:"id"`
@@ -126,6 +140,8 @@ type Result struct {
 	Reason string             `json:"reason,omitempty"`   // why it was filtered out
 	Score  float64            `json:"score" yaml:"score"` // 0..100
 	Parts  map[string]float64 `json:"parts,omitempty"`    // factor values 0..1
+	// Install lists managed runtimes the Mac would install first.
+	Install []string `json:"install,omitempty" yaml:"install,omitempty"`
 }
 
 func clamp01(v float64) float64 {
@@ -195,8 +211,21 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 	if why, bad := c.Unavailable[n.Runtime]; bad {
 		return reject("runtime %q unavailable: %s", n.Runtime, why)
 	}
+	var install []string
 	if !contains(c.Runtimes, n.Runtime) {
-		return reject("runtime %q not available", n.Runtime)
+		if !contains(c.Installable, n.Runtime) {
+			return reject("runtime %q not available", n.Runtime)
+		}
+		install = append(install, n.Runtime)
+	}
+	for _, p := range n.Requires {
+		if c.Packages[p] {
+			continue
+		}
+		if !contains(c.InstallablePackages, p) {
+			return reject("required runtime %q not available", p)
+		}
+		install = append(install, p)
 	}
 	for k, v := range n.Resources.Labels {
 		if c.Labels[k] != v {
@@ -308,7 +337,14 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 		wsum += weights[k]
 	}
 	if wsum > 0 {
-		r.Score = math.Round(sum/wsum*10000) / 100
+		f := sum / wsum
+		if len(install) > 0 {
+			f *= InstallPenalty
+		}
+		r.Score = math.Round(f*10000) / 100
+	}
+	if len(install) > 0 {
+		r.Install = install
 	}
 	r.OK = true
 	r.Parts = parts

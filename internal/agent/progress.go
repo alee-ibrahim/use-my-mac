@@ -240,8 +240,9 @@ func (t *progressTap) line() {
 	t.buf = t.buf[:0]
 }
 
-// parserFor picks the output parser for a runtime.
-func (c *Config) parserFor(runtime string) *lineParser {
+// parserFor picks the output parser for a runtime. argv is the command the
+// task runs (an allowlisted or managed runtime); "auto" looks at its program.
+func (c *Config) parserFor(runtime string, argv []string) *lineParser {
 	mode := c.ProgressParsers[runtime]
 	if mode == "" {
 		mode = ParserAuto
@@ -250,7 +251,7 @@ func (c *Config) parserFor(runtime string) *lineParser {
 	case ParserFFmpeg:
 		return &lineParser{ffmpeg: true}
 	case ParserAuto:
-		if argv := c.Runtimes[runtime]; len(argv) > 0 && strings.HasPrefix(strings.ToLower(filepath.Base(argv[0])), "ffmpeg") {
+		if len(argv) > 0 && strings.HasPrefix(strings.ToLower(filepath.Base(argv[0])), "ffmpeg") {
 			return &lineParser{ffmpeg: true}
 		}
 	}

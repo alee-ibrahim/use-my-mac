@@ -6,6 +6,7 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  PackageIcon,
   LogOutIcon,
   SettingsIcon,
 } from "lucide-react"
@@ -48,6 +49,7 @@ import { JobsPage } from "@/pages/jobs"
 import { KeysPage } from "@/pages/keys"
 import { Login, SignedOut, SigninError } from "@/pages/login"
 import { MacsPage } from "@/pages/macs"
+import { RuntimesPage } from "@/pages/runtimes"
 import { SettingsPage } from "@/pages/settings"
 
 // Chart pages (and Recharts) load on demand.
@@ -64,6 +66,7 @@ const nav: { label: string; items: NavItem[] }[] = [
       { id: "overview", title: "Overview", icon: LayoutDashboardIcon },
       { id: "macs", title: "Macs", icon: CpuIcon, also: ["mac"] },
       { id: "jobs", title: "Jobs", icon: ListChecksIcon, also: ["job"] },
+      { id: "runtimes", title: "Runtimes", icon: PackageIcon },
       { id: "activity", title: "Activity", icon: ActivityIcon },
     ],
   },
@@ -255,6 +258,7 @@ export function App() {
             <Suspense fallback={<PageFallback />}>
               {page === "overview" && <OverviewPage admin={admin} />}
               {page === "macs" && <MacsPage admin={admin} />}
+              {page === "runtimes" && <RuntimesPage admin={admin} />}
               {page === "mac" && route.id && <MacDetailPage key={route.id} id={route.id} admin={admin} />}
               {page === "jobs" && <JobsPage admin={admin} />}
               {page === "job" && route.id && <JobDetailPage key={route.id} id={route.id} admin={admin} />}

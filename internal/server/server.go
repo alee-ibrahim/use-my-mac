@@ -133,6 +133,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/updates", s.need(roleAdmin, s.putUpdates))
 	mux.HandleFunc("PUT /v1/updates/artifacts/{version}/{file}", s.need(roleAdmin, s.putArtifact))
 	mux.HandleFunc("GET /v1/macs/{id}/updates", s.need(roleRead, s.macUpdateEvents))
+	mux.HandleFunc("GET /v1/runtimes", s.need(roleRead, s.listRuntimes))
+	mux.HandleFunc("PUT /v1/runtimes", s.need(roleAdmin, s.putRuntime))
+	mux.HandleFunc("DELETE /v1/runtimes/{name}", s.need(roleAdmin, s.deleteRuntime))
+	mux.HandleFunc("PUT /v1/runtimes/{name}/prewarm", s.need(roleAdmin, s.putRuntimePrewarm))
 	mux.HandleFunc("GET /v1/access", s.need(roleAdmin, s.getAccess))
 	mux.HandleFunc("POST /v1/access/rules", s.need(roleAdmin, s.putAccessRule))
 	mux.HandleFunc("DELETE /v1/access/rules/{id}", s.need(roleAdmin, s.deleteAccessRule))
@@ -165,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/agent/update/report", s.agent(s.agentUpdateReport))
 	mux.HandleFunc("GET /v1/agent/update/artifacts/{version}/{file}", s.agent(s.agentArtifact))
 	mux.HandleFunc("GET /v1/agent/self", s.agent(s.agentSelf))
+	mux.HandleFunc("GET /v1/agent/runtimes", s.agent(s.agentRuntimes))
 	mux.HandleFunc("GET "+storage.SignedPath, s.signedBlob)
 	mux.HandleFunc("PUT "+storage.SignedPath, s.signedBlob)
 

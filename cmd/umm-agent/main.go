@@ -37,8 +37,13 @@ Usage:
   umm-agent update    [-config FILE] [-label L] [-jitter D] [-dry-run]
                                        one self-update cycle (root; its own LaunchDaemon runs it);
                                        also re-applies "prepare"
-  umm-agent prepare   [-config FILE]   set up the work volume and task network policy (root;
-                                       the installers and the updater run it)
+  umm-agent prepare   [-config FILE] [-label L]
+                                       set up the work volume, task network policy and the
+                                       managed runtimes helper daemon (root; the installers and
+                                       the updater run it)
+  umm-agent runtimes-sync [-config FILE]
+                                       install requested/prewarm managed runtimes as root (its
+                                       LaunchDaemon runs it when the agent asks)
   umm-agent version
 
 Default config: /usr/local/etc/umm/agent.yaml (env UMM_AGENT_CONFIG)
@@ -78,8 +83,13 @@ func main() {
 		err = update(*cfgPath, *label, *bin, *stateDir, *jitter, *dryRun, *verbose)
 	case "prepare":
 		stateDir := fs.String("state-dir", "/usr/local/var/umm-updater", "root-only state directory")
+		label := fs.String("label", "io.github.alee-ibrahim.umm-agent", "the agent's LaunchDaemon label")
 		fs.Parse(args)
-		err = prepare(*cfgPath, *stateDir, *verbose)
+		err = prepare(*cfgPath, *label, *stateDir, *verbose)
+	case "runtimes-sync":
+		stateDir := fs.String("state-dir", "/usr/local/var/umm-updater", "root-only state directory")
+		fs.Parse(args)
+		err = runtimesSync(*cfgPath, *stateDir, *verbose)
 	case "version":
 		fmt.Println(agent.Version)
 	case "help", "-h", "--help":
@@ -187,7 +197,7 @@ func snapshot(path string) error {
 }
 
 // prepare runs the root-side host preparation once.
-func prepare(path, stateDir string, verbose bool) error {
+func prepare(path, label, stateDir string, verbose bool) error {
 	lvl := slog.LevelInfo
 	if verbose {
 		lvl = slog.LevelDebug
@@ -204,7 +214,7 @@ func prepare(path, stateDir string, verbose bool) error {
 	if err != nil {
 		return err
 	}
-	st := prepareHost(cfg, stateDir, log)
+	st := prepareHost(cfg, path, label, stateDir, log)
 	if st == nil {
 		return errors.New("host preparation did not run (see the log)")
 	}
@@ -215,7 +225,8 @@ func prepare(path, stateDir string, verbose bool) error {
 
 // prepareHost sets up the work volume and the pf anchor and writes the
 // status file the agent reads. Problems are logged and recorded there.
-func prepareHost(cfg *agent.Config, stateDir string, log *slog.Logger) *hostprep.Status {
+func prepareHost(cfg *agent.Config, cfgPath, label, stateDir string, log *slog.Logger) *hostprep.Status {
+	ensureHelperDaemon(cfg, label, cfgPath, log)
 	unlock, err := selfupdate.Lock(filepath.Join(stateDir, "prepare"))
 	if err != nil {
 		log.Warn("host preparation skipped", "err", err)
@@ -260,7 +271,11 @@ func update(path, label, bin, stateDir string, jitter time.Duration, dryRun, ver
 	// it is how enrolled Macs get the work volume and network policy, and
 	// how both come back after a reboot.
 	if runtime.GOOS == "darwin" && !dryRun {
-		prepareHost(cfg, stateDir, log)
+		prepareHost(cfg, path, label, stateDir, log)
+		// Backup for the runtimes helper: retries, prewarm, clean-up.
+		if err := syncRuntimes(context.Background(), cfg, stateDir, log.With("component", "runtimes")); err != nil {
+			log.Warn("managed runtimes sync", "err", err)
+		}
 	}
 	if !cfg.Update.UpdatesEnabled() {
 		log.Info("updates disabled in agent config (update.enabled: false)")

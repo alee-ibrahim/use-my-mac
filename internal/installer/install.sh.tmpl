@@ -193,7 +193,7 @@ fi
 # optional pf anchor for task_network: deny. Failure is not fatal: the agent
 # then works in a plain directory and reports why. The root updater re-applies
 # this every cycle.
-"$BIN" prepare -config "$ETC/agent.yaml" || say "warning: host preparation failed; the agent reports why"
+"$BIN" prepare -config "$ETC/agent.yaml" -label "$LABEL" || say "warning: host preparation failed; the agent reports why"
 
 # --- (re)load ----------------------------------------------------------------
 self() {

@@ -141,7 +141,8 @@ umm download TASK_ID enc.mp4
 | Field | Meaning |
 | --- | --- |
 | `key` | unique name inside the job; other tasks refer to it |
-| `runtime` | an allowlisted runtime name (see [Runtimes](#runtimes)) |
+| `runtime` | an allowlisted runtime name, or a command of a managed runtime (see [Runtimes](#runtimes)) |
+| `requires` | managed runtime packages to install before the task runs; their `bin` directories go first on `PATH` (see [Managed runtimes](#managed-runtimes)) |
 | `args` | appended to the runtime's fixed argv. Placeholders: `{in:NAME}` input path, `{out:NAME}` where output NAME must be written, `{workdir}` the task's private directory |
 | `env` | extra environment variables. `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` and `LD_*` are not allowed |
 | `inputs` | files placed in `in/` before the task starts. Each has a `name` and exactly one of `url`, `blob` or `from` (the CLI also accepts `file`) |
@@ -357,6 +358,69 @@ The Mac is shown **unhealthy** (with the reason) and gets no work while a user's
 `_umm`, free disk is below `min_free_disk`, the work volume is not mounted, or `task_network: deny` is not
 in force. The root updater applies these within one update cycle (15 minutes), including on Macs enrolled
 before; `sudo umm-agent prepare` applies them at once. See [design.md](design.md#task-isolation).
+### Managed runtimes
+
+Instead of installing a tool on every Mac by hand, an admin can publish it once as a **managed runtime**: a
+signed package each Mac verifies and installs the first time a task needs it: no Homebrew, no sudo, no
+SSH. The agent only asks; a small root helper on the Mac installs it read-only into
+`/usr/local/var/umm-runtimes`, so tasks cannot change it, and the agent re-checks the files before every
+use (see [design.md](design.md#managed-runtimes)).
+
+1. Build the tool for each platform as a `tar.gz`, `zip` or single executable and upload it to the router
+   (or host it anywhere the Macs can reach):
+
+   ```sh
+   umm runtimes upload ffmpeg-7.1-darwin-arm64.tar.gz runtimes/ffmpeg-7.1-darwin-arm64.tar.gz
+   # prints "blob": ..., "sha256": ..., "size": ... for the manifest
+   ```
+
+2. Write the manifest (`ffmpeg.json`). Commands are paths inside the package; tasks can only append
+   arguments:
+
+   ```json
+   {
+     "name": "ffmpeg",
+     "version": "7.1",
+     "description": "FFmpeg static build",
+     "commands": {"ffmpeg": ["bin/ffmpeg"], "ffprobe": ["bin/ffprobe"]},
+     "artifacts": [
+       {"os": "darwin", "arch": "arm64", "format": "tar.gz",
+        "blob": "runtimes/ffmpeg-7.1-darwin-arm64.tar.gz", "sha256": "…", "size": 41234567}
+     ]
+   }
+   ```
+
+3. Sign it and publish it. The secret key comes from a file or `UMM_RUNTIME_SIGNING_KEY`, never argv:
+
+   ```sh
+   umm runtimes keygen -out runtimes.key      # once; prints the public key for agent.yaml
+   umm runtimes sign ffmpeg.json -key-file runtimes.key
+   umm runtimes publish ffmpeg.json [-prewarm]
+   ```
+
+- **Trust.** The router only relays. A Mac installs a package only if its signature verifies with a key in
+  its root-owned `agent.yaml` (`managed_runtimes.public_keys`, by default the release key that already
+  decides which agent binary runs) and `managed_runtimes.allow` lists its name (default `*`). The signature
+  covers the name, version and the SHA-256 of every download, so where the bytes come from does not matter.
+  Archives are unpacked with strict checks (no absolute paths, `..`, links out of the package, hard links,
+  devices or setuid bits), owned by root and read-only.
+- **Placement.** Tasks that name a package command (or list a package in `requires`) can go to Macs that
+  have it or can install it; Macs that already have it are preferred (score × 0.7 otherwise) and the
+  placement view shows *install: ffmpeg*. On a Mac that does not have it yet the first attempt ends
+  `unavailable` ("install requested") without using up `max_retries`; the Mac installs it within seconds
+  and gets the task back once it is ready, unless another Mac that has it takes it first. A failed install
+  marks the runtime unavailable on that Mac (retried after `retry_after`, 10 minutes). If a package's files
+  no longer match what root installed, the task is refused there and the package is reinstalled.
+- **Pre-install.** `umm runtimes prewarm ffmpeg` (or the switch on the dashboard **Runtimes** page) makes
+  every Mac that can install it do so in the background.
+- **Updates.** Publishing a new version replaces the old one. Macs install it on next use (or at once if
+  pre-installed) and delete old versions once no running task uses them. `umm runtimes rm NAME` withdraws a
+  package.
+- **Status.** `umm runtimes`, `umm runtimes show NAME` and the dashboard **Runtimes** page show each package
+  per Mac: installed, installing, outdated, installable or failed (with the error).
+- Turn it off per Mac with `managed_runtimes: {enabled: false}` in `agent.yaml`; the static `runtimes`
+  allowlist works as before and wins when both define a command. The helper logs to
+  `/usr/local/var/log/umm-runtimes.log`; `sudo umm-agent runtimes-sync` runs a pass by hand.
 
 ## Storage
 
@@ -452,6 +516,10 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `DELETE /v1/macs/{id}` | admin | delete a Mac: revokes its credential and removes its metrics history |
 | `POST /v1/enrolment-tokens` | admin | one-time token for a new Mac |
 | `GET` / `POST /v1/api-keys`, `DELETE /v1/api-keys/{id}` | admin | list, create (`{"name", "role"}`) and revoke API keys (`purge` below deletes them) |
+| `GET /v1/runtimes` | any | managed runtime catalog with each package's state per Mac |
+| `PUT /v1/runtimes` | admin | publish or replace a package: `{"manifest", "signature", "prewarm"}` |
+| `DELETE /v1/runtimes/{name}` | admin | withdraw a package |
+| `PUT /v1/runtimes/{name}/prewarm` | admin | `{"prewarm": true}`: every Mac that can install it does so in the background |
 | `GET /v1/settings` | viewer, admin | scheduler weights and limits |
 | `PUT /v1/settings` | admin | change them at runtime |
 | `GET /v1/updates` | viewer, admin | agent update policy, router version, relay status |

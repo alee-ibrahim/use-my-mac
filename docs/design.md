@@ -302,6 +302,51 @@ boot time; until then a Mac with `deny` is unhealthy (fail closed). If the main 
 **Status file.** The root side records what it did in `host.json` next to `agent.yaml` (root-owned,
 readable by `_umm`). The agent reads it and reports `isolation` (work volume, network, home folders, work
 space, reserve) in its heartbeat; the Mac page shows it.
+## Managed runtimes
+
+Tools tasks need (ffmpeg, a model runner) are **managed runtimes**: packages an admin signs with minisign
+and publishes to the router's catalog (stored in the settings table, revisioned). The heartbeat response
+carries the catalog revision; when it changes the agent fetches `GET /v1/agent/runtimes` (manifests,
+signatures and short-lived download URLs for blob artifacts), keeps the packages that verify with a key it
+trusts, are allowed by its `agent.yaml` and have a build for its platform, and reports their commands as
+*installable*. The router only checks that a manifest is well formed and that the signature's trusted
+comment names that package and version; the Mac's own check is the one that matters.
+
+- **Root installs, the agent asks.** Packages are installed by root, never by the agent, so tasks (which
+  run as `_umm` like the agent) cannot change them. The prefix `managed_runtimes.dir`
+  (`/usr/local/var/umm-runtimes`; it may not be inside the `_umm`-owned `/usr/local/var/umm`) is
+  `root:wheel`: directories `0755`, files `0555`. When a task needs a package that is not installed, the
+  agent writes its request to `managed_runtimes.request_file` (`/usr/local/var/umm/runtime-requests.json`)
+  and the attempt ends `unavailable` at once ("install requested", no failure counted). The package is then
+  reported as *installing*, not installable, so the router places the task on Macs that have it, or back
+  here once it is installed (the runtime fault clears with the next preflight; no extra exclusion).
+- **Root helper.** `umm-agent runtimes-sync` runs as root from its own LaunchDaemon (`<label>.runtimes`,
+  written and loaded by `umm-agent prepare`, so the installers and the updater set it up on every Mac
+  without SSH). launchd starts it whenever the request file changes (`WatchPaths`), so an install begins
+  within seconds; the updater also runs a pass every cycle (retries, pre-installs, clean-up). A pass fetches
+  the catalog itself with the agent's credential and verifies each package as above (signature with the
+  keys in the root-owned `agent.yaml`, `allow` list, platform). The download is size-capped and checked
+  against the signed SHA-256, unpacked into a temporary directory with strict path, link and mode checks,
+  its commands verified as executable regular files, sealed (owner, modes) and renamed into place; a
+  marker file written last makes it visible and lists every file's SHA-256. Passes are serialised; one that
+  finds the helper busy waits, and a pass re-reads the request before it exits. The request file lives in
+  a directory `_umm` controls, so root opens it without following links, only if it is a small regular
+  file, and only takes valid names of packages in its own verified catalog. Failures (with a retry time)
+  go to `.status.json` in the prefix, which the agent reads.
+- **Checked before every use.** Before a task runs a package (as its runtime or in `requires`) the agent
+  checks the installed tree against root's file list: the same files and links, each file's SHA-256, owned
+  by root and writable by nobody else. Hashes are cached by device, inode, size, mtime and ctime (users can
+  reset mtime but not ctime), so an unchanged package costs a `stat` per file. A mismatch refuses the task
+  (Mac fault), stops offering the package and asks root for a reinstall; root re-checks it itself and only
+  then reinstalls. The file list is derived by root from the archive whose SHA-256 the signed manifest
+  names.
+- **Clean-up.** Root removes versions that are no longer current, except those running tasks use: the
+  agent lists them in `managed_runtimes.in_use_file`, which can only keep versions, never add or remove any.
+  A catalog change wakes the helper too, so withdrawn packages go and pre-installs start without waiting
+  for the updater.
+- **Scheduling.** A Mac that can install a runtime passes the hard filter; its score is multiplied by 0.7 so
+  Macs that already have it win. A failed install becomes an unavailable runtime (source `install`) with a
+  retry backoff, and the attempt ends `unavailable` like a missing program (no failure counted).
 
 ## Agent self-update
 

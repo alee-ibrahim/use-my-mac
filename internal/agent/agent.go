@@ -19,11 +19,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/agent/telemetry"
 	"github.com/alee-ibrahim/use-my-mac/internal/hostprep"
+	"github.com/alee-ibrahim/use-my-mac/internal/runtimes"
+	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 	"github.com/alee-ibrahim/use-my-mac/internal/transfer"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
@@ -70,6 +74,16 @@ type Agent struct {
 	statfs    func(path string) (free, total uint64, err error)
 	homeProbe HomeProbe
 	isMount   func(dir string) bool
+	// Managed runtimes (nil when disabled). managedReady maps commands
+	// served by installed packages to their argv; installable and
+	// installablePkgs can be installed on demand.
+	managed         *runtimes.Manager
+	managedReady    map[string][]string
+	installable     []string
+	installablePkgs []string
+	packages        []api.RuntimePackageStatus
+	catalogBusy     atomic.Bool
+	prewarmBusy     atomic.Bool
 }
 
 type run struct {
@@ -108,6 +122,14 @@ func New(cfg *Config, cred string, collector telemetry.Collector, log *slog.Logg
 		homeProbe: probeHome,
 		isMount:   hostprep.IsMountPoint,
 	}
+	if cfg.ManagedRuntimes.On() {
+		m, err := newManager(cfg, log)
+		if err != nil {
+			log.Warn("managed runtimes disabled", "err", err)
+		} else {
+			a.managed = m
+		}
+	}
 	a.ReloadRuntimes(cfg.Runtimes)
 	if collector == nil {
 		collector = telemetry.NewDefault(telemetry.Options{
@@ -117,6 +139,134 @@ func New(cfg *Config, cred string, collector telemetry.Collector, log *slog.Logg
 	}
 	a.collector = collector
 	return a
+}
+
+// ManagedKeys returns the keys managed runtime packages must be signed
+// with: managed_runtimes.public_keys, else the release key.
+func ManagedKeys(cfg *Config) ([]*selfupdate.PublicKey, error) {
+	var keys []*selfupdate.PublicKey
+	for _, k := range cfg.ManagedRuntimes.PublicKeys {
+		pk, err := selfupdate.ParsePublicKey(k)
+		if err != nil {
+			return nil, fmt.Errorf("managed_runtimes.public_keys: %w", err)
+		}
+		keys = append(keys, pk)
+	}
+	if len(keys) > 0 {
+		return keys, nil
+	}
+	pk, err := selfupdate.ReleasePublicKey()
+	if cfg.Update.PublicKey != "" {
+		pk, err = selfupdate.ParsePublicKey(cfg.Update.PublicKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("release public key: %w", err)
+	}
+	return []*selfupdate.PublicKey{pk}, nil
+}
+
+func newManager(cfg *Config, log *slog.Logger) (*runtimes.Manager, error) {
+	keys, err := ManagedKeys(cfg)
+	if err != nil {
+		return nil, err
+	}
+	mr := cfg.ManagedRuntimes
+	rlog := log.With("component", "runtimes")
+	return runtimes.New(runtimes.Options{Role: runtimes.RoleAgent, Dir: mr.Dir, Keys: keys, Allow: mr.Allow,
+		RetryAfter: mr.RetryAfter, RequestTimeout: mr.RequestTimeout, InUseFile: mr.InUseFile, Log: rlog,
+		Request: func(install, reinstall []string) {
+			// The root helper's LaunchDaemon watches this file.
+			err := runtimes.WriteRequest(mr.RequestFile, runtimes.Request{Install: install, Reinstall: reinstall,
+				At: time.Now().UTC()})
+			if err != nil {
+				rlog.Warn("could not ask the root helper for runtimes", "file", mr.RequestFile, "err", err)
+				return
+			}
+			rlog.Info("asked the root helper for runtimes", "install", install, "reinstall", reinstall)
+			if mr.OnRequest != nil {
+				mr.OnRequest()
+			}
+		}})
+}
+
+// NewInstaller returns the root helper's manager: it installs packages
+// into the root-owned prefix (see `umm-agent runtimes-sync`).
+func NewInstaller(cfg *Config, log *slog.Logger) (*runtimes.Manager, error) {
+	keys, err := ManagedKeys(cfg)
+	if err != nil {
+		return nil, err
+	}
+	mr := cfg.ManagedRuntimes
+	return runtimes.New(runtimes.Options{Role: runtimes.RoleInstaller, Dir: mr.Dir, Keys: keys, Allow: mr.Allow,
+		RetryAfter: mr.RetryAfter, InUseFile: mr.InUseFile, Log: log})
+}
+
+// SyncRuntimes is one root helper pass: fetch the catalog from the router
+// with the agent's credential, then install, reinstall, prewarm and clean
+// up as root (runtimes.Manager.Sync). The caller serialises passes.
+func SyncRuntimes(ctx context.Context, cfg *Config, log *slog.Logger) error {
+	if !cfg.ManagedRuntimes.On() {
+		return nil
+	}
+	cred, err := cfg.LoadCredential()
+	if err != nil || cred == "" {
+		log.Info("agent not enrolled yet; no runtimes to install")
+		return nil
+	}
+	m, err := NewInstaller(cfg, log)
+	if err != nil {
+		return err
+	}
+	var c api.AgentRuntimeCatalog
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	a := &Agent{cfg: cfg, cred: cred, http: &http.Client{}}
+	err = a.call(cctx, http.MethodGet, "/v1/agent/runtimes", nil, &c)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("runtime catalog: %w", err)
+	}
+	return m.Sync(ctx, c, cfg.ManagedRuntimes.RequestFile)
+}
+
+// Managed returns the managed runtime manager (nil when disabled).
+func (a *Agent) Managed() *runtimes.Manager { return a.managed }
+
+// syncCatalog fetches the router's runtime catalog, loads it, re-runs the
+// preflight, removes unused versions and starts prewarming.
+func (a *Agent) syncCatalog(ctx context.Context) {
+	if a.managed == nil || !a.catalogBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer a.catalogBusy.Store(false)
+	var c api.AgentRuntimeCatalog
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	err := a.call(cctx, http.MethodGet, "/v1/agent/runtimes", nil, &c)
+	cancel()
+	if err != nil {
+		if ctx.Err() == nil {
+			a.log.Warn("fetch runtime catalog", "err", err)
+		}
+		return
+	}
+	a.managed.SetCatalog(c)
+	a.log.Info("runtime catalog loaded", "revision", c.Revision, "packages", len(c.Packages))
+	a.managed.Check()
+	a.managed.RequestSync() // root prewarms and cleans up for the new catalog
+	a.Preflight()
+	a.managed.GC()
+	a.startPrewarm(ctx)
+}
+
+// startPrewarm installs the catalog's prewarm packages in the background.
+func (a *Agent) startPrewarm(ctx context.Context) {
+	if a.managed == nil || !a.prewarmBusy.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer a.prewarmBusy.Store(false)
+		a.managed.RequestPrewarm() // the root helper installs them
+		a.Preflight()
+	}()
 }
 
 func (a *Agent) ownGroups() map[int]bool {
@@ -263,6 +413,15 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 		a.log.Warn("telemetry", "err", err)
 	}
 	now := time.Now()
+	periodic := false
+	if a.managed != nil {
+		a.mu.Lock()
+		periodic = now.Sub(a.lastPreflight) >= a.cfg.PreflightInterval
+		a.mu.Unlock()
+		if periodic {
+			a.managed.Check()
+		}
+	}
 	a.mu.Lock()
 	full := now.Sub(a.health.checkedAt) >= a.cfg.PreflightInterval
 	prevHealth := a.health.reason()
@@ -285,6 +444,9 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	avail, unavail := a.runtimeStatusLocked()
 	preflightID := a.preflightID
+	installable := append([]string(nil), a.installable...)
+	installablePkgs := append([]string(nil), a.installablePkgs...)
+	packages := append([]api.RuntimePackageStatus(nil), a.packages...)
 	a.lastTel, a.haveTel = tel, true
 	state, changed := a.yield.Update(now, tel)
 	_, reason := a.yield.State()
@@ -328,7 +490,11 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 
 	hb := api.Heartbeat{State: state, Reason: reason, Telemetry: tel, Running: nonNilS(running),
 		Runtimes: avail, UnavailableRuntimes: unavail, PreflightID: preflightID,
-		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version, Isolation: &iso}
+		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version, Isolation: &iso,
+		InstallableRuntimes: installable, InstallablePackages: installablePkgs, Packages: packages}
+	if a.managed != nil {
+		hb.CatalogRevision = a.managed.Revision()
+	}
 	var resp api.HeartbeatResponse
 	if err := a.call(ctx, http.MethodPost, "/v1/agent/heartbeat", hb, &resp); err != nil {
 		if ctx.Err() == nil {
@@ -348,6 +514,13 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	a.mu.Unlock()
 	if wasDrain && !resp.Drain {
 		a.signalCapacity()
+	}
+	if a.managed != nil {
+		if resp.CatalogRevision != a.managed.Revision() {
+			go a.syncCatalog(ctx)
+		} else if periodic {
+			a.startPrewarm(ctx) // retries prewarms after a failure backoff
+		}
 	}
 }
 
@@ -513,7 +686,10 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		upd.Outcome, upd.Error, upd.MacFault = api.OutcomeFailed, "Mac unhealthy: "+why, "Mac unhealthy: "+why
 		return upd
 	}
-	prefix, why := a.runtimeFor(as.Runtime)
+	prefix, install, why := a.runtimeFor(as.Runtime)
+	if why == "" {
+		why = a.requiresOK(as.Requires)
+	}
 	if why != "" {
 		// The router placed it before it learned; it is the Mac's fault.
 		upd.Outcome, upd.Error, upd.RuntimeUnavailable = api.OutcomeFailed, why, why
@@ -550,6 +726,43 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	prog := newProgressReporter(a, as.TaskID, as.Attempt)
 	defer prog.close()
 
+	// Managed runtimes: install what the task needs (a Mac fault if that
+	// fails, so the router reassigns the task without counting a failure).
+	var pathDirs []string
+	if install != "" || len(as.Requires) > 0 {
+		logf := func(s string) { fmt.Fprintf(logs, "[agent] %s\n", s) }
+		pkgs := append([]string(nil), as.Requires...)
+		if install != "" {
+			pkgs = append([]string{install}, pkgs...)
+		}
+		seen := map[string]bool{}
+		for _, name := range pkgs {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			inst, release, err := a.managed.Acquire(ctx, name, logf)
+			if err != nil {
+				a.Preflight()
+				if ctx.Err() != nil {
+					return a.stopped(ctx, upd, "")
+				}
+				why := "managed runtime " + name + ": " + err.Error()
+				upd.Outcome, upd.Error, upd.RuntimeUnavailable = api.OutcomeFailed, why, why
+				return upd
+			}
+			defer release()
+			if name == install {
+				prefix = inst.Argv(as.Runtime)
+			}
+			pathDirs = append(pathDirs, inst.PathDirs()...)
+		}
+		a.Preflight()
+	}
+	if len(pathDirs) > 0 {
+		env = prependPath(env, pathDirs)
+	}
+
 	// Inputs.
 	if len(as.Inputs) > 0 {
 		m := transfer.NewMeter(0)
@@ -582,7 +795,7 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
 	cmd.Env = env
-	tap := &progressTap{p: a.cfg.parserFor(as.Runtime), report: prog.percent}
+	tap := &progressTap{p: a.cfg.parserFor(as.Runtime, prefix), report: prog.percent}
 	full := &diskFullTap{}
 	out := io.MultiWriter(logs, tap, full)
 	cmd.Stdout, cmd.Stderr = out, out
@@ -667,6 +880,50 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	}
 	upd.Outcome = api.OutcomeSucceeded
 	return upd
+}
+
+// requiresOK checks that every required managed package can be had here.
+func (a *Agent) requiresOK(req []string) string {
+	if len(req) == 0 {
+		return ""
+	}
+	if a.managed == nil {
+		return "managed runtimes are disabled on this Mac (task requires " + strings.Join(req, ", ") + ")"
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ok := map[string]bool{}
+	for _, n := range a.installablePkgs {
+		ok[n] = true
+	}
+	for _, p := range a.packages {
+		if p.State == api.PackageInstalled {
+			ok[p.Name] = true
+		}
+	}
+	for _, n := range req {
+		if !ok[n] {
+			return "required managed runtime " + n + " is not available on this Mac"
+		}
+	}
+	return ""
+}
+
+// prependPath puts dirs first on the environment's PATH.
+func prependPath(env []string, dirs []string) []string {
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			kv = "PATH=" + strings.Join(append(append([]string(nil), dirs...), v), string(os.PathListSeparator))
+			found = true
+		}
+		out = append(out, kv)
+	}
+	if !found {
+		out = append(out, "PATH="+strings.Join(dirs, string(os.PathListSeparator)))
+	}
+	return out
 }
 
 // stopped maps a cancellation cause to an outcome.

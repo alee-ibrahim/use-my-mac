@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -85,6 +86,13 @@ func helper(args []string) int {
 			b[i], b[j] = b[j], b[i]
 		}
 		return writeOut(args[2], b)
+	case "which": // which <program> <out>: where PATH finds a program
+		p, err := exec.LookPath(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return writeOut(args[2], []byte(p))
 	case "flaky": // flaky <bad-agent> <out>
 		if os.Getenv("AGENT_NAME") == args[1] {
 			fmt.Fprintln(os.Stderr, "simulated crash on", args[1])
@@ -194,6 +202,12 @@ func (e *env) mac(name string, maxTasks int, tel api.Telemetry) *fakeMac {
 // macWith starts an agent with extra runtimes besides "helper".
 func (e *env) macWith(name string, maxTasks int, tel api.Telemetry, extra map[string][]string) *fakeMac {
 	e.t.Helper()
+	return e.macCfg(name, maxTasks, tel, extra, nil)
+}
+
+// macCfg is macWith plus a hook to adjust the agent config before it starts.
+func (e *env) macCfg(name string, maxTasks int, tel api.Telemetry, extra map[string][]string, mut func(*agent.Config)) *fakeMac {
+	e.t.Helper()
 	f := &fakeMac{name: name}
 	f.tel.Store(&tel)
 	exe, err := os.Executable()
@@ -214,6 +228,11 @@ func (e *env) macWith(name string, maxTasks int, tel api.Telemetry, extra map[st
 		Yield: agent.YieldConfig{UserCPUHigh: 50, UserCPULow: 25, SustainSeconds: 0.3, CooldownSeconds: 60,
 			MemoryPressure: "critical", Thermal: "critical", YieldOnBattery: true},
 	}
+	off := false
+	cfg.ManagedRuntimes.Enabled = &off
+	if mut != nil {
+		mut(cfg)
+	}
 	if err := cfg.Normalize(); err != nil {
 		e.t.Fatal(err)
 	}
@@ -226,6 +245,11 @@ func (e *env) macWith(name string, maxTasks int, tel api.Telemetry, extra map[st
 		e.t.Fatal(err)
 	}
 	f.id = res.AgentID
+	if cfg.CredentialFile != "" { // read by the in-process root helper
+		if err := os.WriteFile(cfg.CredentialFile, []byte(res.Credential+"\n"), 0o600); err != nil {
+			e.t.Fatal(err)
+		}
+	}
 	coll := telemetry.Func(func(context.Context) (api.Telemetry, error) {
 		t := *f.tel.Load()
 		t.CollectedAt = time.Now()

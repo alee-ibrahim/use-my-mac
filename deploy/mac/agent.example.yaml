@@ -100,3 +100,20 @@ update:
   # release_url: https://github.com/alee-ibrahim/use-my-mac/releases/download
   # public_key: "RW..."   # only for forks that sign their own releases
   verify_timeout: 2m      # new agent must heartbeat within this, else rollback
+
+# Managed runtimes: signed packages (e.g. ffmpeg) from the router's catalog
+# (`umm runtimes`), installed by the agent itself into `dir` when a task needs
+# one or the package is marked for pre-install. No Homebrew, no sudo. A
+# package is installed only if its signature verifies with one of
+# `public_keys` and its name is in `allow`.
+managed_runtimes:
+  enabled: true
+  # Installed by the root helper (umm-agent runtimes-sync), root-owned and
+  # read-only for the agent; the agent only asks through request_file.
+  # dir: /usr/local/var/umm-runtimes                  # must not be inside /usr/local/var/umm
+  # request_file: /usr/local/var/umm/runtime-requests.json
+  # in_use_file: /usr/local/var/umm/runtime-in-use.json
+  request_timeout: 15m    # a request not installed by then counts as failed
+  allow: ["*"]            # package names this Mac may install
+  # public_keys: ["RW..."] # default: the release key (update.public_key, else built in)
+  retry_after: 10m        # wait after a failed install before trying again
