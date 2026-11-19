@@ -105,6 +105,7 @@ type live struct {
 	faults       map[string]runtimeFault
 	faultsLoaded bool
 	runtimes     []string
+	installable  []string
 	unavail      []api.UnavailableRuntime
 	savedUnavail string
 	savedFaults  string
@@ -141,6 +142,8 @@ type Engine struct {
 	// Change subscribers (SSE streams).
 	subMu sync.Mutex
 	subs  map[chan string]struct{}
+	// catalog is the managed runtime catalog (see catalog.go).
+	catalog api.RuntimeCatalog
 }
 
 // Options for New.
@@ -181,6 +184,7 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 	}
 	e.loadUpdateSettings(ctx)
 	e.loadRetention(ctx)
+	e.loadCatalog(ctx)
 	e.started = e.now()
 	if v, err := e.st.GetSetting(ctx, settingScheduler); err == nil {
 		var s SchedulerSettings
@@ -424,7 +428,7 @@ func (e *Engine) Heartbeat(ctx context.Context, agentID string, hb api.Heartbeat
 		"idle_seconds": hb.Telemetry.UserIdleSeconds,
 	})
 
-	resp := api.HeartbeatResponse{Drain: a.Drain || a.OptedOut}
+	resp := api.HeartbeatResponse{Drain: a.Drain || a.OptedOut, CatalogRevision: e.catalogRevisionLocked()}
 	if !resp.Drain && e.updateDrainingLocked(agentID, now) {
 		resp.Drain, resp.DrainReason = true, "updating"
 	}
@@ -535,7 +539,7 @@ func (e *Engine) resolve(ctx context.Context, t *store.Task, spec api.TaskSpec, 
 	}
 	as := api.Assignment{
 		TaskID: t.ID, JobID: t.JobID, Key: t.Key, Attempt: t.Attempt, Runtime: spec.Runtime, Args: spec.Args,
-		Env: spec.Env, TimeoutSeconds: int(timeout / time.Second), Resources: spec.Resources,
+		Env: spec.Env, TimeoutSeconds: int(timeout / time.Second), Resources: spec.Resources, Requires: spec.Requires,
 		Inputs: []api.AssignedInput{}, Outputs: []api.AssignedOutput{},
 	}
 	var siblings map[string]api.TaskSpec
@@ -950,6 +954,8 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 			if iso := l.hb.Isolation; iso != nil {
 				c.WorkKnown, c.WorkSpace, c.WorkCapacity = true, iso.WorkSpaceBytes, iso.WorkCapacityBytes
 			}
+			c.Installable, c.InstallablePackages = l.installable, l.hb.InstallablePackages
+			c.Packages = e.readyPackagesLocked(l.hb)
 			if len(l.unavail) > 0 {
 				c.Unavailable = map[string]string{}
 				for _, u := range l.unavail {
@@ -999,7 +1005,8 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 			cs[i].Excluded = ex[cs[i].ID] > ms(now)
 		}
 		need := e.diskNeedLocked(ctx, t, spec)
-		best, all := sched.Pick(cs, sched.Need{Runtime: spec.Runtime, Resources: spec.Resources, DiskBytes: need},
+		best, all := sched.Pick(cs, sched.Need{Runtime: spec.Runtime, Requires: spec.Requires, Resources: spec.Resources,
+			DiskBytes: need},
 			e.cfg.Weights, e.cfg.Limits)
 		e.placement[t.ID] = all
 		if best == nil {

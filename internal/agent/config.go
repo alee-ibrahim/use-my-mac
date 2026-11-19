@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -106,6 +107,10 @@ type Config struct {
 
 	// Transfer tunes input downloads and output uploads.
 	Transfer TransferConfig `yaml:"transfer"`
+
+	// ManagedRuntimes lets the agent install signed runtime packages from
+	// the router's catalog by itself when a task needs one.
+	ManagedRuntimes ManagedRuntimesConfig `yaml:"managed_runtimes"`
 }
 
 // WorkVolumeConfig configures the dedicated work volume.
@@ -156,6 +161,46 @@ type TransferConfig struct {
 
 // PartSize in bytes.
 func (t TransferConfig) PartSize() int64 { return int64(t.PartSizeMB) << 20 }
+
+// ManagedRuntimesConfig controls on-demand runtime installation. agent.yaml
+// is root-owned, so the unprivileged agent cannot widen what it trusts.
+type ManagedRuntimesConfig struct {
+	// Enabled: nil/true = install catalog packages on demand; false = only
+	// the static runtimes allowlist is used.
+	Enabled *bool `yaml:"enabled"`
+	// Dir is the install prefix. It is owned by root and read-only to the
+	// agent's user: packages are installed by the root helper
+	// (`umm-agent runtimes-sync`), never by the agent. Default:
+	// umm-runtimes next to the agent's own directory, e.g.
+	// /usr/local/var/umm-runtimes for work_dir /usr/local/var/umm/work. It
+	// must not be inside the work dir's parent, which the agent's user owns.
+	Dir string `yaml:"dir"`
+	// RequestFile is where the agent asks the root helper for installs and
+	// reinstalls. The helper's LaunchDaemon watches it. Default:
+	// runtime-requests.json in the work dir's parent.
+	RequestFile string `yaml:"request_file"`
+	// RequestTimeout: a requested install not done by then counts as
+	// failed (and is retried after retry_after). Default 15m.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// InUseFile lists the versions running tasks use, so the root helper
+	// keeps them. Default: runtime-in-use.json next to request_file.
+	InUseFile string `yaml:"in_use_file"`
+	// OnRequest runs after the agent wrote a request (tests use it to run
+	// the root helper in-process, as launchd's WatchPaths does on a Mac).
+	OnRequest func() `yaml:"-"`
+	// Allow lists the package names this Mac may install. Default ["*"]:
+	// any package signed by a trusted key.
+	Allow []string `yaml:"allow"`
+	// PublicKeys are the minisign public keys packages must be signed with.
+	// Default: the release key (update.public_key, else the key built into
+	// the agent), which already decides what the agent itself runs.
+	PublicKeys []string `yaml:"public_keys"`
+	// RetryAfter: a failed install is retried after this long. Default 10m.
+	RetryAfter time.Duration `yaml:"retry_after"`
+}
+
+// On reports whether managed runtimes are enabled.
+func (m ManagedRuntimesConfig) On() bool { return m.Enabled == nil || *m.Enabled }
 
 // UpdateConfig is read by the root updater. agent.yaml is root-owned, so the
 // unprivileged agent cannot change where updates come from or which key
@@ -215,8 +260,8 @@ func (c *Config) Normalize() error {
 	if c.MaxTasks <= 0 {
 		c.MaxTasks = 1
 	}
-	if len(c.Runtimes) == 0 {
-		return errors.New("at least one runtime must be allowlisted")
+	if len(c.Runtimes) == 0 && !c.ManagedRuntimes.On() {
+		return errors.New("at least one runtime must be allowlisted (or managed_runtimes enabled)")
 	}
 	for name, argv := range c.Runtimes {
 		if !runtimeNameRe.MatchString(name) {
@@ -307,6 +352,35 @@ func (c *Config) Normalize() error {
 	}
 	if c.Update.VerifyTimeout <= 0 {
 		c.Update.VerifyTimeout = 2 * time.Minute
+	}
+	mr := &c.ManagedRuntimes
+	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
+	if mr.Dir == "" {
+		mr.Dir = path.Join(path.Dir(agentDir), "umm-runtimes")
+	}
+	if !filepath.IsAbs(mr.Dir) && !strings.HasPrefix(mr.Dir, "/") {
+		return errors.New("managed_runtimes.dir must be absolute")
+	}
+	inside := func(d, dir string) bool { return d == dir || strings.HasPrefix(d, strings.TrimSuffix(dir, "/")+"/") }
+	if d := path.Clean(filepath.ToSlash(mr.Dir)); inside(d, path.Clean(filepath.ToSlash(c.WorkDir))) ||
+		(agentDir != "/" && inside(d, agentDir)) {
+		return errors.New("managed_runtimes.dir must not be inside " + agentDir +
+			" (the agent's user owns it and could swap root's files)")
+	}
+	if mr.RequestFile == "" {
+		mr.RequestFile = path.Join(agentDir, "runtime-requests.json")
+	}
+	if mr.InUseFile == "" {
+		mr.InUseFile = path.Join(path.Dir(filepath.ToSlash(mr.RequestFile)), "runtime-in-use.json")
+	}
+	if mr.RequestTimeout <= 0 {
+		mr.RequestTimeout = 15 * time.Minute
+	}
+	if len(mr.Allow) == 0 {
+		mr.Allow = []string{"*"}
+	}
+	if mr.RetryAfter <= 0 {
+		mr.RetryAfter = 10 * time.Minute
 	}
 	return c.normalizeIsolation(runtime.GOOS)
 }

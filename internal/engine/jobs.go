@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/auth"
+	"github.com/alee-ibrahim/use-my-mac/internal/runtimes"
 	"github.com/alee-ibrahim/use-my-mac/internal/sched"
 	"github.com/alee-ibrahim/use-my-mac/internal/selfupdate"
 	"github.com/alee-ibrahim/use-my-mac/internal/storage"
@@ -54,6 +55,16 @@ func ValidateJob(spec *api.JobSpec) error {
 		byKey[t.Key] = t
 		if !nameRe.MatchString(t.Runtime) {
 			return vErr("task %s: runtime %q is invalid", t.Key, t.Runtime)
+		}
+		if len(t.Requires) > 16 {
+			return vErr("task %s: at most 16 required runtimes", t.Key)
+		}
+		reqs := map[string]bool{}
+		for _, r := range t.Requires {
+			if !runtimes.PackageNameRe.MatchString(r) || reqs[r] {
+				return vErr("task %s: required runtime %q is invalid or duplicate", t.Key, r)
+			}
+			reqs[r] = true
 		}
 		if t.TimeoutSeconds < 0 || (t.MaxRetries != nil && *t.MaxRetries < 0) {
 			return vErr("task %s: negative timeout/retries", t.Key)
@@ -413,6 +424,10 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		_ = json.Unmarshal([]byte(a.Runtimes), &m.Runtimes)
 		if l := e.live[a.ID]; l != nil && l.faultsLoaded {
 			m.UnavailableRuntimes = l.unavail
+			if m.Online {
+				m.Packages, m.InstallablePackages = l.hb.Packages, l.hb.InstallablePackages
+				m.InstallableRuntimes = l.installable
+			}
 		} else if r := rts[a.ID]; r != nil {
 			_ = json.Unmarshal([]byte(r.Unavailable), &m.UnavailableRuntimes)
 		}

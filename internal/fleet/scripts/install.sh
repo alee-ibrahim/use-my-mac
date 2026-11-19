@@ -122,7 +122,7 @@ if [ ! -s "$ETC/credential" ]; then
 fi
 
 # --- work volume and task network policy (root; not fatal) ----------------
-"$BIN" prepare -config "$ETC/agent.yaml" || echo "warning: host preparation failed; the agent reports why" >&2
+"$BIN" prepare -config "$ETC/agent.yaml" -label "$LABEL" || echo "warning: host preparation failed; the agent reports why" >&2
 
 # --- (re)load -------------------------------------------------------------
 # Re-running against a loaded daemon: bootout can return before launchd has

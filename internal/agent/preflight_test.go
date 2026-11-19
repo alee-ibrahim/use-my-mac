@@ -108,7 +108,7 @@ func TestPreflightAdvertisesOnlyRunnableRuntimes(t *testing.T) {
 		unavail[0].Source != api.RuntimeSourcePreflight {
 		t.Fatalf("avail %v unavail %+v", avail, unavail)
 	}
-	if _, why := a.runtimeFor("later"); !strings.Contains(why, "unavailable") {
+	if _, _, why := a.runtimeFor("later"); !strings.Contains(why, "unavailable") {
 		t.Fatalf("runtimeFor must refuse: %q", why)
 	}
 	id1 := a.preflightID
@@ -230,7 +230,7 @@ func TestExecuteMissingProgramIsMacFault(t *testing.T) {
 	if upd.Outcome != api.OutcomeFailed || !strings.Contains(upd.RuntimeUnavailable, "program not found") {
 		t.Fatalf("got %+v", upd)
 	}
-	if _, why := a.runtimeFor("tool"); why == "" {
+	if _, _, why := a.runtimeFor("tool"); why == "" {
 		t.Fatal("runtime must be unavailable after the exec failure")
 	}
 	upd = a.execute(t.Context(), &run{as: api.Assignment{TaskID: "t2", Attempt: 1, Runtime: "tool"}})

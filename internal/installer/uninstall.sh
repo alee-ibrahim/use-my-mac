@@ -19,7 +19,7 @@ for pass in updater agent; do
     grep -q "<string>$R/usr/local/bin/umm-agent</string>" "$p" || continue
     label="$(basename "$p" .plist)"
     case "$pass:$label" in
-      updater:*.updater|agent:*) ;;
+      updater:*.updater|updater:*.runtimes|agent:*) ;;
       *) continue ;;
     esac
     launchctl bootout "system/$label" 2>/dev/null || true
@@ -28,7 +28,7 @@ for pass in updater agent; do
   done
 done
 rm -f "$R/usr/local/bin/umm-agent" "$R/usr/local/bin/.umm-agent.new" "$R/usr/local/bin/.umm-agent.install"
-rm -rf "$R/usr/local/var/umm-updater"
+rm -rf "$R/usr/local/var/umm-updater" "$R/usr/local/var/umm-runtimes"
 # Work volume (its fstab line names it) and the task network pf anchor.
 FSTAB="$R/etc/fstab"
 if [ -f "$FSTAB" ] && grep -q '# use-my-mac work volume$' "$FSTAB"; then

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -82,11 +83,14 @@ func (e *Engine) applyRuntimesLocked(ctx context.Context, agentID string, l *liv
 	for _, u := range hb.UnavailableRuntimes {
 		reported[u.Name] = true
 	}
+	for _, n := range hb.InstallableRuntimes {
+		reported[n] = true // a managed runtime it can install
+	}
 	for name, f := range l.faults {
 		switch {
 		case !avail[name] && !reported[name]:
 			delete(l.faults, name) // no longer allowlisted
-		case hb.PreflightID != 0 && hb.PreflightID != f.PreflightID && avail[name]:
+		case hb.PreflightID != 0 && hb.PreflightID != f.PreflightID && (avail[name] || slices.Contains(hb.InstallableRuntimes, name)):
 			delete(l.faults, name)
 			e.log.Info("runtime available again after preflight", "agent", agentID, "runtime", name)
 		case hb.PreflightID == 0 && avail[name] && now.Sub(time.UnixMilli(f.At)) > e.cfg.LegacyFaultTTL:
@@ -105,6 +109,12 @@ func (e *Engine) recomputeRuntimesLocked(ctx context.Context, agentID string, l 
 	for _, n := range hb.Runtimes {
 		if _, bad := l.faults[n]; !bad {
 			l.runtimes = append(l.runtimes, n)
+		}
+	}
+	l.installable = []string{}
+	for _, n := range hb.InstallableRuntimes {
+		if _, bad := l.faults[n]; !bad {
+			l.installable = append(l.installable, n)
 		}
 	}
 	l.unavail = nil
@@ -195,5 +205,11 @@ func (e *Engine) runtimeFaultLocked(ctx context.Context, t *store.Task, agentID,
 		return
 	}
 	e.Audit(ctx, event, "", agentID, msg+" (task "+t.Key+" rescheduled)")
-	e.requeueLocked(ctx, t, api.OutcomeUnavailable, msg, e.cfg.YieldExclude, now)
+	exclude := e.cfg.YieldExclude
+	if runtime != "" {
+		// The runtime itself is off that Mac until a newer preflight lists
+		// it again (e.g. once a managed install finished), so no exclusion.
+		exclude = 0
+	}
+	e.requeueLocked(ctx, t, api.OutcomeUnavailable, msg, exclude, now)
 }

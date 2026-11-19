@@ -58,6 +58,9 @@ Commands:
   access rules | users | set group|user VALUE ROLE | user SUBJECT ROLE|none | rm ID | default deny|viewer | name GROUP NAME | log
                                  dashboard roles for single-sign-on users (admin)
   fleet SUBCMD [flags] [HOST...] install/manage the agent across Macs over SSH (admin)
+  runtimes [list] | show NAME | upload FILE KEY | sign MANIFEST -key-file F | keygen -out F
+           | publish MANIFEST [-sig F] [-prewarm] | prewarm NAME [-off] | rm NAME
+                                 managed runtimes Macs install on demand (publish/prewarm/rm: admin)
 `
 
 func main() {
@@ -121,6 +124,9 @@ func run(ctx context.Context, cmd string, args []string) error {
 	// inventory; it does not need the UMM_SERVER/UMM_API_KEY client up front.
 	if cmd == "fleet" {
 		return fleetCmd(ctx, args)
+	}
+	if cmd == "runtimes" {
+		return runtimesCmd(ctx, args)
 	}
 	c, err := newClient()
 	if err != nil {

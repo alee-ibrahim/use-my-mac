@@ -48,6 +48,13 @@ type TaskSpec struct {
 
 	// DependsOn lists task keys that must succeed before this task can run.
 	DependsOn []string `json:"depends_on,omitempty"`
+
+	// Requires names managed runtime packages (from the router's runtime
+	// catalog) that must be installed on the Mac before the task runs; their
+	// bin directories go first on the task's PATH. A Runtime that a catalog
+	// package provides is required implicitly. Macs install missing packages
+	// on demand; tasks still can only run allowlisted or catalog commands.
+	Requires []string `json:"requires,omitempty"`
 }
 
 // Input is a file placed in the task's in/ directory before it starts.
@@ -361,6 +368,12 @@ type Mac struct {
 	// Isolation is how this Mac isolates tasks (nil for older agents or
 	// while the Mac is offline).
 	Isolation *Isolation `json:"isolation,omitempty"`
+	// Packages are the managed runtime packages on the Mac (installed,
+	// installing or failed). InstallableRuntimes / InstallablePackages are
+	// catalog commands and packages the Mac can install on demand.
+	Packages            []RuntimePackageStatus `json:"packages,omitempty"`
+	InstallableRuntimes []string               `json:"installable_runtimes,omitempty"`
+	InstallablePackages []string               `json:"installable_packages,omitempty"`
 }
 
 // Isolation describes how a Mac keeps tasks away from its users' data.
@@ -398,9 +411,10 @@ type UnavailableRuntime struct {
 	Program string `json:"program,omitempty"`
 	// Reason says why, e.g. "program not found: /opt/homebrew/bin/ffmpeg".
 	Reason string `json:"reason"`
-	// Source: "preflight" (the agent's own check) or "exec" (a task could
+	// Source: "preflight" (the agent's own check), "exec" (a task could
 	// not execute it; it stays unavailable until the agent's next
-	// preflight shows it available again).
+	// preflight shows it available again) or "install" (installing the
+	// managed runtime that provides it failed).
 	Source string     `json:"source,omitempty"`
 	Since  *time.Time `json:"since,omitempty"`
 }
@@ -409,6 +423,9 @@ type UnavailableRuntime struct {
 const (
 	RuntimeSourcePreflight = "preflight"
 	RuntimeSourceExec      = "exec"
+	// RuntimeSourceInstall: the managed runtime that provides it failed to
+	// install (the agent retries after a backoff).
+	RuntimeSourceInstall = "install"
 )
 
 // MacPatch is used by admins to drain, opt out or rename a Mac.
@@ -463,6 +480,16 @@ type Heartbeat struct {
 	PreflightID int64 `json:"preflight_id,omitempty"`
 	// Isolation reports the Mac's task isolation (see Isolation).
 	Isolation *Isolation `json:"isolation,omitempty"`
+
+	// Managed runtimes (see RuntimeCatalog). Runtimes above already include
+	// the commands of installed packages. InstallableRuntimes and
+	// InstallablePackages are what the agent may install on demand (the
+	// package is allowed by agent.yaml, signed by a trusted key and built
+	// for this Mac). CatalogRevision is the catalog the agent last loaded.
+	Packages            []RuntimePackageStatus `json:"packages,omitempty"`
+	InstallableRuntimes []string               `json:"installable_runtimes,omitempty"`
+	InstallablePackages []string               `json:"installable_packages,omitempty"`
+	CatalogRevision     int64                  `json:"catalog_revision,omitempty"`
 }
 
 // HeartbeatResponse tells the agent what to stop.
@@ -471,6 +498,9 @@ type HeartbeatResponse struct {
 	Drain  bool     `json:"drain"`
 	// DrainReason says why (e.g. "updating"); empty for an admin drain.
 	DrainReason string `json:"drain_reason,omitempty"`
+	// CatalogRevision is the router's runtime catalog revision; the agent
+	// fetches GET /v1/agent/runtimes when it differs from its own.
+	CatalogRevision int64 `json:"catalog_revision,omitempty"`
 }
 
 // Assignment is a task handed to an agent.
@@ -486,6 +516,8 @@ type Assignment struct {
 	Outputs        []AssignedOutput  `json:"outputs"`
 	TimeoutSeconds int               `json:"timeout_seconds"`
 	Resources      Resources         `json:"resources"`
+	// Requires: managed runtime packages to install before running.
+	Requires []string `json:"requires,omitempty"`
 }
 
 // AssignedInput is a resolved, short-lived download URL.
@@ -552,6 +584,141 @@ type LogChunk struct {
 	Seq     int    `json:"seq"`
 	Data    string `json:"data"`
 }
+
+// ---------------------------------------------------------------------------
+// Managed runtimes
+// ---------------------------------------------------------------------------
+
+// RuntimePackage is a managed runtime: a tool the agent downloads, verifies
+// and installs by itself (into its own prefix: no Homebrew, no sudo, nothing
+// the Mac's user sees) when a task needs it. It is the manifest an admin
+// signs with minisign; agents install only packages whose signature
+// verifies with a key they trust (agent.yaml managed_runtimes.public_keys,
+// else the release key) and that agent.yaml allows.
+type RuntimePackage struct {
+	// Name of the package, e.g. "ffmpeg".
+	Name string `json:"name"`
+	// Version, e.g. "7.1". Publishing a new version replaces the old one.
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	// Commands are the task runtimes the package provides: runtime name ->
+	// argv. argv[0] is a path relative to the package root
+	// (e.g. {"ffmpeg": ["bin/ffmpeg"]}); tasks can only append arguments.
+	Commands map[string][]string `json:"commands"`
+	// Path lists directories (relative to the package root) put first on
+	// PATH for tasks that require the package. Default: the directories of
+	// the commands.
+	Path []string `json:"path,omitempty"`
+	// Artifacts are the downloads, one per platform.
+	Artifacts []RuntimeArtifact `json:"artifacts"`
+}
+
+// RuntimeArtifact is one platform's download of a package.
+type RuntimeArtifact struct {
+	OS   string `json:"os"`   // GOOS, e.g. darwin
+	Arch string `json:"arch"` // GOARCH, e.g. arm64
+	// Exactly one of URL (an http(s) URL the Macs can reach) or Blob (a key
+	// uploaded to the router's storage with PUT /v1/blobs/KEY) is set.
+	URL  string `json:"url,omitempty"`
+	Blob string `json:"blob,omitempty"`
+	// SHA256 of the download (hex). Size in bytes (optional; enforced).
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size,omitempty"`
+	// Format: tar.gz, zip or file (a single executable, saved as File).
+	Format string `json:"format"`
+	File   string `json:"file,omitempty"`
+}
+
+// Runtime package formats.
+const (
+	FormatTarGz = "tar.gz"
+	FormatZip   = "zip"
+	FormatFile  = "file"
+)
+
+// RuntimeCatalogEntry is one package in the router's catalog.
+type RuntimeCatalogEntry struct {
+	Package RuntimePackage `json:"package"`
+	// Manifest is the exact signed JSON text; Signature is its .minisig.
+	Manifest  string `json:"manifest"`
+	Signature string `json:"signature"`
+	KeyID     string `json:"key_id"`
+	// Prewarm: every Mac that can install the package does so in the
+	// background, before any task needs it.
+	Prewarm     bool      `json:"prewarm"`
+	PublishedAt time.Time `json:"published_at"`
+	PublishedBy string    `json:"published_by,omitempty"`
+	// Macs is the fleet's state for this package (GET /v1/runtimes only).
+	Macs []RuntimeMacStatus `json:"macs,omitempty"`
+}
+
+// RuntimeMacStatus is one Mac's state for a catalog package.
+type RuntimeMacStatus struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// State: installed, installing, failed (the Mac's own report),
+	// outdated (another version is installed) or installable.
+	State   string `json:"state"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// RuntimeCatalog is what GET /v1/runtimes returns.
+type RuntimeCatalog struct {
+	Revision int64                 `json:"revision"`
+	Packages []RuntimeCatalogEntry `json:"packages"`
+}
+
+// RuntimePublish adds or replaces a package (PUT /v1/runtimes).
+type RuntimePublish struct {
+	Manifest  string `json:"manifest"`
+	Signature string `json:"signature"`
+	Prewarm   bool   `json:"prewarm,omitempty"`
+}
+
+// RuntimePrewarm turns fleet-wide pre-installation of a package on or off.
+type RuntimePrewarm struct {
+	Prewarm bool `json:"prewarm"`
+}
+
+// AgentRuntimeCatalog is what GET /v1/agent/runtimes returns to agents.
+type AgentRuntimeCatalog struct {
+	Revision int64                 `json:"revision"`
+	Packages []AgentRuntimePackage `json:"packages"`
+}
+
+// AgentRuntimePackage is a signed package plus resolved download URLs.
+type AgentRuntimePackage struct {
+	Manifest  string `json:"manifest"`
+	Signature string `json:"signature"`
+	Prewarm   bool   `json:"prewarm"`
+	// URLs[i] is where to download Artifacts[i] (a blob artifact resolved
+	// to a short-lived signed URL). Only the signed sha256 decides what the
+	// agent accepts.
+	URLs []string `json:"urls"`
+}
+
+// RuntimePackageStatus is a managed package's state on one Mac.
+type RuntimePackageStatus struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// State: installed, installing or failed.
+	State       string     `json:"state"`
+	Error       string     `json:"error,omitempty"`
+	SizeBytes   int64      `json:"size_bytes,omitempty"`
+	InstalledAt *time.Time `json:"installed_at,omitempty"`
+	// RetryAt: after a failed install, the agent tries again from then.
+	RetryAt *time.Time `json:"retry_at,omitempty"`
+}
+
+// Package states.
+const (
+	PackageInstalled   = "installed"
+	PackageInstalling  = "installing"
+	PackageFailed      = "failed"
+	PackageInstallable = "installable"
+	PackageOutdated    = "outdated"
+)
 
 // ---------------------------------------------------------------------------
 // Agent self-update

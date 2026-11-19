@@ -80,11 +80,22 @@ func TestConfigValidation(t *testing.T) {
 	if c.Server != "https://r.example" || c.Priority != "adaptive" || c.PriorityIdle != 5*time.Minute || c.MaxTasks != 1 || c.Yield.UserCPUHigh != 50 {
 		t.Fatalf("defaults: %+v", c)
 	}
+	if mr := c.ManagedRuntimes; !mr.On() || filepath.ToSlash(mr.Dir) != "/umm-runtimes" || strings.Join(mr.Allow, ",") != "*" ||
+		mr.RetryAfter != 10*time.Minute || filepath.ToSlash(mr.RequestFile) != "/tmp/runtime-requests.json" ||
+		filepath.ToSlash(mr.InUseFile) != "/tmp/runtime-in-use.json" || mr.RequestTimeout != 15*time.Minute {
+		t.Fatalf("managed runtime defaults: %+v", mr)
+	}
+	// Managed runtimes alone (no static allowlist) are a valid setup.
+	if _, err := LoadConfig(write("server: s\nwork_dir: /w\n")); err != nil {
+		t.Fatalf("managed-only config: %v", err)
+	}
 	bad := []string{
 		"work_dir: /w\nruntimes: {x: [/bin/x]}\n",
 		"server: s\nruntimes: {x: [/bin/x]}\n",
-		"server: s\nwork_dir: /w\n",
+		"server: s\nwork_dir: /w\nmanaged_runtimes: {enabled: false}\n",
 		"server: s\nwork_dir: /w\nruntimes: {x: [relative/bin]}\n",
+		"server: s\nwork_dir: /w\nmanaged_runtimes: {dir: /w}\n",
+		"server: s\nwork_dir: /var/umm/work\nmanaged_runtimes: {dir: /var/umm/runtimes}\n",
 		"server: s\nwork_dir: /w\nruntimes: {\"a b\": [/bin/x]}\n",
 		"server: s\nwork_dir: /w\npriority: turbo\nruntimes: {x: [/bin/x]}\n",
 	}

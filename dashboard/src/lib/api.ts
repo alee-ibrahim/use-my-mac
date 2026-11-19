@@ -254,6 +254,31 @@ export function ssoURL(ret = "/") {
   return `/auth/login?return=${encodeURIComponent(ret)}`
 }
 
+export type RuntimeMacStatus = {
+  id: string
+  name: string
+  state: string
+  version?: string
+  error?: string
+}
+
+export type RuntimeCatalogEntry = {
+  package: {
+    name: string
+    version: string
+    description?: string
+    commands: Record<string, string[]>
+    artifacts: { os: string; arch: string; format: string; size?: number }[]
+  }
+  key_id: string
+  prewarm: boolean
+  published_at: string
+  published_by?: string
+  macs?: RuntimeMacStatus[]
+}
+
+export type RuntimeCatalog = { revision: number; packages: RuntimeCatalogEntry[] }
+
 export const api = {
   authConfig: () => request<AuthConfig>("GET", "/auth/config"),
   loginWithKey: (key: string) => request<Me>("POST", "/auth/apikey", { key }),
@@ -284,6 +309,10 @@ export const api = {
   createKey: (name: string, role: string) =>
     request<APIKey>("POST", "/v1/api-keys", { name, role }),
   revokeKey: (id: string) => request<void>("DELETE", `/v1/api-keys/${id}`),
+  runtimes: () => request<RuntimeCatalog>("GET", "/v1/runtimes"),
+  setRuntimePrewarm: (name: string, prewarm: boolean) =>
+    request<void>("PUT", `/v1/runtimes/${encodeURIComponent(name)}/prewarm`, { prewarm }),
+  deleteRuntime: (name: string) => request<void>("DELETE", `/v1/runtimes/${encodeURIComponent(name)}`),
   settings: () => request<Settings>("GET", "/v1/settings"),
   saveSettings: (s: Settings) => request<Settings>("PUT", "/v1/settings", s),
   updates: () => request<UpdatesInfo>("GET", "/v1/updates"),

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/alee-ibrahim/use-my-mac/internal/runtimes"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
 
@@ -58,27 +59,73 @@ type execFault struct {
 	stamp  string
 }
 
-// preflightLocked re-checks every allowlisted runtime. Exec faults survive
-// a passing check until the program changes or ExecFaultRetry passes.
-// Caller holds a.mu.
+// preflightLocked re-checks every allowlisted runtime and every command of
+// the managed runtime catalog. A static runtime whose program passes wins;
+// otherwise a catalog package providing the same command is used (ready
+// when installed, installable when it can be installed on demand). Exec
+// faults survive a passing check until the program changes or
+// ExecFaultRetry passes. Caller holds a.mu.
 func (a *Agent) preflightLocked(now time.Time) {
 	avail := []string{}
+	installable := []string{}
 	unavail := []api.UnavailableRuntime{}
-	names := make([]string, 0, len(a.runtimes))
+	var ms runtimes.Status
+	if a.managed != nil {
+		ms = a.managed.Status()
+	}
+	seen := map[string]bool{}
+	var names []string
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
 	for n := range a.runtimes {
-		names = append(names, n)
+		add(n)
+	}
+	for n := range ms.Ready {
+		add(n)
+	}
+	for _, n := range ms.InstallableCommands {
+		add(n)
+	}
+	for n := range ms.Unavailable {
+		add(n)
 	}
 	sort.Strings(names)
+	isInstallable := map[string]bool{}
+	for _, n := range ms.InstallableCommands {
+		isInstallable[n] = true
+	}
+	ready := map[string][]string{}
 	for _, n := range names {
-		prog := a.runtimes[n][0]
-		if why := CheckProgram(prog); why != "" {
+		var prog, why, source string
+		if argv, ok := a.runtimes[n]; ok {
+			prog = argv[0]
+			why, source = CheckProgram(prog), api.RuntimeSourcePreflight
+		}
+		if (prog == "" || why != "") && a.managed != nil {
+			switch argv, ok := ms.Ready[n]; {
+			case ok:
+				prog = argv[0]
+				why, source = CheckProgram(prog), api.RuntimeSourcePreflight
+			case isInstallable[n]:
+				delete(a.faults, n)
+				installable = append(installable, n)
+				continue
+			case ms.Unavailable[n] != "":
+				prog, why, source = "", ms.Unavailable[n], api.RuntimeSourceInstall
+			}
+		}
+		if why != "" {
 			delete(a.faults, n) // the preflight reason supersedes it
 			since := now
-			if prev, ok := a.unavail[n]; ok && prev.Since != nil {
+			if prev, ok := a.unavail[n]; ok && prev.Since != nil && prev.Reason == why {
 				since = *prev.Since
 			}
 			unavail = append(unavail, api.UnavailableRuntime{Name: n, Program: prog, Reason: why,
-				Source: api.RuntimeSourcePreflight, Since: &since})
+				Source: source, Since: &since})
 			continue
 		}
 		if f, ok := a.faults[n]; ok {
@@ -89,6 +136,9 @@ func (a *Agent) preflightLocked(now time.Time) {
 				continue
 			}
 			delete(a.faults, n)
+		}
+		if argv, ok := ms.Ready[n]; ok && argv[0] == prog {
+			ready[n] = argv
 		}
 		avail = append(avail, n)
 	}
@@ -102,13 +152,12 @@ func (a *Agent) preflightLocked(now time.Time) {
 		}
 	}
 	for n := range prev {
-		if _, still := a.unavail[n]; !still {
-			if _, allowed := a.runtimes[n]; allowed {
-				a.log.Info("runtime available again", "runtime", n)
-			}
+		if _, still := a.unavail[n]; !still && seen[n] {
+			a.log.Info("runtime available again", "runtime", n)
 		}
 	}
-	a.avail = avail
+	a.avail, a.installable, a.managedReady = avail, installable, ready
+	a.packages, a.installablePkgs = ms.Packages, ms.InstallablePackages
 	a.lastPreflight = now
 	id := now.UnixNano()
 	if id <= a.preflightID {
@@ -149,6 +198,7 @@ func (a *Agent) RuntimeStatus() (avail []string, unavail []api.UnavailableRuntim
 
 func (a *Agent) runtimeStatusLocked() ([]string, []api.UnavailableRuntime) {
 	avail := append([]string{}, a.avail...)
+	sort.Strings(avail)
 	var unavail []api.UnavailableRuntime
 	for _, u := range a.unavail {
 		unavail = append(unavail, u)
@@ -163,7 +213,10 @@ func (a *Agent) runtimeStatusLocked() ([]string, []api.UnavailableRuntime) {
 func (a *Agent) markExecFault(name, reason string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	argv, ok := a.runtimes[name]
+	argv, ok := a.managedReady[name]
+	if !ok {
+		argv, ok = a.runtimes[name]
+	}
 	if !ok {
 		return
 	}
@@ -177,19 +230,35 @@ func (a *Agent) markExecFault(name, reason string) {
 	a.preflightLocked(now)
 }
 
-// runtimeFor returns the argv prefix of an available runtime, or why it
-// cannot run here.
-func (a *Agent) runtimeFor(name string) ([]string, string) {
+// runtimeFor returns the argv prefix of an available runtime, or the managed
+// package to install for it, or why it cannot run here.
+func (a *Agent) runtimeFor(name string) (argv []string, install string, why string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	argv, ok := a.runtimes[name]
-	if !ok {
-		return nil, "runtime " + name + " is not allowlisted on this Mac"
-	}
 	if u, bad := a.unavail[name]; bad {
-		return nil, "runtime " + name + " unavailable on this Mac: " + u.Reason
+		return nil, "", "runtime " + name + " unavailable on this Mac: " + u.Reason
 	}
-	return argv, ""
+	if argv, ok := a.managedReady[name]; ok {
+		// Still Acquire it before running: that verifies the files and
+		// pins the version against the root helper's clean-up.
+		pkg := ""
+		if a.managed != nil {
+			pkg = a.managed.Provides(name)
+		}
+		return argv, pkg, ""
+	}
+	if argv, ok := a.runtimes[name]; ok && CheckProgram(argv[0]) == "" {
+		return argv, "", ""
+	}
+	if a.managed != nil {
+		if pkg := a.managed.Provides(name); pkg != "" {
+			return nil, pkg, ""
+		}
+	}
+	if _, ok := a.runtimes[name]; ok {
+		return nil, "", "runtime " + name + " unavailable on this Mac: " + CheckProgram(a.runtimes[name][0])
+	}
+	return nil, "", "runtime " + name + " is not allowlisted on this Mac"
 }
 
 // execFailureReason classifies how a task's process ended. It returns a

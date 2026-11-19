@@ -86,9 +86,12 @@ func TestParserFor(t *testing.T) {
 		"wrap":   {"/usr/bin/python3"},
 	}, ProgressParsers: map[string]string{"enc": ParserNone, "wrap": ParserFFmpeg}}
 	for rt, want := range map[string]bool{"ffmpeg": true, "enc": false, "sh": false, "wrap": true} {
-		if got := c.parserFor(rt).ffmpeg; got != want {
+		if got := c.parserFor(rt, c.Runtimes[rt]).ffmpeg; got != want {
 			t.Errorf("%s: ffmpeg=%v want %v", rt, got, want)
 		}
+	}
+	if !c.parserFor("ff", []string{"/w/runtimes/ffmpeg/7.1/bin/ffmpeg"}).ffmpeg {
+		t.Error("managed ffmpeg: auto must pick the ffmpeg parser")
 	}
 	bad := &Config{Server: "http://x", WorkDir: "/w", Runtimes: map[string][]string{"sh": {"/bin/sh"}},
 		ProgressParsers: map[string]string{"sh": "magic"}}
