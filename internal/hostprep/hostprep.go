@@ -139,7 +139,8 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 // Host abstracts the system for tests.
 type Host struct {
 	Run Runner
-	// Fstab is /etc/fstab.
+	// Fstab is /etc/fstab. It is not written any more; only the line and
+	// temporary file older versions left are cleaned up (see cleanupFstab).
 	Fstab string
 	// Lookup resolves a host name to addresses.
 	Lookup func(ctx context.Context, host string) ([]string, error)
@@ -159,6 +160,7 @@ func Prepare(ctx context.Context, cfg Config, h Host) Status {
 	}
 	prev, _ := ReadStatus(cfg.StatusFile)
 	st := Status{UpdatedAt: time.Now().UTC()}
+	cleanupFstab(h.Fstab, h.Log)
 	st.WorkVolume = ensureVolume(ctx, cfg, h, prev.WorkVolume)
 	st.Network = applyNetwork(ctx, cfg, h)
 	if err := WriteStatus(cfg.StatusFile, st); err != nil {
@@ -247,8 +249,8 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 			return fallback("volume %s (%s) recorded earlier is missing", v.Name, prev.UUID)
 		}
 		h.Log.Info("creating work volume", "container", container, "name", v.Name, "quota", quota)
-		// -nomount: it must not appear on the desktop before the fstab
-		// entry that hides it exists.
+		// -nomount: diskutil would otherwise mount it under /Volumes, where
+		// the Mac's user would see it. It only affects this one mount.
 		if _, err := h.Run(ctx, "/usr/sbin/diskutil", "apfs", "addVolume", container, "APFS", v.Name,
 			"-quota", quota, "-nomount"); err != nil {
 			return fallback("create volume: %v", err)
@@ -256,9 +258,6 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 		if vol, err = findVolume(ctx, h, container, v.Name); err != nil || vol.dev == "" {
 			return fallback("volume %s not found after creating it: %v", v.Name, err)
 		}
-	}
-	if err := ensureFstab(h.Fstab, vol.uuid, cfg.WorkDir); err != nil {
-		return fallback("fstab: %v", err)
 	}
 	if prev.Quota != "" && prev.UUID == vol.uuid {
 		quota = prev.Quota // set when the volume was created
@@ -270,6 +269,10 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 		return fallback("volume info: %v", err)
 	}
 	if mp != cfg.WorkDir {
+		// Something else mounted at the work dir: leave it alone.
+		if h.Mounted != nil && h.Mounted(cfg.WorkDir) {
+			return fallback("another file system is mounted at %s", cfg.WorkDir)
+		}
 		// Mounting over a work dir that holds a running task's files would
 		// hide them from it. The agent removes each task dir when the task
 		// ends, so an empty dir means no task is running.
@@ -281,6 +284,8 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 			return fallback("work dir %s is in use; the volume is mounted on a later run", cfg.WorkDir)
 		}
 		if mp != "" {
+			// Typically auto-mounted under /Volumes at boot: move it.
+			h.Log.Info("moving work volume to the work dir", "from", mp, "to", cfg.WorkDir)
 			if _, err := h.Run(ctx, "/usr/sbin/diskutil", "unmount", vol.dev); err != nil {
 				return fallback("unmount from %s: %v", mp, err)
 			}
@@ -288,8 +293,14 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 		if err := os.MkdirAll(cfg.WorkDir, 0o700); err != nil {
 			return fallback("work dir: %v", err)
 		}
-		if _, err := h.Run(ctx, "/sbin/mount", "-t", "apfs", "-o", "nobrowse", "/dev/"+vol.dev, cfg.WorkDir); err != nil {
+		// Through Disk Arbitration (so diskutil and Finder know the mount),
+		// with nobrowse: hidden from Finder and the desktop.
+		if _, err := h.Run(ctx, "/usr/sbin/diskutil", "mount", "nobrowse", "-mountPoint", cfg.WorkDir,
+			vol.dev); err != nil {
 			return fallback("mount: %v", err)
+		}
+		if mp, err = mountPoint(ctx, h, vol.dev); err != nil || mp != cfg.WorkDir {
+			return fallback("volume is at %q, not %s, after mounting: %v", mp, cfg.WorkDir, err)
 		}
 		h.Log.Info("work volume mounted", "device", vol.dev, "mount", cfg.WorkDir)
 	}
@@ -305,6 +316,12 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 	}
 	if err := os.Chmod(cfg.WorkDir, 0o700); err != nil {
 		return fallback("chmod work volume: %v", err)
+	}
+	// The hidden flag lives on the volume's root directory, so it also
+	// applies when macOS mounts the volume itself (under /Volumes at boot,
+	// before the updater moves it). Best effort.
+	if _, err := h.Run(ctx, "/usr/bin/chflags", "hidden", cfg.WorkDir); err != nil {
+		h.Log.Warn("hide work volume root", "err", err)
 	}
 	// Keep Spotlight and Time Machine off it (best effort; nothing shows).
 	_, _ = h.Run(ctx, "/usr/bin/mdutil", "-i", "off", cfg.WorkDir)
@@ -409,38 +426,50 @@ func mountPoint(ctx context.Context, h Host, dev string) (string, error) {
 	return str(v, "MountPoint"), nil
 }
 
-const fstabMarker = "# use-my-mac work volume"
+// FstabMarker ends the /etc/fstab line versions up to v0.1.8 tried to add.
+const FstabMarker = "# use-my-mac work volume"
 
-// ensureFstab adds (or replaces) the line that mounts the volume at the
-// work dir, hidden from Finder (nobrowse), at every boot.
-func ensureFstab(path, uuid, mount string) error {
-	if strings.ContainsAny(mount, " \t\n#") {
-		return fmt.Errorf("work dir %q cannot be used in fstab", mount)
-	}
-	want := fmt.Sprintf("UUID=%s %s apfs rw,nobrowse %s", uuid, mount, fstabMarker)
-	b, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	var keep []string
-	for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
-		if strings.HasSuffix(l, fstabMarker) || strings.HasPrefix(l, "UUID="+uuid+" ") {
-			continue // ours (re-added below)
-		}
-		if l != "" || len(keep) > 0 {
-			keep = append(keep, l)
-		}
-	}
-	keep = append(keep, want)
-	content := strings.Join(keep, "\n") + "\n"
-	if content == string(b) {
-		return nil
+// cleanupFstab undoes what versions up to v0.1.8 did to /etc/fstab: it
+// removes their leftover temporary file and, if they managed to add one,
+// their line. Since macOS 26.6 the sandbox protects /etc/fstab (writing it
+// needs Full Disk Access), so the work volume no longer uses it. Nothing
+// is touched unless our line is there, and the file is only replaced
+// atomically (temporary file and rename): if that is not permitted the
+// file stays as it is.
+func cleanupFstab(path string, log *slog.Logger) {
+	if path == "" {
+		return
 	}
 	tmp := path + ".umm.tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return err
+	if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+		log.Debug("remove leftover fstab temp file", "file", tmp, "err", err)
 	}
-	return os.Rename(tmp, path)
+	b, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(b), FstabMarker) {
+		return
+	}
+	var keep []string
+	for _, l := range strings.SplitAfter(string(b), "\n") {
+		if strings.HasSuffix(strings.TrimRight(l, "\n"), FstabMarker) {
+			continue
+		}
+		keep = append(keep, l)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(tmp, []byte(strings.Join(keep, "")), fi.Mode().Perm()); err != nil {
+		log.Debug("old fstab line left in place", "err", err)
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Debug("old fstab line left in place", "err", err)
+		_ = os.Remove(tmp)
+		return
+	}
+	log.Info("removed the old work volume line from fstab", "file", path)
 }
 
 // ---------------------------------------------------------------------------
