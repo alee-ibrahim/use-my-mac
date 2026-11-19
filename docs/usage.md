@@ -98,10 +98,12 @@ umm macs                            # quick check
 
 | Command | Does |
 | --- | --- |
-| `umm submit FILE [-wait]` | submit a job spec (YAML or JSON); `file:` inputs are uploaded first |
+| `umm submit FILE [-wait] [-part-size 8MiB] [-concurrency 4]` | submit a job spec (YAML or JSON); `file:` inputs are uploaded first (in parallel parts, with progress) |
+| `umm upload FILE [KEY] [-part-size 8MiB] [-concurrency 4] [-resume ID]` | upload an input blob in parallel parts; prints the key to use as `blob:` |
+| `umm watch JOB` | follow a job live: state, percent and phase until it finishes |
 | `umm status [JOB]` | recent jobs, or one job and its tasks |
 | `umm logs TASK [-attempt N]` | task logs (all attempts by default) |
-| `umm download TASK OUTPUT [-o FILE]` | download an output |
+| `umm download TASK OUTPUT [-o FILE] [-concurrency 4]` | download an output (parallel byte ranges, with progress) |
 | `umm cancel JOB` | cancel a job |
 | `umm macs` | Macs with live telemetry |
 | `umm drain MAC [-off]` | stop sending new work to a Mac (admin) |
@@ -128,7 +130,7 @@ tasks:
 ```
 
 ```sh
-umm submit job.yaml -wait      # prints the job ID, then progress
+umm submit job.yaml -wait      # prints the job ID, then live progress
 umm status JOB_ID              # task IDs and states
 umm logs TASK_ID
 umm download TASK_ID enc.mp4
@@ -150,6 +152,24 @@ umm download TASK_ID enc.mp4
 | `depends_on` | task keys that must succeed first |
 
 A task's standard output and error are its logs. Small results can simply be printed.
+
+### Progress
+
+While a task runs, its Mac reports what it is doing about once a second: `downloading` its inputs, `running`,
+or `uploading` its outputs, with bytes and speed for transfers. The task itself can say how far it is, in
+any of these ways:
+
+- print a line `UMM_PROGRESS=42` (0 to 100) on standard output or error;
+- write a number from 0 to 100 to the file named by `$UMM_PROGRESS_FILE` (rewrite it as you go);
+- for `ffmpeg` runtimes nothing is needed: the agent reads ffmpeg's own `Duration:` and `time=` output (or
+  `-progress pipe:1`). Agents choose this per runtime with `progress_parsers` in `agent.yaml` (`auto`,
+  `ffmpeg` or `none`).
+
+A task that says nothing shows `running` without a percentage. Each task has a `phase` and a `percent`
+(0-100 over the whole attempt: downloading is 0-5, running 5-95, uploading 95-100) and, while it runs,
+`progress` with the latest report. A job's `percent` counts finished tasks as 100 and running tasks by their
+own percent; it reaches 100 only when the job has finished. `umm submit -wait`, `umm watch`, the SDK's
+`WaitJob`/`WatchJob` and the dashboard follow this live.
 
 ### With the REST API
 
@@ -187,9 +207,10 @@ import (
 
 c := client.New(os.Getenv("UMM_SERVER"), os.Getenv("UMM_API_KEY"))
 
-f, _ := os.Open("part-1.mov")
-st, _ := f.Stat()
-_ = c.UploadBlob(ctx, "myapp/part-1.mov", f, st.Size())
+// Big files go up in parallel 8 MiB parts (4 at a time), each retried on its own.
+err := c.UploadFile(ctx, "myapp/part-1.mov", "part-1.mov", &client.TransferOptions{
+    OnProgress: func(p client.Progress) { log.Println(p) }, // "45% 120.0/266.0 MiB 38.2 MiB/s"
+})
 
 job, err := c.SubmitJob(ctx, api.JobSpec{Name: "encode", Tasks: []api.TaskSpec{{
     Key: "part-1", Runtime: "ffmpeg",
@@ -199,10 +220,15 @@ job, err := c.SubmitJob(ctx, api.JobSpec{Name: "encode", Tasks: []api.TaskSpec{{
     Resources: api.Resources{RAMMB: 2048, GPU: true},
 }}})
 
-final, err := c.WaitJob(ctx, job.ID, 3*time.Second, nil)
-out, _ := os.Create("enc.mp4")
-_, err = c.DownloadOutput(ctx, final.Tasks[0].ID, "enc.mp4", out)
+// Follows the job's live stream (polls every 3 s where streaming is not possible).
+final, err := c.WaitJob(ctx, job.ID, 3*time.Second, func(j *api.Job) { log.Printf("%s %.0f%%", j.Phase, j.Percent) })
+_, err = c.DownloadOutputFile(ctx, final.Tasks[0].ID, "enc.mp4", "enc.mp4", nil)
 ```
+
+`TransferOptions` sets `PartSize` (default 8 MiB, at least 5 MiB), `Concurrency` (default 4), `Retries` per
+part, `Direct` (send parts straight to S3 with presigned URLs instead of through the router) and
+`OnUpload`, which hands you the upload ID so that `ResumeUpload` can finish an interrupted upload later.
+`UploadBlob` and `DownloadOutput` still stream a file in one request.
 
 The client also has `Job`, `Jobs`, `CancelJob`, `Task`, `Logs`, `Macs` and the admin calls (`PatchMac`,
 `CreateEnrolmentToken`, `CreateAPIKey`, `APIKeys`, `RevokeAPIKey`). `examples/video-transcode/` in the
@@ -285,6 +311,25 @@ Inputs and outputs never go through the agent's connection to the router. Agents
 
 Blob keys are relative paths: no leading `/`, no `..`. Outputs are overwritten per key, so re-runs are safe.
 
+### Large files
+
+Files bigger than one part (8 MiB by default) move in parallel parts, both ways and with both backends:
+
+- **Inputs** (`umm upload`, `umm submit`, the SDK's `UploadFile`): `POST /v1/uploads` with `{key, size,
+  part_size}` returns a URL per part. `PUT` each part (any order, several at once), then `POST
+  /v1/uploads/{id}/complete`. A failed part is simply sent again. `GET /v1/uploads/{id}` lists the parts
+  already stored and fresh URLs for the rest, which is how an interrupted upload resumes (`umm upload FILE
+  -resume ID`). Part URLs starting with `/` are on the router and need your `Authorization` header; with
+  `"direct": true` and the `s3` backend they are presigned S3 URLs that must be sent without it.
+- **Outputs**: agents upload outputs that go to router storage in parallel parts, to presigned (S3) or
+  signed (local) URLs. Outputs with your own `url` get a single `PUT`.
+- **Downloads**: agents and `umm download` fetch in parallel byte ranges when the server supports `Range`
+  (the router and S3 do), and stream otherwise.
+
+Agents set the part size and parallelism in `agent.yaml` (`transfer: {part_size_mb: 8, concurrency: 4}`).
+Uploads that are never completed are aborted, and their parts deleted, after 24 hours. A part can be up to
+5 GiB and an upload up to 10,000 parts; the router's `max_upload_mb` still limits the whole file.
+
 ## The dashboard
 
 The router serves the dashboard at its root URL. It works on a phone: the sidebar becomes a menu, tables
@@ -334,6 +379,13 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `GET /v1/tasks/{id}/logs?attempt=N` | any | logs as plain text (all attempts when `attempt` is 0 or missing) |
 | `GET /v1/tasks/{id}/outputs/{name}` | any | download an output |
 | `PUT /v1/blobs/{key}` | app, admin | upload an input (raw body) |
+| `POST /v1/uploads` | app, admin | start a multipart upload `{key, size, part_size?, direct?}` → `{id, parts, part_size, urls}` (`201`) |
+| `GET /v1/uploads/{id}` | app, admin | parts already stored (`done`) and fresh URLs for the rest |
+| `PUT /v1/uploads/{id}/parts/{n}` | app, admin | store part `n` (raw body, exactly `part_size` bytes except the last) |
+| `POST /v1/uploads/{id}/complete` | app, admin | assemble the blob once every part is stored → `{blob, size, parts}` |
+| `DELETE /v1/uploads/{id}` | app, admin | abort an upload and drop its parts |
+| `GET /v1/jobs/{id}/stream` | any | server-sent events: `job` (the job with its tasks) on every change, then `end`, or `removed` |
+| `GET /v1/jobs/stream?state=&limit=` | any | server-sent events: `jobs` (the list), then `job` and `removed` as jobs change |
 | `GET /v1/blobs/{key}` | app, admin | download a blob |
 | `GET /v1/macs` | any | Macs with state and live telemetry |
 | `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}` or `{"name": "Lab Mac 2"}` |
@@ -531,6 +583,8 @@ the Macs check the signature themselves.
 | --- | --- | --- |
 | Task stays `pending` | the task's **Placement** tab in the dashboard: every Mac and why it was skipped | no Mac has the runtime, not enough RAM or disk, labels don't match, all Macs busy, yielding, drained or offline |
 | Task keeps moving between Macs | attempts with outcome `yielded` | the Macs' users are busy. Normal; it runs when a Mac is quiet. Long tasks prefer idle Macs if you set `expected_seconds` |
+| Task shows `running` with no percentage | the task's output | the task reports nothing: print `UMM_PROGRESS=N` or write `$UMM_PROGRESS_FILE` (see [Progress](#progress)) |
+| `umm watch` or the dashboard updates only every few seconds | proxies between you and the router | the proxy buffers server-sent events, so clients fall back to polling. Turn off buffering for the `/v1/jobs/` streams |
 | Task `failed` | `umm logs TASK` (all attempts) | the program exited non-zero, timed out, or did not write a declared output to `out/NAME` |
 | `401 Unauthorized` | the key | missing, mistyped or revoked key; the header must be `Authorization: Bearer umm_key_...` |
 | Signed in but sent back to sign-in, or "not allowed" | **Settings > Access > Users** (an admin) | no rule gives you a role and the default is `deny`, or a rule was just removed; roles apply on the next request |

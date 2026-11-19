@@ -71,6 +71,20 @@ func helper(args []string) int {
 			return 127
 		}
 		return writeOut(args[2], []byte("ok from "+os.Getenv("AGENT_NAME")))
+	case "big": // big <in> <out>: reports progress, writes in reversed
+		b, err := os.ReadFile(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Println("UMM_PROGRESS=40")
+		time.Sleep(1500 * time.Millisecond)
+		os.WriteFile(os.Getenv("UMM_PROGRESS_FILE"), []byte("80"), 0o600)
+		time.Sleep(2500 * time.Millisecond) // the agent reads the file every 0.5 s and reports every 1 s
+		for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+			b[i], b[j] = b[j], b[i]
+		}
+		return writeOut(args[2], b)
 	case "flaky": // flaky <bad-agent> <out>
 		if os.Getenv("AGENT_NAME") == args[1] {
 			fmt.Fprintln(os.Stderr, "simulated crash on", args[1])
@@ -196,6 +210,7 @@ func (e *env) macWith(name string, maxTasks int, tel api.Telemetry, extra map[st
 		TaskEnv:           map[string]string{"GO_HELPER_MODE": "1", "AGENT_NAME": name},
 		HeartbeatInterval: 100 * time.Millisecond, PollWait: time.Second, StopGrace: 2 * time.Second,
 		Priority: "none",
+		Transfer: agent.TransferConfig{PartSizeMB: 5},
 		Yield: agent.YieldConfig{UserCPUHigh: 50, UserCPULow: 25, SustainSeconds: 0.3, CooldownSeconds: 60,
 			MemoryPressure: "critical", Thermal: "critical", YieldOnBattery: true},
 	}

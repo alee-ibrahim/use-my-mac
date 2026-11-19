@@ -124,6 +124,11 @@ export type Task = {
   finished_at?: string
   attempts?: Attempt[]
   outputs_done?: string[]
+  // Live progress: phase is queued, starting, downloading, running,
+  // uploading or done; percent is the task's overall 0-100.
+  phase?: string
+  percent?: number
+  progress?: TaskProgress
   placement?: { id: string; ok: boolean; reason?: string; score: number; parts?: Record<string, number> }[]
 }
 
@@ -135,7 +140,23 @@ export type Job = {
   created_at: string
   finished_at?: string
   counts: Record<string, number>
+  // Overall progress (0-100) including running tasks' live progress.
+  percent?: number
+  phase?: string
   tasks?: Task[]
+}
+
+// Latest live report from the Mac running a task. percent is within the
+// phase, -1 when unknown.
+export type TaskProgress = {
+  attempt: number
+  phase: string
+  percent: number
+  bytes_done?: number
+  bytes_total?: number
+  bytes_per_sec?: number
+  message?: string
+  updated_at?: string
 }
 
 export type APIKey = {

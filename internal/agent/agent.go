@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/agent/telemetry"
+	"github.com/alee-ibrahim/use-my-mac/internal/transfer"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
 
@@ -511,13 +512,24 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 
 	logs := newLogStreamer(a, as.TaskID, as.Attempt, a.cfg.MaxLogBytes)
 	defer logs.close()
+	prog := newProgressReporter(a, as.TaskID, as.Attempt)
+	defer prog.close()
 
 	// Inputs.
-	for _, in := range as.Inputs {
-		if err := a.download(ctx, in.URL, filepath.Join(workdir, "in", in.Name)); err != nil {
-			return a.stopped(ctx, upd, "download input "+in.Name+": "+err.Error())
+	if len(as.Inputs) > 0 {
+		m := transfer.NewMeter(0)
+		stop := m.Report(progressInterval/2, prog.bytes)
+		for _, in := range as.Inputs {
+			if err := a.download(ctx, in.URL, filepath.Join(workdir, "in", in.Name), m); err != nil {
+				stop()
+				return a.stopped(ctx, upd, "download input "+in.Name+": "+err.Error())
+			}
 		}
+		stop()
+		prog.flush(true)
 	}
+	prog.phase(api.PhaseRunning)
+	prog.flush(true)
 
 	// Run.
 	timeout := time.Duration(as.TimeoutSeconds) * time.Second
@@ -531,7 +543,9 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
 	cmd.Env = env
-	cmd.Stdout, cmd.Stderr = logs, logs
+	tap := &progressTap{p: a.cfg.parserFor(as.Runtime), report: prog.percent}
+	out := io.MultiWriter(logs, tap)
+	cmd.Stdout, cmd.Stderr = out, out
 	cmd.WaitDelay = a.cfg.StopGrace
 	setupProc(cmd)
 	if err := cmd.Start(); err != nil {
@@ -545,7 +559,10 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	a.mu.Lock()
 	r.pgid, r.qos = cmd.Process.Pid, qos
 	a.mu.Unlock()
+	watchCtx, stopWatch := context.WithCancel(runCtx)
+	go watchProgressFile(watchCtx, filepath.Join(workdir, ProgressFileName), prog.percent)
 	werr := cmd.Wait()
+	stopWatch()
 	killGroup(cmd.Process.Pid)
 	if cmd.ProcessState != nil {
 		code := cmd.ProcessState.ExitCode()
@@ -570,16 +587,31 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	}
 
 	// Outputs.
+	var sizes []int64
+	m := transfer.NewMeter(0)
 	for _, o := range as.Outputs {
-		p := filepath.Join(workdir, "out", o.Name)
-		if _, err := os.Stat(p); err != nil {
+		st, err := os.Stat(filepath.Join(workdir, "out", o.Name))
+		if err != nil {
 			if o.Optional {
+				sizes = append(sizes, -1)
 				continue
 			}
 			upd.Outcome, upd.Error = api.OutcomeFailed, "output "+o.Name+" was not written"
 			return upd
 		}
-		if err := a.upload(ctx, o.URL, p); err != nil {
+		sizes = append(sizes, st.Size())
+		m.AddTotal(st.Size())
+	}
+	prog.phase(api.PhaseUploading)
+	prog.flush(true)
+	stop := m.Report(progressInterval/2, prog.bytes)
+	defer stop()
+	for i, o := range as.Outputs {
+		if sizes[i] < 0 {
+			continue
+		}
+		p := filepath.Join(workdir, "out", o.Name)
+		if err := a.upload(ctx, as, o, p, sizes[i], m); err != nil {
 			if ctx.Err() != nil {
 				return a.stopped(ctx, upd, "")
 			}
@@ -610,54 +642,56 @@ func (a *Agent) stopped(ctx context.Context, upd api.TaskUpdate, fallback string
 	return upd
 }
 
-func (a *Agent) download(ctx context.Context, u, dst string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+// download fetches an input, in parallel byte ranges when the server
+// supports them.
+func (a *Agent) download(ctx context.Context, u, dst string, m *transfer.Meter) error {
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	resp, err := a.blobHTTP.Do(req)
-	if err != nil {
-		return err
+	_, err = transfer.Download(ctx, a.blobHTTP, u, f, transfer.DownloadOptions{
+		Chunk: a.cfg.Transfer.PartSize(), Concurrency: a.cfg.Transfer.Concurrency, Meter: m})
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("GET: %s", resp.Status)
-	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return err
 }
 
-func (a *Agent) upload(ctx context.Context, u, src string) error {
+// upload pushes an output: in parallel parts through a multipart upload
+// when the router offers one and the file is bigger than one part,
+// otherwise with a single PUT to the assigned URL.
+func (a *Agent) upload(ctx context.Context, as api.Assignment, o api.AssignedOutput, src string, size int64, m *transfer.Meter) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
+	partSize := a.cfg.Transfer.PartSize()
+	if o.Multipart && size > partSize {
+		return a.uploadParts(ctx, as, o.Name, f, size, partSize, m)
+	}
+	return transfer.Put(ctx, a.blobHTTP, o.URL, nil, transfer.CountingReader(f, m), size)
+}
+
+func (a *Agent) uploadParts(ctx context.Context, as api.Assignment, name string, f *os.File, size, partSize int64, m *transfer.Meter) error {
+	var up api.Upload
+	path := "/v1/agent/tasks/" + url.PathEscape(as.TaskID) + "/outputs/" + url.PathEscape(name) + "/upload"
+	if err := a.call(ctx, http.MethodPost, path, api.OutputUploadRequest{Attempt: as.Attempt, Size: size, PartSize: partSize}, &up); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, f)
+	// Part URLs are presigned (S3) or signed by the router and live for
+	// hours; the agent never sends its bearer credential with them.
+	err := transfer.UploadParts(ctx, f, size, up.PartSize, a.cfg.Transfer.Concurrency, transfer.DefaultRetries, nil, m,
+		func(ctx context.Context, n, _ int, r io.Reader, sz int64) error {
+			return transfer.Put(ctx, a.blobHTTP, up.URLs[n], nil, r, sz)
+		})
 	if err != nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		_ = a.call(cctx, http.MethodDelete, "/v1/agent/uploads/"+url.PathEscape(up.ID), nil, nil)
+		cancel()
 		return err
 	}
-	req.ContentLength = st.Size()
-	resp, err := a.blobHTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("PUT: %s", resp.Status)
-	}
-	return nil
+	return a.call(ctx, http.MethodPost, "/v1/agent/uploads/"+url.PathEscape(up.ID)+"/complete", nil, nil)
 }
 
 // ---------------------------------------------------------------------------

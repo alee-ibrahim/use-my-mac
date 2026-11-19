@@ -59,6 +59,19 @@ yield:
 
 max_log_bytes: 1048576
 
+# Live progress. Tasks can always print "UMM_PROGRESS=<0-100>" or write a
+# number to $UMM_PROGRESS_FILE. Per runtime, the agent can also read a tool's
+# own output: auto (default: the ffmpeg parser when the executable is
+# ffmpeg), ffmpeg or none.
+progress_parsers:
+  ffmpeg: auto
+
+# Inputs are downloaded in parallel byte ranges and outputs uploaded in
+# parallel parts of this size (MiB, at least 5).
+transfer:
+  part_size_mb: 8
+  concurrency: 4
+
 # Self-update, done by the root updater (`umm-agent update`, its own
 # LaunchDaemon). The router decides the version; releases must carry a valid
 # minisign signature from the key built into the agent.

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { ListChecksIcon, Trash2Icon } from "lucide-react"
 
 import { useConfirm } from "@/components/confirm"
@@ -26,12 +26,28 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { api, since, terminal, type Job } from "@/lib/api"
-import { href, usePolling } from "@/lib/hooks"
+import { href, useLive } from "@/lib/hooks"
 
+// progress: tasks done, and the job's overall percent (the router folds in
+// running tasks' live progress; older routers only give counts).
 export function progress(j: Job) {
   const total = Object.values(j.counts).reduce((a, b) => a + b, 0)
   const done = (j.counts.succeeded ?? 0) + (j.counts.failed ?? 0) + (j.counts.cancelled ?? 0)
-  return { total, done, pct: total ? (100 * done) / total : 0 }
+  return { total, done, pct: j.percent ?? (total ? (100 * done) / total : 0) }
+}
+
+// applyJobsEvent folds a /v1/jobs/stream event into the list: "jobs" is a
+// full snapshot, "job" one changed (or new) job, "removed" a deleted one.
+function applyJobsEvent(limit: number) {
+  return (event: string, data: unknown, prev: Job[] | undefined): Job[] | undefined => {
+    if (event === "jobs") return (data as Job[] | null) ?? []
+    if (!prev) return prev
+    if (event === "removed") return prev.filter((j) => j.id !== (data as { id: string }).id)
+    const j = data as Job
+    const i = prev.findIndex((x) => x.id === j.id)
+    if (i >= 0) return prev.map((x) => (x.id === j.id ? j : x))
+    return [j, ...prev].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit)
+  }
 }
 
 const filters = [
@@ -129,7 +145,12 @@ export function PurgeJobsDialog({ onDone }: { onDone: () => void }) {
 export function JobsPage({ admin }: { admin: boolean }) {
   const [state, setState] = useState("")
   const load = useCallback(() => api.jobs(state, 200), [state])
-  const { data, error, refresh } = usePolling(load, 5000)
+  const apply = useMemo(() => applyJobsEvent(200), [])
+  const { data, error, refresh } = useLive(load, 5000, {
+    url: `/v1/jobs/stream?limit=200${state ? `&state=${encodeURIComponent(state)}` : ""}`,
+    events: ["jobs", "job", "removed"],
+    apply,
+  })
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [confirm, ask] = useConfirm()
   const mobile = useIsMobile()
@@ -227,7 +248,7 @@ export function JobsPage({ admin }: { admin: boolean }) {
                       <div className="flex items-center gap-2">
                         <Progress value={p.pct} aria-label="job progress" />
                         <span className="shrink-0 text-xs tabular-nums">
-                          {p.done}/{p.total}
+                          {Math.floor(p.pct)}% · {p.done}/{p.total}
                         </span>
                       </div>
                       <span className="text-xs text-muted-foreground">
@@ -300,8 +321,8 @@ export function JobsPage({ admin }: { admin: boolean }) {
                       <TableCell>
                         <div className="flex min-w-36 items-center gap-2">
                           <Progress value={p.pct} aria-label="job progress" />
-                          <span className="text-xs tabular-nums">
-                            {p.done}/{p.total}
+                          <span className="text-xs whitespace-nowrap tabular-nums">
+                            {Math.floor(p.pct)}% · {p.done}/{p.total}
                           </span>
                         </div>
                       </TableCell>

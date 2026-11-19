@@ -125,6 +125,41 @@ URL lifetime is the task timeout plus 30 minutes. Keys are validated (no absolut
 characters). Outputs land at `jobs/<job>/<task-key>/<output>`, and app uploads at `uploads/<key>`. Reduce
 inputs `from: {task, output}` resolve to the producing task's output URL at dispatch time.
 
+**Multipart uploads.** Both backends implement `storage.Multipart`: S3 with its native multipart API
+(part URLs are presigned `UploadPart` requests), `local` by keeping parts as files under `_multipart/<id>/`
+and concatenating them on completion (part URLs are HMAC-signed `PUT`s, accepted only while that upload
+exists). The `uploads` table maps our upload ID to the backend's, with owner, size, part size and expiry;
+the bytes never touch the database. Apps send parts through the router (relay) or, with S3 and `direct`,
+straight to the bucket. Agents always get presigned or signed part URLs, so they never send bytes with their
+bearer credential and still hold no storage credentials. Stored parts are listed from the backend and only
+counted when their size is exactly right, so a retried or resumed part can never assemble a wrong file.
+Completion deletes the row; the scheduler loop aborts uploads older than 24 hours every 10 minutes
+(`AbortMultipart` deletes the parts).
+
+**Chunked downloads.** The router serves local blobs with `http.ServeContent`, so `Range` works. Agents and
+the CLI download in parallel ranges and fall back to one stream when the server ignores `Range`.
+
+## Live progress
+
+Agents send `POST /v1/agent/tasks/{id}/progress` with the attempt, phase (`downloading`, `running`,
+`uploading`), a percent within the phase and transfer bytes and rate, at most once a second and only when
+something changed (plus a keep-alive every 15 s). While the process runs, the percent comes from
+`UMM_PROGRESS=N` lines (a tap on stdout/stderr that also splits on carriage returns, as ffmpeg uses), the
+`$UMM_PROGRESS_FILE` file (read every 0.5 s) or a built-in output parser (ffmpeg). Reports for an attempt
+that is not current, or from another agent, get `409`. Agents stop reporting if the router answers `404`
+(an older router).
+
+The router keeps the latest report per running task **in memory only**: losing it on a restart costs a
+second. It is dropped whenever the attempt ends. Task views fold it into `phase` and an overall `percent`
+(bands: downloading 0-5, running 5-95, uploading 95-100); job views count finished tasks as 100 and cap the
+total at 99.9 until the job is terminal, so 100 % always means done.
+
+Every job change (submission, state transitions, progress, deletion) is published to in-process
+subscribers. `GET /v1/jobs/{id}/stream` and `GET /v1/jobs/stream` turn that into server-sent events:
+changes are debounced (250 ms), reloaded and sent only when the JSON changed, with a periodic resync because
+notifications are dropped rather than ever blocking the engine, and a keep-alive comment every 15 s. Clients
+(CLI, SDK, dashboard) fall back to polling when a stream cannot be held open.
+
 ## Security model
 
 - **No inbound ports on Macs.** Agents only make outbound HTTPS requests (heartbeat, long-poll, status,

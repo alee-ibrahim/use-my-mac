@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -32,10 +31,15 @@ Environment:
   UMM_API_KEY        API key (or UMM_API_KEY_FILE, or ~/.config/umm/api-key)
 
 Commands:
-  submit FILE [-wait]            submit a job spec (YAML or JSON); inputs with "file:" are uploaded first
+  submit FILE [-wait] [-part-size 8MiB] [-concurrency 4]
+                                 submit a job spec (YAML or JSON); inputs with "file:" are uploaded first
+  upload FILE [KEY] [-part-size 8MiB] [-concurrency 4] [-resume ID]
+                                 upload an input blob in parallel parts, with progress; prints the key
+  watch JOB                      follow a job live (state, % and phase) until it finishes
   status [JOB]                   list recent jobs, or show one job and its tasks
   logs TASK [-attempt N]         print a task's logs
-  download TASK OUTPUT [-o F]    download a task output
+  download TASK OUTPUT [-o F] [-concurrency 4]
+                                 download a task output (parallel ranges, with progress)
   cancel JOB                     cancel a job
   macs [list | delete MAC...]    list Macs with live telemetry; delete removed Macs (admin)
   jobs [list | delete JOB... | purge -older-than 30d [-state failed]]
@@ -126,11 +130,27 @@ func run(ctx context.Context, cmd string, args []string) error {
 	switch cmd {
 	case "submit":
 		wait := fs.Bool("wait", false, "wait for the job to finish")
+		tf := addTransferFlags(fs)
 		pos := parseFlags(fs, args)
 		if len(pos) != 1 {
-			return errors.New("usage: umm submit FILE [-wait]")
+			return errors.New("usage: umm submit FILE [-wait] [-part-size 8MiB] [-concurrency 4]")
 		}
-		return submit(ctx, c, pos[0], *wait)
+		return submit(ctx, c, pos[0], *wait, tf)
+	case "upload":
+		return uploadCmd(ctx, c, args)
+	case "watch":
+		pos := parseFlags(fs, args)
+		if len(pos) != 1 {
+			return errors.New("usage: umm watch JOB")
+		}
+		j, err := watch(ctx, c, pos[0])
+		if err != nil {
+			return err
+		}
+		if j.State != api.StateSucceeded {
+			return fmt.Errorf("job %s", j.State)
+		}
+		return nil
 	case "status":
 		pos := parseFlags(fs, args)
 		if len(pos) == 0 {
@@ -150,29 +170,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 		fmt.Print(l)
 		return nil
 	case "download":
-		out := fs.String("o", "", "output file (default: OUTPUT name)")
-		pos := parseFlags(fs, args)
-		if len(pos) != 2 {
-			return errors.New("usage: umm download TASK OUTPUT [-o FILE]")
-		}
-		dst := *out
-		if dst == "" {
-			dst = filepath.Base(pos[1])
-		}
-		f, err := os.Create(dst)
-		if err != nil {
-			return err
-		}
-		n, err := c.DownloadOutput(ctx, pos[0], pos[1], f)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			os.Remove(dst)
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", dst, n)
-		return nil
+		return downloadCmd(ctx, c, args)
 	case "cancel":
 		pos := parseFlags(fs, args)
 		if len(pos) != 1 {
@@ -234,7 +232,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 
 // submit reads a YAML/JSON spec. Inputs may use `file: path` which is
 // uploaded and rewritten to a blob reference.
-func submit(ctx context.Context, c *client.Client, path string, wait bool) error {
+func submit(ctx context.Context, c *client.Client, path string, wait bool, tf *transferFlags) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -244,9 +242,7 @@ func submit(ctx context.Context, c *client.Client, path string, wait bool) error
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	base := filepath.Dir(path)
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	prefix := "cli/" + hex.EncodeToString(rnd)
+	prefix := "cli/" + randHex()
 	tasks, _ := raw["tasks"].([]any)
 	for _, ti := range tasks {
 		tm, _ := ti.(map[string]any)
@@ -261,7 +257,7 @@ func submit(ctx context.Context, c *client.Client, path string, wait bool) error
 				fp = filepath.Join(base, fp)
 			}
 			key := prefix + "/" + filepath.Base(fp)
-			if err := upload(ctx, c, key, fp); err != nil {
+			if err := upload(ctx, c, key, fp, tf); err != nil {
 				return err
 			}
 			delete(im, "file")
@@ -283,14 +279,7 @@ func submit(ctx context.Context, c *client.Client, path string, wait bool) error
 	if !wait {
 		return nil
 	}
-	last := ""
-	final, err := c.WaitJob(ctx, job.ID, 2*time.Second, func(j *api.Job) {
-		s := fmt.Sprintf("%s %v", j.State, j.Counts)
-		if s != last {
-			fmt.Fprintln(os.Stderr, time.Now().Format("15:04:05"), s)
-			last = s
-		}
-	})
+	final, err := watch(ctx, c, job.ID)
 	if err != nil {
 		return err
 	}
@@ -300,18 +289,17 @@ func submit(ctx context.Context, c *client.Client, path string, wait bool) error
 	return nil
 }
 
-func upload(ctx context.Context, c *client.Client, key, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "uploading %s (%d bytes)\n", path, st.Size())
-	return c.UploadBlob(ctx, key, io.Reader(f), st.Size())
+func upload(ctx context.Context, c *client.Client, key, path string, tf *transferFlags) error {
+	opt, done := tf.options("upload " + filepath.Base(path))
+	err := c.UploadFile(ctx, key, path, opt)
+	done()
+	return err
+}
+
+func randHex() string {
+	rnd := make([]byte, 6)
+	rand.Read(rnd)
+	return hex.EncodeToString(rnd)
 }
 
 func tw() *tabwriter.Writer { return tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0) }
