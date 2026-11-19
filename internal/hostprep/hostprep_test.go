@@ -46,6 +46,9 @@ type fakeMac struct {
 	hasVol    bool
 	mountedAt string
 	failAdd   bool
+	failMount string
+	// other is a different file system mounted at this path.
+	other     string
 	pfMain    string
 	pfEnabled bool
 	anchor    string
@@ -67,8 +70,15 @@ func (f *fakeMac) run(_ context.Context, name string, args ...string) ([]byte, e
 		return nil, nil
 	case c == "diskutil info -plist disk3s7":
 		return []byte(`<plist><dict><key>MountPoint</key><string>` + f.mountedAt + `</string></dict></plist>`), nil
-	case strings.HasPrefix(c, "mount -t apfs"):
-		f.mountedAt = args[len(args)-1]
+	case strings.HasPrefix(c, "diskutil mount "):
+		if f.failMount != "" {
+			return []byte(f.failMount), errors.New("exit status 1")
+		}
+		for i, a := range args {
+			if a == "-mountPoint" {
+				f.mountedAt = args[i+1]
+			}
+		}
 		return nil, nil
 	case strings.HasPrefix(c, "diskutil unmount"):
 		f.mountedAt = ""
@@ -107,6 +117,8 @@ func (f *fakeMac) called(prefix string) int {
 	return n
 }
 
+const fstabOrig = "# existing\nLABEL=Other none hfs rw,noauto\n"
+
 var testReserve = ReserveConfig{MinBytes: 50 << 30, Percent: 15}
 
 func setup(t *testing.T) (Config, *fakeMac, Host) {
@@ -121,7 +133,7 @@ func setup(t *testing.T) (Config, *fakeMac, Host) {
 	if cfg.AgentUID <= 0 {
 		cfg.AgentUID = 451 // tests running as root
 	}
-	h := Host{Run: f.run, Fstab: filepath.Join(dir, "fstab"), Mounted: func(string) bool { return f.mountedAt != "" },
+	h := Host{Run: f.run, Fstab: filepath.Join(dir, "fstab"), Mounted: func(d string) bool { return d == f.mountedAt || d == f.other },
 		BootTime: func() int64 { return 1700000000 },
 		Lookup: func(_ context.Context, host string) ([]string, error) {
 			if host == "router.example.com" {
@@ -158,13 +170,15 @@ func TestVolumeCreatedHiddenAndIdempotent(t *testing.T) {
 	if f.called("diskutil apfs addVolume disk3 APFS umm-work -quota 870g -nomount") != 1 {
 		t.Fatalf("addVolume must target the data container with the auto quota and -nomount: %v", f.calls)
 	}
-	if f.called("mount -t apfs -o nobrowse /dev/disk3s7 "+cfg.WorkDir) != 1 {
+	if f.called("diskutil mount nobrowse -mountPoint "+cfg.WorkDir+" disk3s7") != 1 {
 		t.Fatalf("must mount nobrowse at the work dir: %v", f.calls)
 	}
+	if f.called("chflags hidden "+cfg.WorkDir) != 1 {
+		t.Fatalf("volume root must be hidden: %v", f.calls)
+	}
 	fstab, _ := os.ReadFile(h.Fstab)
-	want := "UUID=0F6A3C1E-1111-2222-3333-444455556666 " + cfg.WorkDir + " apfs rw,nobrowse " + fstabMarker
-	if !strings.Contains(string(fstab), "LABEL=Other none hfs rw,noauto\n") || strings.Count(string(fstab), want) != 1 {
-		t.Fatalf("fstab:\n%s", fstab)
+	if string(fstab) != fstabOrig {
+		t.Fatalf("fstab must not be written:\n%s", fstab)
 	}
 	if fi, _ := os.Stat(cfg.WorkDir); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("work dir mode %v", fi.Mode())
@@ -182,6 +196,37 @@ func TestVolumeCreatedHiddenAndIdempotent(t *testing.T) {
 	fstab2, _ := os.ReadFile(h.Fstab)
 	if string(fstab2) != string(fstab) {
 		t.Fatalf("fstab changed:\n%s", fstab2)
+	}
+}
+
+func TestOldFstabCleanup(t *testing.T) {
+	// A line an older version added is removed; the rest is kept as is.
+	cfg, _, h := setup(t)
+	line := "UUID=0F6A3C1E-1111-2222-3333-444455556666 " + cfg.WorkDir + " apfs rw,nobrowse " + FstabMarker + "\n"
+	os.WriteFile(h.Fstab, []byte(fstabOrig+line+"# after\n"), 0o644)
+	os.WriteFile(h.Fstab+".umm.tmp", []byte("partial"), 0o644)
+	Prepare(context.Background(), cfg, h)
+	if b, _ := os.ReadFile(h.Fstab); string(b) != fstabOrig+"# after\n" {
+		t.Fatalf("fstab:\n%s", b)
+	}
+	if _, err := os.Stat(h.Fstab + ".umm.tmp"); !os.IsNotExist(err) {
+		t.Fatalf("leftover temp file must be removed: %v", err)
+	}
+	// No line of ours: the file is not rewritten at all.
+	cfg, _, h = setup(t)
+	Prepare(context.Background(), cfg, h)
+	if b, _ := os.ReadFile(h.Fstab); string(b) != fstabOrig {
+		t.Fatalf("fstab changed:\n%s", b)
+	}
+	if _, err := os.Stat(h.Fstab + ".umm.tmp"); !os.IsNotExist(err) {
+		t.Fatalf("no temp file may be created: %v", err)
+	}
+	// Missing fstab: nothing happens.
+	cfg, _, h = setup(t)
+	os.Remove(h.Fstab)
+	Prepare(context.Background(), cfg, h)
+	if _, err := os.Stat(h.Fstab); !os.IsNotExist(err) {
+		t.Fatalf("fstab must not be created: %v", err)
 	}
 }
 
@@ -207,15 +252,52 @@ func TestVolumeFallbacks(t *testing.T) {
 	f.hasVol = true
 	os.Mkdir(filepath.Join(cfg.WorkDir, "task-1"), 0o700)
 	st = Prepare(context.Background(), cfg, h)
-	if st.WorkVolume.State != VolumeSystem || !strings.Contains(st.WorkVolume.Reason, "in use") || f.called("mount ") != 0 {
+	if st.WorkVolume.State != VolumeSystem || !strings.Contains(st.WorkVolume.Reason, "in use") || f.called("diskutil mount") != 0 {
 		t.Fatalf("busy work dir must not be mounted over: %+v %v", st.WorkVolume, f.calls)
 	}
 	// Auto-mounted elsewhere: moved to the work dir once it is idle.
 	os.Remove(filepath.Join(cfg.WorkDir, "task-1"))
 	f.mountedAt = "/Volumes/umm-work"
 	st = Prepare(context.Background(), cfg, h)
-	if st.WorkVolume.State != VolumeDedicated || f.called("diskutil unmount disk3s7") != 1 || f.mountedAt != cfg.WorkDir {
+	if st.WorkVolume.State != VolumeDedicated || f.called("diskutil unmount disk3s7") != 1 || f.mountedAt != cfg.WorkDir ||
+		f.called("diskutil mount nobrowse -mountPoint "+cfg.WorkDir+" disk3s7") != 1 {
 		t.Fatalf("remount: %+v %v", st.WorkVolume, f.calls)
+	}
+
+	// Mount fails: the reason is reported, tasks use the system volume.
+	cfg, f, h = setup(t)
+	f.hasVol = true
+	f.failMount = "Volume on disk3s7 failed to mount"
+	st = Prepare(context.Background(), cfg, h)
+	if st.WorkVolume.State != VolumeSystem || !strings.Contains(st.WorkVolume.Reason, "mount: ") {
+		t.Fatalf("mount failure: %+v", st.WorkVolume)
+	}
+	if got, _ := ReadStatus(cfg.StatusFile); got.WorkVolume.Reason != st.WorkVolume.Reason {
+		t.Fatalf("reason must reach the status file: %+v", got.WorkVolume)
+	}
+
+	// Mount "succeeds" but the volume ends up elsewhere.
+	cfg, f, h = setup(t)
+	f.hasVol = true
+	h.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if filepath.Base(name) == "diskutil" && len(args) > 0 && args[0] == "mount" {
+			f.mountedAt = "/Volumes/umm-work"
+			return nil, nil
+		}
+		return f.run(ctx, name, args...)
+	}
+	if st := Prepare(context.Background(), cfg, h); st.WorkVolume.State != VolumeSystem ||
+		!strings.Contains(st.WorkVolume.Reason, "after mounting") {
+		t.Fatalf("wrong mount point must fall back: %+v", st.WorkVolume)
+	}
+
+	// Another file system already at the work dir: left alone.
+	cfg, f, h = setup(t)
+	f.hasVol = true
+	f.other = cfg.WorkDir
+	if st := Prepare(context.Background(), cfg, h); st.WorkVolume.State != VolumeSystem ||
+		!strings.Contains(st.WorkVolume.Reason, "another file system") || f.called("diskutil mount") != 0 {
+		t.Fatalf("foreign mount: %+v %v", st.WorkVolume, f.calls)
 	}
 
 	// Disabled, and invalid settings.

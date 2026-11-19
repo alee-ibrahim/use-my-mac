@@ -254,16 +254,36 @@ updater cycle, so enrolled Macs get it on their next update check without SSH) c
 diskutil apfs addVolume <container> APFS umm-work -quota <size> -nomount
 ```
 
-`-nomount` and an `/etc/fstab` line `UUID=<uuid> <work_dir> apfs rw,nobrowse` mean it is never mounted
-under `/Volumes` and is hidden from Finder and the desktop; it is then mounted at `work_dir`, owned by
-`_umm` with mode `0700`, with Spotlight indexing off and excluded from Time Machine. The quota is
+`-nomount` keeps diskutil from mounting it under `/Volumes`. Every root updater cycle (including the one
+`RunAtLoad` starts at boot, before the update check's jitter) then mounts it at `work_dir` through Disk
+Arbitration, hidden from Finder and the desktop:
+
+```text
+diskutil mount nobrowse -mountPoint <work_dir> <device>
+```
+
+It is owned by `_umm` with mode `0700`, its root carries the `hidden` flag (`chflags hidden`), Spotlight
+indexing is off and it is excluded from Time Machine. The quota is
 `work_volume.quota`: `auto` (default) is the disk's size minus the reserve below, or a fixed size such as
 `400g`. It is set when the volume is created. The volume shares the disk's free space with the system, so
-the quota is a ceiling, not an allocation. It is only mounted over an empty work dir (no task running).
-Creating it is idempotent and failure is not fatal: the agent then uses the plain directory as before and
-the Mac page says why. If the status says the volume exists but it is not mounted (e.g. right after boot,
-before the updater ran), the Mac is unhealthy until it is. Uninstalling deletes the volume and the fstab
-line.
+the quota is a ceiling, not an allocation. It is only mounted over an empty work dir (no task running) that
+is not another mount point. Creating and mounting it are idempotent and failure is not fatal: the agent
+then uses the plain directory as before and the Mac page says why (the status file's reason, e.g. the
+diskutil error). If the status says the volume exists but it is not mounted (e.g. right after boot,
+before the updater ran), the Mac is unhealthy until it is. Uninstalling deletes the volume (its UUID is in
+`host.json`).
+
+The work volume does not use `/etc/fstab`. Since macOS 26.6 the sandbox protects that file and writing it
+needs Full Disk Access, which the updater's LaunchDaemon does not have (v0.1.8 failed with `rename
+/etc/fstab.umm.tmp /etc/fstab: operation not permitted`). `prepare` removes that temporary file and, only
+if `/etc/fstab` can be replaced, a line an earlier version added. Without fstab nothing tells macOS how to
+mount the volume at boot: like any APFS volume in the boot container it is mounted by Disk Arbitration
+under `/Volumes/<name>`, browsable, until the updater's boot run moves it to `work_dir` (usually seconds
+after the daemons start; if the work dir is not empty then, on a later cycle). Internal volumes only show
+on the desktop when Finder's *Hard disks* setting is on, and the `hidden` flag on the volume's root is
+meant to keep it out of Finder in that window; neither is a guarantee. A Disk Arbitration mount-approval
+daemon could refuse the boot mount, but it would have to be running before Disk Arbitration's boot mounts
+and tell our own mount apart (`diskutil mount` goes through the same approval); it is not used.
 
 **Disk reserve.** `min_free_disk` keeps the larger of `min` (50 GiB) and `percent` (15 %) of the system
 disk free for the Mac's user (both 0 off macOS). The agent's work space is the work volume's free space
