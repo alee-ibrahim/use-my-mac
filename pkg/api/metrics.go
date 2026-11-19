@@ -88,6 +88,8 @@ const (
 	EventInstallDeleted = "install_token.deleted"
 	EventUpdate         = "mac.update"
 	EventRetention      = "retention.changed"
+	// EventRuntimeUnavailable: a task could not execute a runtime on a Mac.
+	EventRuntimeUnavailable = "mac.runtime_unavailable"
 )
 
 // Retention controls background pruning. Zero means "keep forever" for

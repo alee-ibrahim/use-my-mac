@@ -29,6 +29,11 @@ type Config struct {
 
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	PollWait          time.Duration `yaml:"poll_wait"`
+	// PreflightInterval is how often the agent re-checks that each
+	// runtime's program exists and is executable (also at startup and on
+	// SIGHUP), so a program installed later is picked up without a restart.
+	// Default 1m.
+	PreflightInterval time.Duration `yaml:"preflight_interval"`
 	// StopGrace is how long a task gets after SIGTERM before SIGKILL.
 	StopGrace time.Duration `yaml:"stop_grace"`
 
@@ -129,6 +134,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.HeartbeatInterval <= 0 {
 		c.HeartbeatInterval = 5 * time.Second
+	}
+	if c.PreflightInterval <= 0 {
+		c.PreflightInterval = time.Minute
 	}
 	if c.PollWait <= 0 {
 		c.PollWait = 25 * time.Second

@@ -65,6 +65,12 @@ func helper(args []string) int {
 		}
 		fmt.Println("concatenated", len(args)-2, "parts")
 		return writeOut(args[1], buf.Bytes())
+	case "exit127": // exit127 <bad-agent> <out>: like a launcher whose program is missing
+		if os.Getenv("AGENT_NAME") == args[1] {
+			fmt.Fprintln(os.Stderr, "nice: /opt/homebrew/bin/tool: No such file or directory")
+			return 127
+		}
+		return writeOut(args[2], []byte("ok from "+os.Getenv("AGENT_NAME")))
 	case "flaky": // flaky <bad-agent> <out>
 		if os.Getenv("AGENT_NAME") == args[1] {
 			fmt.Fprintln(os.Stderr, "simulated crash on", args[1])
@@ -168,15 +174,25 @@ func newEnv(t *testing.T) *env {
 
 func (e *env) mac(name string, maxTasks int, tel api.Telemetry) *fakeMac {
 	e.t.Helper()
+	return e.macWith(name, maxTasks, tel, nil)
+}
+
+// macWith starts an agent with extra runtimes besides "helper".
+func (e *env) macWith(name string, maxTasks int, tel api.Telemetry, extra map[string][]string) *fakeMac {
+	e.t.Helper()
 	f := &fakeMac{name: name}
 	f.tel.Store(&tel)
 	exe, err := os.Executable()
 	if err != nil {
 		e.t.Fatal(err)
 	}
+	rts := map[string][]string{"helper": {exe}}
+	for k, v := range extra {
+		rts[k] = v
+	}
 	cfg := &agent.Config{
 		Server: e.ts.URL, Name: name, WorkDir: e.t.TempDir(), MaxTasks: maxTasks,
-		Runtimes:          map[string][]string{"helper": {exe}},
+		Runtimes:          rts,
 		TaskEnv:           map[string]string{"GO_HELPER_MODE": "1", "AGENT_NAME": name},
 		HeartbeatInterval: 100 * time.Millisecond, PollWait: time.Second, StopGrace: 2 * time.Second,
 		Priority: "none",
@@ -409,6 +425,72 @@ func TestFailureRetriesOnAnotherMac(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(b), `umm_task_attempt_outcomes_total{outcome="failed"} 1`) {
 		t.Fatalf("metrics missing failure count")
+	}
+}
+
+// A runtime whose program is missing is never advertised, so no task needing
+// it lands there; a Mac where the runtime exits 127 loses it and the task
+// moves on without using a retry.
+func TestRuntimePreflightAndExit127(t *testing.T) {
+	e := newEnv(t)
+	missing := e.macWith("no-tool-mac", 1, activeTel(), map[string][]string{"tool": {"/nonexistent/bin/tool"}})
+	bad := e.mac("exit127-mac", 1, quietTel()) // preferred: nobody logged in
+	good := e.mac("good-mac", 1, activeTel())
+	nm := names(e, missing, bad, good)
+	waitFor(t, "Macs online", 5*time.Second, func() bool {
+		ms, _ := e.admin.Macs(e.ctx)
+		return len(ms) == 3 && ms[0].Online && ms[1].Online && ms[2].Online
+	})
+	ms, _ := e.admin.Macs(e.ctx)
+	for _, m := range ms {
+		if m.ID != missing.id {
+			continue
+		}
+		if strings.Join(m.Runtimes, ",") != "helper" || len(m.UnavailableRuntimes) != 1 ||
+			m.UnavailableRuntimes[0].Name != "tool" || !strings.Contains(m.UnavailableRuntimes[0].Reason, "program not found") {
+			t.Fatalf("no-tool-mac: runtimes %v unavailable %+v", m.Runtimes, m.UnavailableRuntimes)
+		}
+	}
+
+	// Nobody can run "tool": the task waits instead of failing on no-tool-mac.
+	toolJob, err := e.app.SubmitJob(e.ctx, api.JobSpec{Tasks: []api.TaskSpec{{Key: "t", Runtime: "tool"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retries := 0
+	job, err := e.app.SubmitJob(e.ctx, api.JobSpec{Tasks: []api.TaskSpec{{Key: "t", Runtime: "helper",
+		Args: []string{"exit127", "exit127-mac", "{out:o}"}, Outputs: []api.Output{{Name: "o"}}, MaxRetries: &retries}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := e.app.WaitJob(e.ctx, job.ID, 100*time.Millisecond, nil)
+	if err != nil || final.State != api.StateSucceeded {
+		t.Fatalf("job %v %v", final.State, err)
+	}
+	full, _ := e.app.Job(e.ctx, job.ID)
+	d, _ := e.app.Task(e.ctx, full.Tasks[0].ID)
+	for _, a := range d.Attempts {
+		t.Logf("attempt %d on %s: %s %s", a.Attempt, nm[a.AgentID], a.Outcome, a.Error)
+	}
+	if len(d.Attempts) != 2 || d.Attempts[0].AgentID != bad.id || d.Attempts[0].Outcome != api.OutcomeUnavailable ||
+		d.Attempts[1].AgentID == bad.id || d.Failures != 0 {
+		t.Fatalf("attempts: %+v failures %d", d.Attempts, d.Failures)
+	}
+	waitFor(t, "exit127-mac reports helper unavailable", 5*time.Second, func() bool {
+		ms, _ := e.admin.Macs(e.ctx)
+		for _, m := range ms {
+			if m.ID == bad.id {
+				return len(m.Runtimes) == 0 && len(m.UnavailableRuntimes) == 1 &&
+					m.UnavailableRuntimes[0].Source == api.RuntimeSourceExec
+			}
+		}
+		return false
+	})
+
+	tj, _ := e.app.Job(e.ctx, toolJob.ID)
+	if tk := tj.Tasks[0]; tk.State != api.StatePending || tk.Attempt != 0 {
+		t.Fatalf("tool task must wait unplaced: %s attempt %d", tk.State, tk.Attempt)
 	}
 }
 

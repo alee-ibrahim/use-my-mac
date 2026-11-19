@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react"
 import { ArrowLeftIcon } from "lucide-react"
 
 import { ChartCard, derive, stepLabel, type SeriesDef } from "@/components/charts"
-import { MacStateBadges, PresenceLine, VersionLine } from "@/components/mac-bits"
+import { MacStateBadges, PresenceLine, RuntimeBadges, VersionLine } from "@/components/mac-bits"
 import { EventList, LiveToggle, PageHeader, RangePicker } from "@/components/ops"
 import { StateBadge } from "@/components/state-badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -157,8 +157,8 @@ export function MacDetailPage({ id, admin }: { id: string; admin: boolean }) {
             <span>
               {m?.update?.checked_at ? `Updater checked ${since(m.update.checked_at)}` : "Updater has not checked in"}
             </span>
-            <span className="truncate">
-              Runtimes: {m?.runtimes?.length ? m.runtimes.join(", ") : "–"}
+            <span className="flex flex-wrap items-center gap-1">
+              Runtimes: {m ? <RuntimeBadges m={m} /> : "–"}
             </span>
             {m && Object.keys(m.labels ?? {}).length > 0 && (
               <span className="flex flex-wrap gap-1">

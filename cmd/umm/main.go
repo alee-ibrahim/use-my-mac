@@ -376,7 +376,8 @@ func listMacs(ctx context.Context, c *client.Client) error {
 		return err
 	}
 	w := tw()
-	fmt.Fprintln(w, "MAC\tNAME\tSTATE\tUSER\tIDLE\tUSER CPU\tOUR CPU\tGPU\tMEM FREE\tPOWER\tTHERMAL\tRUNNING\tFLAGS")
+	fmt.Fprintln(w, "MAC\tNAME\tSTATE\tUSER\tIDLE\tUSER CPU\tOUR CPU\tGPU\tMEM FREE\tPOWER\tTHERMAL\tRUNNING\tRUNTIMES\tUNAVAILABLE\tFLAGS")
+	var missing []string
 	for _, m := range ms {
 		t := m.Telemetry
 		if t == nil {
@@ -404,10 +405,27 @@ func listMacs(ctx context.Context, c *client.Client) error {
 		if m.Quarantined != nil {
 			flags = append(flags, "quarantined")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%s\t%.1f GB\t%s\t%s\t%d/%d\t%s\n",
+		var un []string
+		for _, u := range m.UnavailableRuntimes {
+			un = append(un, u.Name)
+			missing = append(missing, fmt.Sprintf("  %s\t%s\t%s", m.Name, u.Name, u.Reason))
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%.0f%%\t%.0f%%\t%s\t%.1f GB\t%s\t%s\t%d/%d\t%s\t%s\t%s\n",
 			m.ID, m.Name, m.AgentState, user, (time.Duration(t.UserIdleSeconds) * time.Second).String(),
 			t.UserCPUPercent, t.OurCPUPercent, gpu, float64(t.MemAvailableBytes)/(1<<30), power, dash(t.Thermal),
-			len(m.Running), m.MaxTasks, strings.Join(flags, ","))
+			len(m.Running), m.MaxTasks, dash(strings.Join(m.Runtimes, ",")), dash(strings.Join(un, ",")),
+			strings.Join(flags, ","))
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	fmt.Println("\nUnavailable runtimes (tasks needing them are not placed on these Macs):")
+	w = tw()
+	for _, l := range missing {
+		fmt.Fprintln(w, l)
 	}
 	return w.Flush()
 }

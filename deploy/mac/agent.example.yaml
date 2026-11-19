@@ -19,6 +19,10 @@ runtimes:
 task_env: {}
 
 heartbeat_interval: 5s
+# How often the agent re-checks that each runtime's program exists and is
+# executable by _umm (also at startup and on SIGHUP). Runtimes that fail are
+# not offered to the router, so no task is placed here for them.
+preflight_interval: 1m
 poll_wait: 25s
 stop_grace: 10s
 

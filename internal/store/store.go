@@ -396,6 +396,7 @@ func (s *Store) SetAgentHealth(ctx context.Context, id string, consec int, quara
 func (s *Store) DeleteAgent(ctx context.Context, id string) error {
 	_, _ = s.exec(ctx, `DELETE FROM agent_updates WHERE agent_id=?`, id)
 	_, _ = s.exec(ctx, `DELETE FROM update_events WHERE agent_id=?`, id)
+	_, _ = s.exec(ctx, `DELETE FROM agent_runtimes WHERE agent_id=?`, id)
 	res, err := s.exec(ctx, `DELETE FROM agents WHERE id=?`, id)
 	if err != nil {
 		return err

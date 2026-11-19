@@ -103,7 +103,30 @@ func run(path string, verbose bool) error {
 	defer stop()
 	log.Info("umm-agent starting", "server", cfg.Server, "name", cfg.Name, "runtimes", cfg.RuntimeNames(),
 		"max_tasks", cfg.MaxTasks, "priority", cfg.Priority, "version", agent.Version)
-	return agent.New(cfg, cred, nil, log).Run(ctx)
+	ag := agent.New(cfg, cred, nil, log)
+	// SIGHUP re-reads the config's runtime allowlist and re-runs the
+	// runtime preflight. Other settings need a restart.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				nc, err := agent.LoadConfig(path)
+				if err != nil {
+					log.Warn("config reload failed; keeping the current runtimes", "err", err)
+					continue
+				}
+				ag.ReloadRuntimes(nc.Runtimes)
+				avail, unavail := ag.RuntimeStatus()
+				log.Info("config reloaded (runtimes only)", "available", avail, "unavailable", len(unavail))
+			}
+		}
+	}()
+	return ag.Run(ctx)
 }
 
 func enrol(path string) error {

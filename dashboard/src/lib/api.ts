@@ -36,6 +36,9 @@ export type Mac = {
   opted_out: boolean
   quarantined_until?: string
   runtimes: string[]
+  // Allowlisted runtimes this Mac cannot run (program missing, not executable,
+  // or a task could not start it). Tasks needing them are not placed here.
+  unavailable_runtimes?: UnavailableRuntime[]
   labels: Record<string, string>
   max_tasks: number
   running: string[]
@@ -43,6 +46,14 @@ export type Mac = {
   version?: string
   update?: MacUpdate
   created_at?: string
+}
+
+export type UnavailableRuntime = {
+  name: string
+  program?: string
+  reason: string
+  source?: string // "preflight" or "exec"
+  since?: string
 }
 
 export type MacUpdate = {

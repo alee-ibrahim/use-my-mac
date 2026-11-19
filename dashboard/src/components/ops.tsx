@@ -145,7 +145,7 @@ const eventIcons: Record<string, React.ComponentType<{ className?: string }>> = 
 
 function eventIcon(kind: string) {
   if (kind.endsWith(".deleted") || kind === "jobs.purged") return Trash2Icon
-  if (kind === "mac.quarantined") return AlertTriangleIcon
+  if (kind === "mac.quarantined" || kind === "mac.runtime_unavailable") return AlertTriangleIcon
   if (kind === "key.revoked") return CircleSlashIcon
   return eventIcons[kind.split(".")[0]] ?? ActivityIcon
 }

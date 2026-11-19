@@ -2,6 +2,7 @@ import { LockIcon, UserIcon } from "lucide-react"
 
 import { StateBadge } from "@/components/state-badge"
 import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { duration, since, type Mac } from "@/lib/api"
 
 // Presence: who is at the Mac. A logged-in user never stops work by itself.
@@ -37,6 +38,42 @@ export function MacStateBadges({ m }: { m: Mac }) {
       {m.drain && <Badge variant="outline">drained</Badge>}
       {m.opted_out && <Badge variant="outline">opted out</Badge>}
       {m.quarantined_until && <Badge variant="destructive">quarantined</Badge>}
+    </div>
+  )
+}
+
+// RuntimeBadges: the runtimes a Mac can run, then the allowlisted ones it cannot
+// (muted and struck through; the tooltip says why).
+export function RuntimeBadges({ m }: { m: Mac }) {
+  const bad = m.unavailable_runtimes ?? []
+  if (!m.runtimes?.length && !bad.length) return <span className="text-muted-foreground">–</span>
+  return (
+    <div className="flex flex-wrap gap-1">
+      {(m.runtimes ?? []).map((r) => (
+        <Badge key={r} variant="outline">
+          {r}
+        </Badge>
+      ))}
+      {bad.map((u) => (
+        <Tooltip key={u.name}>
+          <TooltipTrigger asChild>
+            <Badge
+              variant="outline"
+              tabIndex={0}
+              className="text-muted-foreground line-through"
+              aria-label={`${u.name} unavailable: ${u.reason}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {u.name}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-80">
+            Unavailable: {u.reason}
+            {u.source === "exec" ? " (a task could not start it; retried after the next preflight)" : ""}
+            {u.since ? ` · since ${since(u.since)}` : ""}
+          </TooltipContent>
+        </Tooltip>
+      ))}
     </div>
   )
 }
