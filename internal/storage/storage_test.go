@@ -188,3 +188,19 @@ func TestS3RoundTripAgainstFake(t *testing.T) {
 		t.Fatal("ttl > 7d must fail")
 	}
 }
+
+func TestLocalSize(t *testing.T) {
+	l, err := NewLocal(t.TempDir(), "http://x", []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Put(context.Background(), "a/b", strings.NewReader("hello"), 5); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := l.Size(context.Background(), "a/b"); err != nil || n != 5 {
+		t.Fatalf("size %d %v", n, err)
+	}
+	if _, err := l.Size(context.Background(), "a/none"); err != ErrNotFound {
+		t.Fatalf("missing: %v", err)
+	}
+}

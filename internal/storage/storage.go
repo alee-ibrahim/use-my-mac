@@ -51,3 +51,9 @@ func ValidKey(key string) error {
 	}
 	return nil
 }
+
+// Sizer is implemented by backends that can report a blob's size without
+// reading it. The scheduler uses it to estimate a task's disk need.
+type Sizer interface {
+	Size(ctx context.Context, key string) (int64, error)
+}

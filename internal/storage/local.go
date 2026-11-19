@@ -145,3 +145,19 @@ func (l *Local) Delete(_ context.Context, key string) error {
 	}
 	return nil
 }
+
+// Size returns a blob's size.
+func (l *Local) Size(_ context.Context, key string) (int64, error) {
+	p, err := l.path(key)
+	if err != nil {
+		return 0, err
+	}
+	fi, err := os.Stat(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}

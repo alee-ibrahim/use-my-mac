@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/agent/telemetry"
+	"github.com/alee-ibrahim/use-my-mac/internal/hostprep"
 	"github.com/alee-ibrahim/use-my-mac/internal/transfer"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
@@ -63,6 +64,12 @@ type Agent struct {
 	faults        map[string]execFault
 	preflightID   int64
 	lastPreflight time.Time
+
+	// Mac health (see health.go).
+	health    healthState
+	statfs    func(path string) (free, total uint64, err error)
+	homeProbe HomeProbe
+	isMount   func(dir string) bool
 }
 
 type run struct {
@@ -96,6 +103,10 @@ func New(cfg *Config, cred string, collector telemetry.Collector, log *slog.Logg
 		applyQoS: setGroupBackground,
 		unavail:  map[string]api.UnavailableRuntime{},
 		faults:   map[string]execFault{},
+
+		statfs:    statfsDefault,
+		homeProbe: probeHome,
+		isMount:   hostprep.IsMountPoint,
 	}
 	a.ReloadRuntimes(cfg.Runtimes)
 	if collector == nil {
@@ -253,6 +264,22 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	now := time.Now()
 	a.mu.Lock()
+	full := now.Sub(a.health.checkedAt) >= a.cfg.PreflightInterval
+	prevHealth := a.health.reason()
+	a.mu.Unlock()
+	if why := a.checkHealth(now, full); why != "" {
+		a.log.Warn("disk space ran out; stopping tasks", "reason", why)
+		a.stopAll(errDiskFull)
+	}
+	a.mu.Lock()
+	health, iso := a.health.reason(), a.health.iso
+	if health != prevHealth {
+		if health != "" {
+			a.log.Warn("Mac unhealthy; taking no new work", "reason", health)
+		} else {
+			a.log.Info("Mac healthy again")
+		}
+	}
 	if now.Sub(a.lastPreflight) >= a.cfg.PreflightInterval {
 		a.preflightLocked(now)
 	}
@@ -261,6 +288,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	a.lastTel, a.haveTel = tel, true
 	state, changed := a.yield.Update(now, tel)
 	_, reason := a.yield.State()
+	yieldNow := changed && state == api.AgentBusyUser
 	paused := false
 	if a.cfg.PauseFile != "" {
 		if _, err := os.Stat(a.cfg.PauseFile); err == nil {
@@ -269,6 +297,8 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	if paused {
 		state, reason = api.AgentDraining, "paused locally"
+	} else if health != "" {
+		state, reason = api.AgentUnhealthy, health
 	} else if a.drain && state == api.AgentReady {
 		state, reason = api.AgentDraining, "drained by admin"
 		if a.drainReason != "" {
@@ -283,7 +313,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	}
 	a.mu.Unlock()
 
-	if changed && state == api.AgentBusyUser {
+	if yieldNow {
 		a.log.Info("yielding to the Mac's user", "reason", reason)
 		a.stopAll(errYield)
 	}
@@ -298,7 +328,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 
 	hb := api.Heartbeat{State: state, Reason: reason, Telemetry: tel, Running: nonNilS(running),
 		Runtimes: avail, UnavailableRuntimes: unavail, PreflightID: preflightID,
-		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version}
+		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version, Isolation: &iso}
 	var resp api.HeartbeatResponse
 	if err := a.call(ctx, http.MethodPost, "/v1/agent/heartbeat", hb, &resp); err != nil {
 		if ctx.Err() == nil {
@@ -478,6 +508,11 @@ func (a *Agent) report(taskID string, upd api.TaskUpdate) {
 func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	as := r.as
 	upd := api.TaskUpdate{Attempt: as.Attempt}
+	if why := a.healthReason(); why != "" {
+		// It became unhealthy after the router placed the task.
+		upd.Outcome, upd.Error, upd.MacFault = api.OutcomeFailed, "Mac unhealthy: "+why, "Mac unhealthy: "+why
+		return upd
+	}
 	prefix, why := a.runtimeFor(as.Runtime)
 	if why != "" {
 		// The router placed it before it learned; it is the Mac's fault.
@@ -522,7 +557,11 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		for _, in := range as.Inputs {
 			if err := a.download(ctx, in.URL, filepath.Join(workdir, "in", in.Name), m); err != nil {
 				stop()
-				return a.stopped(ctx, upd, "download input "+in.Name+": "+err.Error())
+				upd = a.stopped(ctx, upd, "download input "+in.Name+": "+err.Error())
+				if upd.Outcome == api.OutcomeFailed && isDiskFull(err) {
+					upd.MacFault = "work volume full while downloading input " + in.Name
+				}
+				return upd
 			}
 		}
 		stop()
@@ -539,12 +578,13 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
 	defer cancelRun()
 	qos := a.currentQoS()
-	argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, qos), a.cfg.Sandbox, workdir, prefix, args)
+	argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, qos), prefix, args)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
 	cmd.Env = env
 	tap := &progressTap{p: a.cfg.parserFor(as.Runtime), report: prog.percent}
-	out := io.MultiWriter(logs, tap)
+	full := &diskFullTap{}
+	out := io.MultiWriter(logs, tap, full)
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.WaitDelay = a.cfg.StopGrace
 	setupProc(cmd)
@@ -577,6 +617,11 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 	}
 	if werr != nil {
 		upd.Outcome, upd.Error = api.OutcomeFailed, werr.Error()
+		if full.seen {
+			// The task ran out of work space (quota or disk): the Mac's
+			// fault, it may fit elsewhere.
+			upd.MacFault = "task ran out of disk space on this Mac (" + werr.Error() + ")"
+		}
 		if upd.ExitCode != nil {
 			if why := execFailureReason(prefix[0], nil, *upd.ExitCode); why != "" {
 				upd.RuntimeUnavailable = why
@@ -632,6 +677,8 @@ func (a *Agent) stopped(ctx context.Context, upd api.TaskUpdate, fallback string
 		_, why := a.yield.State()
 		a.mu.Unlock()
 		upd.Outcome, upd.Error = api.OutcomeYielded, why
+	case errors.Is(cause, errDiskFull):
+		upd.Outcome, upd.Error, upd.MacFault = api.OutcomeFailed, cause.Error(), cause.Error()
 	case errors.Is(cause, errCancel), errors.Is(cause, errPause), errors.Is(cause, errStop):
 		upd.Outcome, upd.Error = api.OutcomeCancelled, cause.Error()
 	case ctx.Err() == nil && fallback != "":

@@ -40,9 +40,9 @@ func SubstituteArgs(args []string, workdir string, inputs, outputs map[string]bo
 	return out, nil
 }
 
-// BuildArgv composes the final command line: priority wrapper, optional
-// sandbox, then the allowlisted runtime prefix and the task's arguments.
-func BuildArgv(goos, priority string, sandbox bool, workdir string, runtime []string, args []string) []string {
+// BuildArgv composes the final command line: the priority wrapper, then the
+// allowlisted runtime prefix and the task's arguments.
+func BuildArgv(goos, priority string, runtime []string, args []string) []string {
 	var argv []string
 	switch {
 	case goos == "darwin" && priority == "background":
@@ -56,27 +56,8 @@ func BuildArgv(goos, priority string, sandbox bool, workdir string, runtime []st
 	case goos == "linux" && priority != "none":
 		argv = append(argv, "/usr/bin/nice", "-n", "19")
 	}
-	if goos == "darwin" && sandbox {
-		argv = append(argv, "/usr/bin/sandbox-exec", "-p", SandboxProfile(workdir))
-	}
 	argv = append(argv, runtime...)
 	return append(argv, args...)
-}
-
-// SandboxProfile allows everything except writes outside the work dir and a
-// few device files. Network stays allowed (tasks may stream from URLs).
-func SandboxProfile(workdir string) string {
-	q := func(s string) string {
-		return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
-	}
-	return strings.Join([]string{
-		"(version 1)",
-		"(allow default)",
-		"(deny file-write*)",
-		"(allow file-write* (subpath " + q(workdir) + ")",
-		"  (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\")",
-		"  (regex #\"^/dev/fd/\") (regex #\"^/private/var/folders/\"))",
-	}, "\n")
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)

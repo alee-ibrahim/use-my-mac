@@ -204,7 +204,7 @@ Authenticate with `Authorization: Bearer umm_key_...`.
 | macOS collectors (`ioreg`, `ps`, `vm_stat`, `pmset`, `sysctl`, `df`) | checked field by field against the tools on a Mac Studio (M3 Ultra, macOS 27); real output kept as test fixtures |
 | Agent + router on a Mac as the logged-in user: enrolment, map/reduce video encode with `hevc_videotoolbox` under `taskpolicy -b`, yield on real user CPU load, requeue, cooldown, re-run | trialled on one Mac |
 | `umm fleet`: inventory parsing, sudoers rendering, secret handling (no secrets in argv/logs); SSH transport, sftp staging, sudo-over-stdin, real `visudo -cf` validation and NOPASSWD scoping against an OpenSSH container | unit + integration tests (Docker) |
-| `install.sh`, `umm fleet` on a real Mac, LaunchDaemon, `_umm` user, `sandbox-exec`, VideoToolbox from a daemon user | **not yet run on a Mac** |
+| `install.sh`, `umm fleet` on a real Mac, LaunchDaemon, `_umm` user, work volume (`diskutil`), `task_network` pf anchor, VideoToolbox from a daemon user | **not yet run on a Mac** |
 | OIDC login against a live Entra tenant | **not yet tested** |
 
 ## Contributing

@@ -35,11 +35,11 @@ func TestAdaptiveQoS(t *testing.T) {
 
 func TestLaunchArgvAdaptive(t *testing.T) {
 	rt := []string{"/bin/x"}
-	bg := BuildArgv("darwin", launchPriority(PriorityAdaptive, QoSBackground), false, "/w", rt, nil)
+	bg := BuildArgv("darwin", launchPriority(PriorityAdaptive, QoSBackground), rt, nil)
 	if want := []string{"/usr/sbin/taskpolicy", "-c", "utility", "-b", "/usr/bin/nice", "-n", "10", "/bin/x"}; !reflect.DeepEqual(bg, want) {
 		t.Errorf("adaptive/background argv = %v", bg)
 	}
-	ut := BuildArgv("darwin", launchPriority(PriorityAdaptive, QoSUtility), false, "/w", rt, nil)
+	ut := BuildArgv("darwin", launchPriority(PriorityAdaptive, QoSUtility), rt, nil)
 	if want := []string{"/usr/sbin/taskpolicy", "-c", "utility", "/usr/bin/nice", "-n", "10", "/bin/x"}; !reflect.DeepEqual(ut, want) {
 		t.Errorf("adaptive/utility argv = %v", ut)
 	}

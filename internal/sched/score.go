@@ -66,13 +66,58 @@ type Candidate struct {
 	ReservedMB  int // RAM reserved by those tasks
 	Telemetry   api.Telemetry
 	FleetMaxCPU int // largest CPU count in the fleet (for the capacity factor)
+	// Work space reported by the agent (WorkKnown false for older agents):
+	// available now, and with no task running.
+	WorkKnown    bool
+	WorkSpace    uint64
+	WorkCapacity uint64
+	// ReservedDisk is the disk need of our tasks assigned or running on it.
+	ReservedDisk uint64
 }
 
 // Need is what the task requires.
 type Need struct {
 	Runtime   string
 	Resources api.Resources
+	// DiskBytes is the task's work-space need (see DiskNeed).
+	DiskBytes uint64
 }
+
+// DiskNeed is a task's work-space need: DiskEstimateMB when set, else twice
+// its known input bytes plus DiskMB.
+func DiskNeed(r api.Resources, inputBytes uint64) uint64 {
+	if r.DiskEstimateMB > 0 {
+		return uint64(r.DiskEstimateMB) << 20
+	}
+	return 2*inputBytes + uint64(max(r.DiskMB, 0))<<20
+}
+
+// FitsAnywhere reports whether a task needing need bytes could ever run on
+// one of the candidates that can run its runtime: false only when every
+// such Mac reports its work capacity and all are too small. biggest is the
+// largest capacity seen.
+func FitsAnywhere(cs []Candidate, runtime string, need uint64) (ok bool, biggest uint64, known bool) {
+	if need == 0 {
+		return true, 0, false
+	}
+	for _, c := range cs {
+		if !contains(c.Runtimes, runtime) {
+			continue
+		}
+		if !c.WorkKnown {
+			return true, 0, false
+		}
+		known = true
+		biggest = max(biggest, c.WorkCapacity)
+		if c.WorkCapacity >= need {
+			return true, biggest, true
+		}
+	}
+	return !known, biggest, known
+}
+
+// GiB formats bytes for reasons.
+func GiB(b uint64) string { return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30)) }
 
 // Result is the outcome of scoring one candidate.
 type Result struct {
@@ -193,6 +238,17 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 		needDisk := uint64(l.MinDiskFreeMB+n.Resources.DiskMB) << 20
 		if t.DiskFreeBytes < needDisk {
 			return reject("not enough free disk")
+		}
+	}
+
+	// Work space (agents that report it).
+	if c.WorkKnown && n.DiskBytes > 0 {
+		if n.DiskBytes > c.WorkCapacity {
+			return reject("needs %s work space, Mac holds at most %s", GiB(n.DiskBytes), GiB(c.WorkCapacity))
+		}
+		if c.WorkSpace < c.ReservedDisk+n.DiskBytes {
+			return reject("not enough work space now (needs %s, %s free)", GiB(n.DiskBytes),
+				GiB(c.WorkSpace-min(c.WorkSpace, c.ReservedDisk)))
 		}
 	}
 

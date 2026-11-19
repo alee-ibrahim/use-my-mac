@@ -15,7 +15,8 @@ files go, how it is secured and what happens when things fail.
 
 Code layout: `internal/sched` (pure scoring, no I/O), `internal/engine` (state machine on top of the
 store), `internal/store` (SQL), `internal/storage` (blob backends), `internal/agent` (agent, yield policy,
-argv/env building), `internal/agent/telemetry` (collectors and parsers), `internal/server` (HTTP),
+argv/env building), `internal/agent/telemetry` (collectors and parsers), `internal/hostprep` (root-side work volume and pf
+anchor), `internal/server` (HTTP),
 `internal/auth` (secrets, sessions, OIDC).
 
 ## Data model
@@ -49,11 +50,20 @@ scheduler:
 ### Hard filters
 
 A Mac is skipped (with a reason shown in the dashboard) if it is offline, drained, opted out, quarantined,
-or not `ready` (yielding, cooldown, paused). It is also skipped if it is excluded for this task, lacks the
+or not `ready` (yielding, cooldown, paused, unhealthy). It is also skipped if it is excluded for this task, lacks the
 runtime (or has it allowlisted but unavailable: the agent's preflight failed, or a task could not execute it), has non-matching labels or is at `max_tasks`. Resource reasons: the task needs more RAM than the Mac
 has, or free memory minus RAM reserved by our other tasks on it is too small. Machine-state reasons: critical
 memory pressure, critical thermal state, too little free disk, or running on battery (unless
 `allow_battery`, and then only above `min_battery_percent`).
+
+**Work space.** Each agent reports the disk space it has for work (`work_space_bytes`: free space on its
+work volume, less the reserve kept for the Mac's user) and what it would have with no task running
+(`work_capacity_bytes`). A task's need is `resources.disk_estimate_mb` if set, otherwise twice the size of
+its inputs plus `disk_mb`. The router sizes blob inputs and upstream outputs in its own storage (a `HEAD`
+on S3, cached per task); plain URL inputs count as 0, so set `disk_estimate_mb` for those. A Mac is skipped
+when its work space minus the needs of our other tasks on it is smaller than the task's need. If every Mac
+that has the runtime reports a capacity below the need, the task fails at once with "no Mac has enough work
+space" instead of waiting forever. Agents too old to report work space are not filtered.
 
 ### Score
 
@@ -213,11 +223,85 @@ notifications are dropped rather than ever blocking the engine, and a keep-alive
 - **What a task can do:** run one of the Mac's allowlisted runtimes (a fixed argv prefix with an absolute
   path) plus arguments. It cannot choose the executable. Allowlist specific scripts rather than bare
   interpreters. The environment is minimal: tasks cannot set `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` or
-  `LD_*`. Tasks run as the non-admin `_umm` user in a fresh `0700` work dir that is deleted afterwards.
-  Optionally `sandbox-exec` denies writes outside the work dir. Logs are capped per attempt.
+  `LD_*`. Tasks run as the non-admin `_umm` user in a fresh `0700` work dir that is deleted afterwards, on a
+  volume of their own, and the Mac refuses work while any user's home folder is open to `_umm` (see
+  [Task isolation](#task-isolation)). Logs are capped per attempt.
 - **Server hardening:** distroless non-root image, read-only root filesystem, request size limits,
   `nosniff`, `X-Frame-Options: DENY` for the UI.
 - **Agent updates** are installed by a separate root updater and only if signed (next section).
+
+## Task isolation
+
+Tasks run as `_umm`, a hidden non-admin user with no login shell, so macOS's own file permissions are the
+main barrier. Nothing here shows anything to the Mac's user: no prompts, notifications, dock or menu-bar
+items, and no disk icon. (`sandbox-exec` was an option before; Apple has deprecated it and it has been
+removed. A config that still says `sandbox: true` logs a warning and is otherwise ignored.)
+
+**Home folders.** At startup and every `preflight_interval` the agent checks each folder in `/Users`
+(`home_check.root`; `Shared` and dot-entries are skipped, `home_check.ignore`). A home is *exposed* if its
+mode gives others read or search (`o+r`/`o+x`), or if `_umm` can read or traverse it anyway: the agent asks
+the kernel with `access(2)` as `_umm`, which on macOS also evaluates ACLs (e.g. an `everyone` allow entry)
+and group membership. While any home is exposed the agent reports the state **unhealthy** with the
+folders and modes as the reason (dashboard: red badge; hover it, or open the Mac page) and takes no new
+work; running tasks are left to finish. Stock macOS homes are `drwxr-x---+` and pass. Fix with
+`chmod 750 /Users/<name>` (and `chmod -N` for stray ACLs).
+
+**Work volume.** The root side (`umm-agent prepare`, run by the installers and at the start of every root
+updater cycle, so enrolled Macs get it on their next update check without SSH) creates an APFS volume,
+`umm-work` by default, in the data volume's container:
+
+```text
+diskutil apfs addVolume <container> APFS umm-work -quota <size> -nomount
+```
+
+`-nomount` and an `/etc/fstab` line `UUID=<uuid> <work_dir> apfs rw,nobrowse` mean it is never mounted
+under `/Volumes` and is hidden from Finder and the desktop; it is then mounted at `work_dir`, owned by
+`_umm` with mode `0700`, with Spotlight indexing off and excluded from Time Machine. The quota is
+`work_volume.quota`: `auto` (default) is the disk's size minus the reserve below, or a fixed size such as
+`400g`. It is set when the volume is created. The volume shares the disk's free space with the system, so
+the quota is a ceiling, not an allocation. It is only mounted over an empty work dir (no task running).
+Creating it is idempotent and failure is not fatal: the agent then uses the plain directory as before and
+the Mac page says why. If the status says the volume exists but it is not mounted (e.g. right after boot,
+before the updater ran), the Mac is unhealthy until it is. Uninstalling deletes the volume and the fstab
+line.
+
+**Disk reserve.** `min_free_disk` keeps the larger of `min` (50 GiB) and `percent` (15 %) of the system
+disk free for the Mac's user (both 0 off macOS). The agent's work space is the work volume's free space
+capped by the system disk's free space above the reserve; the router uses it to place tasks (see *Work
+space* above). If free space on the system disk falls below the reserve (the user filled it, or a task
+wrote more than its estimate) the Mac turns unhealthy and running tasks are stopped. A task that runs out
+of space (the work volume's quota or the reserve; the tool printing "No space left on device" or "Disc
+quota exceeded" and failing; `ENOSPC`/`EDQUOT` while downloading inputs) ends as a **Mac fault**: the
+attempt is `unavailable`, no failure is counted and the task moves to another Mac (up to
+`max_mac_faults`).
+
+**Network (optional).** `task_network: deny` limits what `_umm` can connect to. The root side loads a pf
+anchor (`com.apple/250.use-my-mac`, evaluated by the stock `/etc/pf.conf`'s `anchor "com.apple/*"`, so
+that file is not edited) that passes TCP and UDP from `_umm` only to the router's host and
+`task_network_allow` (host names are resolved when the rules are loaded, every updater cycle) and blocks
+the rest:
+
+```text
+table <umm_allow> const { 192.0.2.10, 198.51.100.0/24 }
+pass out quick proto { tcp, udp } from any to <umm_allow> user 451 keep state
+block return out quick proto { tcp, udp } from any to any user 451
+```
+
+pf's `user` match works on macOS: xnu's `pf_socket_lookup` (`bsd/net/pf.c`) finds the TCP/UDP socket a
+packet belongs to and takes the uid from the socket's credentials (`so_cred`), and `pf_test_rule` compares
+it with the rule's uid. Limits, by construction: it covers TCP and UDP only (not ICMP); it filters the
+user, so the agent's own traffic is subject to it too (hence the router is always allowed, and object
+storage on another host must be listed in `task_network_allow`); DNS lookups go through `mDNSResponder`,
+not `_umm`, so names still resolve (DNS remains a narrow side channel); and anything a system daemon fetches
+on a task's behalf is not attributed to `_umm`. pf rules do not survive a reboot: the updater re-applies
+them at boot (`RunAtLoad`), and the agent only treats them as in force when the status records the current
+boot time; until then a Mac with `deny` is unhealthy (fail closed). If the main ruleset does not evaluate
+`com.apple/*` (someone replaced `/etc/pf.conf`), nothing is claimed and the Mac stays unhealthy. `allow`
+(the default) loads nothing and flushes the anchor.
+
+**Status file.** The root side records what it did in `host.json` next to `agent.yaml` (root-owned,
+readable by `_umm`). The agent reads it and reports `isolation` (work volume, network, home folders, work
+space, reserve) in its heartbeat; the Mac page shows it.
 
 ## Agent self-update
 
@@ -355,6 +439,9 @@ removes its metrics; its past attempts stay with their jobs.
 | New agent version does not start or heartbeat | updater waits `verify_timeout` | previous binary restored, `rolled_back` reported, that version retried after 1 h, 2 h, … 24 h |
 | Updater dies or the Mac reboots mid-update | pending state in `state.json` | next run (at boot) finishes verification or rolls back |
 | Release unsigned, tampered or for another version | signature / checksum / trusted comment | nothing installed, `failed` reported |
+| A user's home folder is readable by `_umm`, disk below the reserve, work volume not mounted, or `task_network: deny` not in force | agent health checks (startup, every `preflight_interval`; disk every heartbeat) | Mac `unhealthy` with the reason: no new work; a task placed just before is a Mac fault |
+| A task runs out of disk (quota, reserve, `ENOSPC`/`EDQUOT`) | agent | task stopped; Mac fault: attempt `unavailable`, no failure counted, rescheduled |
+| No Mac could ever hold a task's inputs and outputs | router (work capacity of every Mac with the runtime) | task `failed` at once: "no Mac has enough work space" |
 
 Placement uses at-least-once semantics: a task may run more than once (e.g. a partitioned agent keeps
 running briefly). Tasks should be idempotent; outputs are overwritten per key.

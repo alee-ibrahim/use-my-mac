@@ -199,19 +199,148 @@ func TestMacFaultCap(t *testing.T) {
 // Ordinary failures (not 127, not runtime_unavailable) still count.
 func TestMacFaultClassification(t *testing.T) {
 	cases := []struct {
-		u    api.TaskUpdate
-		want bool
+		u       api.TaskUpdate
+		want    bool
+		runtime bool
 	}{
-		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(127)}, true},
-		{api.TaskUpdate{Outcome: api.OutcomeFailed, RuntimeUnavailable: "program not found: /x"}, true},
-		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(1)}, false},
-		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(126)}, false},
-		{api.TaskUpdate{Outcome: api.OutcomeTimeout, ExitCode: ip(127)}, false},
-		{api.TaskUpdate{Outcome: api.OutcomeFailed}, false},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(127)}, true, true},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, RuntimeUnavailable: "program not found: /x"}, true, true},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(1)}, false, false},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(126)}, false, false},
+		{api.TaskUpdate{Outcome: api.OutcomeTimeout, ExitCode: ip(127)}, false, false},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed}, false, false},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(1), MacFault: "work volume full"}, true, false},
+		{api.TaskUpdate{Outcome: api.OutcomeSucceeded, MacFault: "x"}, false, false},
 	}
 	for i, c := range cases {
-		if got := macFault(c.u) != ""; got != c.want {
-			t.Errorf("case %d: macFault=%v want %v", i, got, c.want)
+		why, rt := macFault(c.u)
+		if got := why != ""; got != c.want || (got && rt != c.runtime) {
+			t.Errorf("case %d: macFault=%v runtime=%v want %v/%v", i, got, rt, c.want, c.runtime)
 		}
+	}
+}
+
+// A Mac fault (disk full, unhealthy) reschedules without counting a failure
+// and without touching the Mac's runtimes. An unhealthy Mac gets no work and
+// its reason is shown.
+func TestMacFaultReschedulesAndUnhealthyGetsNoWork(t *testing.T) {
+	h := newHarness(t)
+	a := h.enrol("a", 1)
+	b := h.enrol("b", 1)
+	h.hbRuntimes(a, 1, []string{"sh"})
+	if _, err := h.e.Heartbeat(h.ctx, b, api.Heartbeat{State: api.AgentReady, Telemetry: activeUserTel(),
+		Runtimes: []string{"sh"}, PreflightID: 1, MaxTasks: 1}); err != nil {
+		t.Fatal(err)
+	}
+	spec := simpleTask("t")
+	spec.MaxRetries = ip(0)
+	j := h.submit(api.JobSpec{Tasks: []api.TaskSpec{spec}})
+	h.tick()
+	as := h.poll(a)
+	if len(as) != 1 {
+		t.Fatal("expected the task on a")
+	}
+	if err := h.e.TaskUpdate(h.ctx, a, as[0].TaskID, api.TaskUpdate{Attempt: 1, Outcome: api.OutcomeFailed,
+		ExitCode: ip(1), Error: "exit status 1", MacFault: "work volume is full"}); err != nil {
+		t.Fatal(err)
+	}
+	d := h.task(j.Tasks[0].ID)
+	if d.State != api.StatePending || d.Failures != 0 || len(d.Attempts) != 1 || d.Attempts[0].Outcome != api.OutcomeUnavailable {
+		t.Fatalf("want pending/unavailable without a failure; got %s failures=%d %+v", d.State, d.Failures, d.Attempts)
+	}
+	if m := h.mac(a); len(m.Runtimes) != 1 || len(m.UnavailableRuntimes) != 0 {
+		t.Fatalf("a Mac fault must not touch runtimes: %+v / %+v", m.Runtimes, m.UnavailableRuntimes)
+	}
+	if evs, _ := h.e.Events(h.ctx, []string{api.EventMacFault}, "", time.Time{}, 10); len(evs) != 1 {
+		t.Fatalf("want one mac.fault event, got %d", len(evs))
+	}
+	// a is now unhealthy: b gets the task even though a scores higher.
+	why := "home directories readable by the agent's user: /Users/x (drwxr-xr-x)"
+	if _, err := h.e.Heartbeat(h.ctx, a, api.Heartbeat{State: api.AgentUnhealthy, Reason: why, Telemetry: goodTel(),
+		Runtimes: []string{"sh"}, PreflightID: 1, MaxTasks: 1, Running: []string{},
+		Isolation: &api.Isolation{HomeDirs: "exposed", WorkVolume: "dedicated"}}); err != nil {
+		t.Fatal(err)
+	}
+	m := h.mac(a)
+	if m.AgentState != api.AgentUnhealthy || m.StateReason != why || m.Isolation == nil || m.Isolation.HomeDirs != "exposed" {
+		t.Fatalf("unhealthy view: %+v", m)
+	}
+	h.tick()
+	if d = h.task(d.ID); d.AgentID != b {
+		t.Fatalf("task must go to b, got %q", d.AgentID)
+	}
+}
+
+func (h *harness) hbSpace(id string, space, capacity uint64) {
+	h.t.Helper()
+	if _, err := h.e.Heartbeat(h.ctx, id, api.Heartbeat{State: api.AgentReady, Telemetry: goodTel(), Runtimes: []string{"sh"},
+		PreflightID: 1, MaxTasks: h.max[id], Running: []string{},
+		Isolation: &api.Isolation{WorkSpaceBytes: space, WorkCapacityBytes: capacity}}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// Tasks go only where their inputs plus outputs fit; a task no Mac could
+// ever hold fails at once with a clear reason.
+func TestWorkSpacePlacement(t *testing.T) {
+	h := newHarness(t)
+	small := h.enrol("small", 1)
+	big := h.enrol("big", 1)
+	h.hbSpace(small, 100<<30, 100<<30)
+	h.hbSpace(big, 300<<30, 900<<30) // busy disk now, roomy when idle
+
+	// 60 GiB blob input: needs 120 GiB, only "big" has room now.
+	if err := h.e.Blobs().Put(h.ctx, "uploads/in.mov", strings.NewReader("x"), 1); err != nil {
+		t.Fatal(err)
+	}
+	spec := simpleTask("fits")
+	spec.Inputs = []api.Input{{Name: "in", Blob: "uploads/in.mov"}}
+	spec.Resources.DiskEstimateMB = 120 << 10
+	j := h.submit(api.JobSpec{Tasks: []api.TaskSpec{spec}})
+	h.tick()
+	if d := h.task(j.Tasks[0].ID); d.AgentID != big {
+		t.Fatalf("120 GiB task must go to big, got %q (%+v)", d.AgentID, d.Placement)
+	}
+
+	// 500 GiB task: no Mac has room now, but big could when idle: it waits.
+	wait := simpleTask("waits")
+	wait.Resources.DiskEstimateMB = 500 << 10
+	// 1 TiB task: nobody could ever hold it: fails clearly.
+	huge := simpleTask("huge")
+	huge.Resources.DiskEstimateMB = 1 << 20
+	j2 := h.submit(api.JobSpec{Tasks: []api.TaskSpec{wait, huge}})
+	h.tick()
+	for _, tk := range j2.Tasks {
+		d := h.task(tk.ID)
+		switch tk.Key {
+		case "waits":
+			if d.State != api.StatePending {
+				t.Fatalf("waits: %s %s", d.State, d.Error)
+			}
+		case "huge":
+			if d.State != api.StateFailed || !strings.Contains(d.Error, "no Mac has enough work space") ||
+				!strings.Contains(d.Error, "900.0 GiB") {
+				t.Fatalf("huge: %s %q", d.State, d.Error)
+			}
+		}
+	}
+}
+
+// The default estimate is twice the inputs the router can size.
+func TestDiskNeedFromBlobs(t *testing.T) {
+	h := newHarness(t)
+	if err := h.e.Blobs().Put(h.ctx, "uploads/a", strings.NewReader("12345"), 5); err != nil {
+		t.Fatal(err)
+	}
+	spec := simpleTask("t")
+	spec.Inputs = []api.Input{{Name: "a", Blob: "uploads/a"}, {Name: "u", URL: "https://example.com/x"}}
+	spec.Resources.DiskMB = 1
+	j := h.submit(api.JobSpec{Tasks: []api.TaskSpec{spec}})
+	ts, _ := h.e.st.TasksByJob(h.ctx, j.ID)
+	h.e.mu.Lock()
+	n := h.e.diskNeedLocked(h.ctx, ts[0], spec)
+	h.e.mu.Unlock()
+	if n != 10+1<<20 {
+		t.Fatalf("need %d", n)
 	}
 }

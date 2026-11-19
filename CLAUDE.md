@@ -21,6 +21,8 @@ failure handling.
 - `internal/agent`: agent loop, yield state machine, argv/env building. `internal/agent/telemetry` holds
   macOS collectors. Parsers are pure and tested with fixtures; only `default_darwin.go` /
   `default_other.go` are build-tagged.
+- `internal/hostprep`: root-side Mac preparation (work volume, pf anchor), run by `umm-agent prepare` and
+  the updater. Commands go through an injectable runner; tests fake `diskutil`/`pfctl`.
 - `internal/server`: HTTP handlers, auth middleware, OIDC login.
 - `internal/integration`: router + real agents + real processes with simulated telemetry.
 

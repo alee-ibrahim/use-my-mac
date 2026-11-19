@@ -399,12 +399,15 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 	for _, a := range agents {
 		m := api.Mac{ID: a.ID, Name: a.Name, Online: e.online(a.ID, now), LastSeen: tptr(a.LastSeen),
 			AgentState: a.State, Drain: a.Drain, OptedOut: a.OptedOut, MaxTasks: a.MaxTasks,
-			Running: nonNil(running[a.ID]), Version: a.Version, CreatedAt: time.UnixMilli(a.CreatedAt).UTC()}
+			Running: nonNil(running[a.ID]), Version: a.Version, CreatedAt: time.UnixMilli(a.CreatedAt).UTC(),
+			StateReason: a.Reason}
 		if a.QuarantinedUntil > ms(now) {
 			m.Quarantined = tptr(a.QuarantinedUntil)
 		}
 		if !m.Online {
-			m.AgentState = "offline"
+			m.AgentState, m.StateReason = "offline", ""
+		} else if l := e.live[a.ID]; l != nil {
+			m.Isolation = l.hb.Isolation
 		}
 		m.Update = macUpdate(updates[a.ID], selfupdate.ResolveTarget(us, e.version, a.ID).Version)
 		_ = json.Unmarshal([]byte(a.Runtimes), &m.Runtimes)
