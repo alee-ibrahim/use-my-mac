@@ -259,30 +259,34 @@ func MiseEnv(p misePaths, ceiling string, locked bool, maxCacheBytes uint64) map
 	}
 	cfg := filepath.Join(p.Root, "config")
 	return map[string]string{
-		"MISE_DATA_DIR":                p.Data,
-		"MISE_CACHE_DIR":               p.Cache,
-		"MISE_STATE_DIR":               filepath.Join(p.Root, "state"),
-		"MISE_CONFIG_DIR":              cfg,
-		"MISE_GLOBAL_CONFIG_FILE":      filepath.Join(cfg, "none.toml"),
-		"MISE_SYSTEM_CONFIG_FILE":      filepath.Join(cfg, "none-system.toml"),
-		"MISE_SYSTEM_DATA_DIR":         filepath.Join(p.Root, "system"),
-		"MISE_CEILING_PATHS":           ceiling,
-		"MISE_SAFE":                    "1",
-		"MISE_LOCKED":                  b(locked),
-		"MISE_AUTO_INSTALL":            "0",
-		"MISE_EXEC_AUTO_INSTALL":       "0",
-		"MISE_NOT_FOUND_AUTO_INSTALL":  "0",
-		"MISE_SYSTEM_PACKAGES_SUDO":    "0",
-		"MISE_SYSTEM_DEPS":             "warn",
-		"MISE_USE_VERSIONS_HOST":       "0",
-		"MISE_USE_VERSIONS_HOST_TRACK": "0",
-		"MISE_NETRC":                   "0",
-		"MISE_GITHUB_GH_CLI_TOKENS":    "0",
-		"MISE_DOWNLOAD_CACHE":          b(locked),
-		"MISE_DOWNLOAD_CACHE_MAX_SIZE": fmt.Sprintf("%dMiB", maxCacheBytes>>20),
-		"MISE_COLOR":                   "0",
-		"MISE_TERMINAL_PROGRESS":       "0",
-		"NO_COLOR":                     "1",
+		"MISE_DATA_DIR":           p.Data,
+		"MISE_CACHE_DIR":          p.Cache,
+		"MISE_STATE_DIR":          filepath.Join(p.Root, "state"),
+		"MISE_CONFIG_DIR":         cfg,
+		"MISE_GLOBAL_CONFIG_FILE": filepath.Join(cfg, "none.toml"),
+		"MISE_SYSTEM_CONFIG_FILE": filepath.Join(cfg, "none-system.toml"),
+		"MISE_SYSTEM_DATA_DIR":    filepath.Join(p.Root, "system"),
+		"MISE_CEILING_PATHS":      ceiling,
+		// Only mise.toml counts as project config: no .tool-versions,
+		// mise.local.toml, .mise.toml, mise.<env>.toml or idiomatic files.
+		"MISE_OVERRIDE_CONFIG_FILENAMES":        "mise.toml",
+		"MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES": "none",
+		"MISE_SAFE":                             "1",
+		"MISE_LOCKED":                           b(locked),
+		"MISE_AUTO_INSTALL":                     "0",
+		"MISE_EXEC_AUTO_INSTALL":                "0",
+		"MISE_NOT_FOUND_AUTO_INSTALL":           "0",
+		"MISE_SYSTEM_PACKAGES_SUDO":             "0",
+		"MISE_SYSTEM_DEPS":                      "warn",
+		"MISE_USE_VERSIONS_HOST":                "0",
+		"MISE_USE_VERSIONS_HOST_TRACK":          "0",
+		"MISE_NETRC":                            "0",
+		"MISE_GITHUB_GH_CLI_TOKENS":             "0",
+		"MISE_DOWNLOAD_CACHE":                   b(locked),
+		"MISE_DOWNLOAD_CACHE_MAX_SIZE":          fmt.Sprintf("%dMiB", maxCacheBytes>>20),
+		"MISE_COLOR":                            "0",
+		"MISE_TERMINAL_PROGRESS":                "0",
+		"NO_COLOR":                              "1",
 	}
 }
 
@@ -328,4 +332,31 @@ func ParseGitHubToken(b []byte) (string, error) {
 		}
 	}
 	return tok, nil
+}
+
+// CheckMiseConfigFiles reads `mise config ls --json`: the config files
+// mise loaded. It must be exactly the task's mise.toml (config).
+func CheckMiseConfigFiles(ls []byte, config string) error {
+	var files []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(ls, &files); err != nil {
+		return fmt.Errorf("unexpected `mise config ls` output: %w", err)
+	}
+	var other []string
+	found := false
+	for _, f := range files {
+		if filepath.Clean(f.Path) == filepath.Clean(config) {
+			found = true
+		} else {
+			other = append(other, f.Path)
+		}
+	}
+	if len(other) > 0 {
+		return fmt.Errorf("mise loaded config besides the task's mise.toml: %s", strings.Join(other, ", "))
+	}
+	if !found {
+		return errors.New("mise did not load the task's mise.toml")
+	}
+	return nil
 }

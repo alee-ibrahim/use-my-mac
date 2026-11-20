@@ -127,9 +127,10 @@ type env struct {
 }
 
 type fakeMac struct {
-	name string
-	tel  atomic.Pointer[api.Telemetry]
-	id   string
+	name    string
+	workDir string // the agent's work_dir
+	tel     atomic.Pointer[api.Telemetry]
+	id      string
 }
 
 func (f *fakeMac) set(mut func(*api.Telemetry)) {
@@ -261,6 +262,7 @@ func (e *env) macCfg(name string, maxTasks int, tel api.Telemetry, extra map[str
 	if err := cfg.Normalize(); err != nil {
 		e.t.Fatal(err)
 	}
+	f.workDir = cfg.WorkDir
 	tok, err := e.admin.CreateEnrolmentToken(e.ctx, 1)
 	if err != nil {
 		e.t.Fatal(err)

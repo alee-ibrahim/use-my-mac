@@ -89,7 +89,17 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 
 	// What does the config ask for? mise reads it (MISE_SAFE: nothing in
 	// it runs) and says; the agent only checks its answer.
-	out, err := query("config", "explain", "--file", config, "--json")
+	// mise must have loaded the task's mise.toml and nothing else (no
+	// file left in the work volume's root by an earlier task, no global
+	// or system config).
+	out, err := query("config", "ls", "--json")
+	if err == nil {
+		err = CheckMiseConfigFiles(out, config)
+	}
+	if err != nil {
+		return fail(err.Error())
+	}
+	out, err = query("config", "explain", "--file", config, "--json")
 	var listed []string
 	if err == nil {
 		listed, err = CheckMiseKeys(out)

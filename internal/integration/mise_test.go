@@ -28,6 +28,7 @@ const fakeMise = `#!/bin/sh
 case "$1" in
 --version) echo "2026.11.9 linux-x64 (2026-11-16)" ;;
 config)
+	if [ "$2" = ls ]; then echo '[{"path":"'"$PWD"'/mise.toml","tools":["hello"]}]'; exit 0; fi
 	if grep -q '^\[env\]' "$4"; then
 		echo '[{"key":"env","path":["env"]},{"key":"env.X","path":["env","X"]},{"key":"tools.hello","path":["tools","hello"]}]'
 	else
@@ -320,10 +321,18 @@ func TestMiseRealInstall(t *testing.T) {
 		t.Fatal("set UMM_TEST_MISE_GITHUB_TOKEN_FILE: unauthenticated GitHub API calls from shared runners hit the rate limit")
 	}
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
-	_, cache := e.miseMac("real-mise", bin, func(c *agent.Config) {
+	mac, cache := e.miseMac("real-mise", bin, func(c *agent.Config) {
 		c.Mise.Commands = []string{"jq", "sh"}
 		c.Mise.GitHubTokenFile = tokenFile
 	})
+	// An earlier task (all tasks are the same user) left config in the
+	// work volume's root: it must not load for later tasks.
+	for name, body := range map[string]string{"mise.toml": "[env]\nPLANTED = \"mise.toml\"\n",
+		".tool-versions": "jq 1.6\n", ".mise.toml": "[env]\nPLANTED = \".mise.toml\"\n"} {
+		if err := os.WriteFile(filepath.Join(mac.workDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var allLogs strings.Builder
 	// logs returns a task's log, skipping the test when an install without
 	// a token ran into GitHub's per-IP rate limit.
@@ -347,11 +356,12 @@ func TestMiseRealInstall(t *testing.T) {
 		}
 		t.Logf("run %d log:\n%s", i, l)
 	}
-	// The task's program does not see the token (jq can print its env).
+	// The task's program does not see the token (jq can print its env), nor
+	// anything from the planted config.
 	task := e.runOne(api.TaskSpec{Args: []string{"jq", "-n", "-r",
-		`"token in task env: " + (env.MISE_GITHUB_TOKEN // env.GITHUB_TOKEN // env.GITHUB_API_TOKEN // "none")`},
+		`"token in task env: " + (env.MISE_GITHUB_TOKEN // env.GITHUB_TOKEN // env.GITHUB_API_TOKEN // "none") + ", planted: " + (env.PLANTED // "none")`},
 		Inputs: in, TimeoutSeconds: 300})
-	if l := logs(task); task.State != api.StateSucceeded || !strings.Contains(l, "token in task env: none\n") {
+	if l := logs(task); task.State != api.StateSucceeded || !strings.Contains(l, "token in task env: none, planted: none\n") {
 		t.Fatalf("env: %s %s\n%s", task.State, e.taskError(task.ID), l)
 	}
 	// The cache is shared by tasks running as the same user, so a task can

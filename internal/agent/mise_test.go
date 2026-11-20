@@ -120,6 +120,9 @@ func TestMiseEnv(t *testing.T) {
 		"MISE_CEILING_PATHS": "/w", "MISE_SAFE": "1", "MISE_LOCKED": "1", "MISE_DOWNLOAD_CACHE": "1",
 		"MISE_EXEC_AUTO_INSTALL": "0", "MISE_AUTO_INSTALL": "0", "MISE_NOT_FOUND_AUTO_INSTALL": "0",
 		"MISE_SYSTEM_PACKAGES_SUDO": "0", "MISE_USE_VERSIONS_HOST": "0", "MISE_DOWNLOAD_CACHE_MAX_SIZE": "2048MiB",
+		// Only a file named mise.toml is project config: no .tool-versions,
+		// mise.local.toml, .mise.toml or mise.<env>.toml.
+		"MISE_OVERRIDE_CONFIG_FILENAMES": "mise.toml", "MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES": "none",
 	} {
 		if env[k] != want {
 			t.Errorf("%s = %q, want %q", k, env[k], want)
@@ -267,6 +270,26 @@ func TestParseGitHubToken(t *testing.T) {
 			t.Errorf("%q accepted", bad)
 		} else if len(bad) > 3 && strings.Contains(err.Error(), strings.TrimSpace(bad)) {
 			t.Errorf("error quotes the token: %v", err)
+		}
+	}
+}
+
+func TestCheckMiseConfigFiles(t *testing.T) {
+	cfg := "/w/t1-1/mise.toml"
+	ok := `[{"path":"/w/t1-1/mise.toml","tools":["aqua:jqlang/jq"],"override":false}]`
+	if err := CheckMiseConfigFiles([]byte(ok), cfg); err != nil {
+		t.Error(err)
+	}
+	for _, c := range []struct{ name, json string }{
+		{"local file too", `[{"path":"/w/t1-1/mise.local.toml","tools":[]},{"path":"/w/t1-1/mise.toml","tools":["node"]}]`},
+		{"tool-versions", `[{"path":"/w/t1-1/mise.toml","tools":["node"]},{"path":"/w/t1-1/.tool-versions","tools":["node"]}]`},
+		{"work volume root", `[{"path":"/w/mise.toml","tools":[]},{"path":"/w/t1-1/mise.toml","tools":["node"]}]`},
+		{"global", `[{"path":"/etc/mise/config.toml","tools":["node"]}]`},
+		{"none", `[]`},
+		{"not json", `nope`},
+	} {
+		if err := CheckMiseConfigFiles([]byte(c.json), cfg); err == nil {
+			t.Errorf("%s: accepted", c.name)
 		}
 	}
 }
