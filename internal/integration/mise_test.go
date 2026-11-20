@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/alee-ibrahim/use-my-mac/internal/agent"
 	"github.com/alee-ibrahim/use-my-mac/internal/engine"
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
+	"github.com/alee-ibrahim/use-my-mac/pkg/client"
 )
 
 // fakeMise stands in for mise where it is not installed (CI). It reads the
@@ -588,15 +590,14 @@ func TestMiseNetworkFailureIsMacFault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var taskID string
-	waitFor(t, "an attempt on limited-mac to end", 10*time.Second, func() bool {
-		j, _ := e.app.Job(e.ctx, job.ID)
-		taskID = j.Tasks[0].ID
-		d, _ := e.app.Task(e.ctx, taskID)
-		return d != nil && len(d.Attempts) > 0 && d.Attempts[0].Outcome != ""
-	})
-	d, _ := e.app.Task(e.ctx, taskID)
-	if a := d.Attempts[0]; a.AgentID != limited.id || a.Outcome != api.OutcomeUnavailable || d.Failures != 0 {
+	j, err := e.app.Job(e.ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The attempt is "running" until the agent's report reaches the router,
+	// which then records the final outcome in one step.
+	a, d := e.endedAttempt(j.Tasks[0].ID, 1)
+	if a.AgentID != limited.id || a.Outcome != api.OutcomeUnavailable || d.Failures != 0 {
 		t.Fatalf("attempt on limited-mac: %+v, failures %d", a, d.Failures)
 	}
 	good, _ := e.miseMac("good-mac", bin, func(c *agent.Config) { c.TaskEnv["FAKE_MISE_RECORD"] = t.TempDir() })
@@ -664,4 +665,21 @@ func TestMisePreflight(t *testing.T) {
 	waitFor(t, "listed-mac to offer mise", 5*time.Second, func() bool {
 		return slices.Contains(macByID(e, ok.id).Runtimes, agent.MiseRuntime)
 	})
+}
+
+// endedAttempt waits until attempt n of a task has its final outcome (not
+// running) and returns it with the task.
+func (e *env) endedAttempt(taskID string, n int) (api.Attempt, *client.TaskDetail) {
+	e.t.Helper()
+	var a api.Attempt
+	var d *client.TaskDetail
+	waitFor(e.t, fmt.Sprintf("attempt %d of %s to end", n, taskID), 30*time.Second, func() bool {
+		d, _ = e.app.Task(e.ctx, taskID)
+		if d == nil || len(d.Attempts) < n {
+			return false
+		}
+		a = d.Attempts[n-1]
+		return a.Outcome != "" && a.Outcome != api.OutcomeRunning
+	})
+	return a, d
 }
