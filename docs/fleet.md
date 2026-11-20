@@ -121,6 +121,13 @@ umm fleet status    -inventory fleet.yaml                                       
 The updater runs from launchd as root, so the sudoers drop-in keeps granting
 only the three managed scripts. `uninstall` removes the updater too.
 
+If the dashboard or `umm macs` shows **updater not running** for a Mac (it
+heartbeats, but its updater has not checked in for 45 minutes), launchd is no
+longer starting the updater, typically because of a launch constraint pinned to
+an older binary (see [Design](design.md#agent-self-update), "launchd jobs and
+launch constraints"). `umm fleet upgrade` on that Mac re-registers both
+daemons; current updaters also do this themselves after every update.
+
 Runs are **parallel** (bounded by `-concurrency`, default 5), **idempotent**
 (safe to re-run), and print a per-host result table. A non-zero exit means at
 least one host failed.

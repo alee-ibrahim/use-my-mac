@@ -104,6 +104,8 @@ export type MacUpdate = {
   at?: string
   checked_at?: string
   desired?: string
+  // set when the Mac heartbeats but its updater has stopped checking in
+  warning?: string
 }
 
 export type UpdateEvent = {

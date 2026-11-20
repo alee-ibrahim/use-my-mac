@@ -548,7 +548,7 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		} else if l := e.live[a.ID]; l != nil {
 			m.Isolation = l.hb.Isolation
 		}
-		m.Update = macUpdate(updates[a.ID], selfupdate.ResolveTarget(us, e.version, a.ID).Version)
+		m.Update = macUpdate(updates[a.ID], selfupdate.ResolveTarget(us, e.version, a.ID).Version, m.Online, now)
 		_ = json.Unmarshal([]byte(a.Runtimes), &m.Runtimes)
 		if l := e.live[a.ID]; l != nil && l.faultsLoaded {
 			m.UnavailableRuntimes = l.unavail

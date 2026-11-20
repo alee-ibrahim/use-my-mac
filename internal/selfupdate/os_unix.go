@@ -5,6 +5,7 @@ package selfupdate
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 )
@@ -43,4 +44,18 @@ func Lock(dir string) (func(), error) {
 		return nil, fmt.Errorf("another updater is running")
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+}
+
+// detachShell starts /bin/sh -c script in a new session, so it is neither
+// in this process's process group (which launchd may kill when the job's
+// main process exits) nor waited for. Its output goes to our stderr (the
+// updater log).
+func detachShell(script string) error {
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }

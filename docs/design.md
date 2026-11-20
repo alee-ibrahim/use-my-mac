@@ -443,11 +443,15 @@ download SHA256SUMS + .minisig + bundle ──(bad signature / checksum / wrong 
   │
 drain: report "draining" (router drains the Mac) until no task runs or drain_timeout passes
   │
-save previous binary, write state "pending", atomic swap, launchctl kickstart -k the agent
+save previous binary, write state "pending", atomic swap,
+re-register the agent's job (launchctl bootout + bootstrap) and the runtimes helper's
+  │
   │
 wait ≤ verify_timeout (2 min) for a heartbeat with version vX received after the swap
   ├─ yes ─▶ report succeeded
   └─ no ──▶ restore previous binary, restart, report rolled_back, back off vX (1 h, 2 h, … 24 h)
+  │
+on exit: a detached process re-registers the updater's own job (see "launchd jobs and launch constraints")
 ```
 
 **Policy (router).** The desired version comes from the router: `GET /v1/agent/update` (agent credential)
@@ -498,6 +502,43 @@ pending update before the swap: if the updater dies or the Mac reboots mid-updat
 finishes the verification or rolls back, and discards it if someone else (e.g. `umm fleet upgrade`) replaced
 the binary meanwhile. A file lock stops two cycles overlapping. Log: `/usr/local/var/log/umm-updater.log`.
 Nothing is shown to the Mac's user.
+
+**launchd jobs and launch constraints.** Three jobs run the agent binary: the agent (`<label>`), the updater
+(`<label>.updater`) and the runtimes helper (`<label>.runtimes`). On some Macs, Background Task Management
+(BTM) manages these legacy LaunchDaemons and launchd attaches a lightweight code requirement (LWCR) launch
+constraint to each job that pins the binary's cdhash (`launchctl print system/<label>` shows `properties =
+managed LWCR | has LWCR` and `lwcr = { reqs: {cdhash: {$in: [...]}} }`). Our binaries are ad-hoc signed, so
+the cdhash is their only identity and changes with every release. After a swap the constraint is stale
+(`needs LWCR update`) and the next spawn of the job fails (`job state = spawn failed`, `last exit code = 78:
+EX_CONFIG`). `kickstart` keeps the old registration; `bootout` + `bootstrap` from the plist makes launchd
+evaluate the binary again. So the updater:
+
+1. **after every swap** (update or rollback) re-registers the agent's job instead of kickstarting it (the
+   bootout stops the agent like `kickstart -k` did; tasks were drained first, and after the drain timeout
+   they are requeued as `lost` as before), and the runtimes helper's job unless a helper pass is running;
+2. hands the **reload of its own job** to a detached `/bin/sh` (own session, `setsid`, ignores SIGTERM): it
+   waits until the updater process has exited (at most 30 min), then runs `launchctl bootout
+   system/<label>.updater` and `launchctl bootstrap system <plist>` (retried). The process cannot boot out
+   its own job while it runs. `RunAtLoad` then starts a fresh cycle under the new registration;
+3. **self-heals at the start of every cycle**: it reads `launchctl print` for each job and the binary's
+   cdhash (`codesign -d -vvv`), and re-registers a job whose constraint is stale (`needs LWCR update`, a
+   pinned cdhash that is not the binary's, or `spawn failed` with an LWCR), or an agent job that is not
+   loaded. The agent's job is left alone while it runs tasks; the helper's while a pass runs; the updater's
+   own job is reloaded after the run as above. A job is reloaded at most once an hour. A repair is reported
+   as the update state `repaired` with the job names.
+
+Nothing resets BTM state (`sfltool resetbtm` would reset every login and background item on the Mac).
+
+If the updater's job is already stuck it cannot heal itself (it never runs). The router flags this: a Mac
+that heartbeats while its updater, which has checked in before, has not called `GET /v1/agent/update` for
+more than 3 intervals (45 min) gets `update.warning` = "updater not running: …" in `GET /v1/macs`, shown as
+a badge on the dashboard (Macs, Overview, Mac page) and as the `updater-not-running` flag in `umm macs`.
+Fix by hand on the Mac (or with `umm fleet upgrade`, which re-bootstraps both jobs):
+
+```sh
+sudo launchctl bootout system/<label>.updater
+sudo launchctl bootstrap system /Library/LaunchDaemons/<label>.updater.plist
+```
 
 **Updating the updater.** The updater is the agent binary, so a new release updates both: the next cycle
 runs the new code. The LaunchDaemon plist itself only changes with `install.sh` or `umm fleet
@@ -568,6 +609,7 @@ removes its metrics; its past attempts stay with their jobs.
 | Status report lost on the network | agent retries 5× | if still lost: deadline + grace marks a timeout |
 | New agent version does not start or heartbeat | updater waits `verify_timeout` | previous binary restored, `rolled_back` reported, that version retried after 1 h, 2 h, … 24 h |
 | Updater dies or the Mac reboots mid-update | pending state in `state.json` | next run (at boot) finishes verification or rolls back |
+| launchd keeps a launch constraint pinned to the old binary (BTM-managed jobs) | `launchctl print`: `needs LWCR update`, `spawn failed` | updater re-registers the jobs after each swap and on every cycle; a stuck updater shows as "updater not running" on the router |
 | Release unsigned, tampered or for another version | signature / checksum / trusted comment | nothing installed, `failed` reported |
 | A user's home folder is readable by `_umm`, disk below the reserve, work volume not mounted, or `task_network: deny` not in force | agent health checks (startup, every `preflight_interval`; disk every heartbeat) | Mac `unhealthy` with the reason: no new work; a task placed just before is a Mac fault |
 | A task runs out of disk (quota, reserve, `ENOSPC`/`EDQUOT`) | agent | task stopped; Mac fault: attempt `unavailable`, no failure counted, rescheduled |

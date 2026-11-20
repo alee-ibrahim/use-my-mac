@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -96,7 +97,7 @@ func (e *Engine) UpdateCheck(ctx context.Context, agentID string, relay bool) (a
 func (e *Engine) UpdateReport(ctx context.Context, agentID string, r api.UpdateReport) error {
 	switch r.State {
 	case api.UpdateUpToDate, api.UpdatePaused, api.UpdateDownloading, api.UpdateDraining, api.UpdateApplying,
-		api.UpdateSucceeded, api.UpdateRolledBack, api.UpdateFailed, api.UpdateRefused:
+		api.UpdateSucceeded, api.UpdateRolledBack, api.UpdateFailed, api.UpdateRefused, api.UpdateRepaired:
 	default:
 		return &ValidationError{"unknown update state"}
 	}
@@ -158,15 +159,37 @@ func (e *Engine) UpdateEvents(ctx context.Context, agentID string) ([]api.Update
 	return out, nil
 }
 
-func macUpdate(u *store.AgentUpdate, desired string) *api.MacUpdate {
+// updaterStaleAfter: an online Mac whose updater has not checked in for
+// this long gets an "updater not running" warning.
+const updaterStaleAfter = 3 * selfupdate.UpdaterInterval
+
+func macUpdate(u *store.AgentUpdate, desired string, online bool, now time.Time) *api.MacUpdate {
 	if u == nil {
 		if desired == "" {
 			return nil
 		}
 		return &api.MacUpdate{Desired: desired}
 	}
-	return &api.MacUpdate{State: u.State, FromVersion: u.FromVersion, ToVersion: u.ToVersion, Message: u.Message,
+	m := &api.MacUpdate{State: u.State, FromVersion: u.FromVersion, ToVersion: u.ToVersion, Message: u.Message,
 		At: tptr(u.At), CheckedAt: tptr(u.CheckedAt), Desired: desired}
+	m.Warning = updaterWarning(u.CheckedAt, online, now)
+	return m
+}
+
+// updaterWarning flags a Mac that heartbeats while its updater, which
+// checked in before, has gone quiet: its LaunchDaemon no longer runs (e.g.
+// launchd refuses to spawn it, or it was unloaded). Mac offline or updater
+// never seen: no warning.
+func updaterWarning(checkedAt int64, online bool, now time.Time) string {
+	if !online || checkedAt <= 0 {
+		return ""
+	}
+	quiet := now.Sub(time.UnixMilli(checkedAt))
+	if quiet <= updaterStaleAfter {
+		return ""
+	}
+	return fmt.Sprintf("updater not running: last check-in %s ago (it runs every %s); see the updater LaunchDaemon on the Mac",
+		shortDur(quiet), shortDur(selfupdate.UpdaterInterval))
 }
 
 func truncate(s string, n int) string {
@@ -174,4 +197,9 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// shortDur prints a duration in whole minutes ("47m", "2h5m").
+func shortDur(d time.Duration) string {
+	return strings.TrimSuffix(d.Round(time.Minute).String(), "0s")
 }
