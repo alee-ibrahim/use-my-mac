@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,7 +190,8 @@ func TestMiseConfigNormalize(t *testing.T) {
 	if got := c.Runtimes[MiseRuntime]; len(got) != 1 || got[0] != "/opt/homebrew/bin/mise" {
 		t.Errorf("runtime mise = %v", got)
 	}
-	if c.Mise.CacheDir != "/usr/local/var/umm/mise-cache" || c.Mise.MaxCacheBytes != 2<<30 || !c.Mise.Locked() {
+	if c.Mise.CacheDir != "/usr/local/var/umm/mise-cache" || c.Mise.MaxCacheBytes != 2<<30 || !c.Mise.Locked() ||
+		strings.Join(c.Mise.AllowTools, ",") != "core:*,aqua:*" {
 		t.Errorf("defaults: %+v", c.Mise)
 	}
 	if err := c.Normalize(); err != nil { // idempotent
@@ -214,6 +216,9 @@ func TestMiseConfigNormalize(t *testing.T) {
 		{"relative binary", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, Binary: "mise"}
 		}, "absolute"},
+		{"short name in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"node"}} }, "backend:name"},
+		{"bare backend in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"aqua:"}} }, "backend:name"},
+		{"bad prefix in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"no*"}} }, "backend:name"},
 		{"relative token file", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, GitHubTokenFile: "token"}
 		}, "github_token_file must be an absolute path"},
@@ -290,6 +295,82 @@ func TestCheckMiseConfigFiles(t *testing.T) {
 	} {
 		if err := CheckMiseConfigFiles([]byte(c.json), cfg); err == nil {
 			t.Errorf("%s: accepted", c.name)
+		}
+	}
+}
+
+func TestMiseToolAllowed(t *testing.T) {
+	cases := []struct {
+		allow   []string
+		backend string
+		want    bool
+	}{
+		{[]string{"core:*", "aqua:*"}, "core:node", true},
+		{[]string{"core:*", "aqua:*"}, "aqua:jqlang/jq", true},
+		{[]string{"core:*", "aqua:*"}, "github:someone/tool", false},
+		{[]string{"core:*", "aqua:*"}, "npm:prettier", false},
+		{[]string{"core:*", "aqua:*"}, "asdf:mise-plugins/mise-ffmpeg", false},
+		{[]string{"core:node"}, "core:nodejs", false},
+		{[]string{"github:astral-sh/*"}, "github:astral-sh/uv", true},
+		{[]string{"github:astral-sh/*"}, "github:astral-shx/uv", false},
+		{[]string{"*"}, "npm:anything", true},
+		{nil, "core:node", false},
+	}
+	for _, c := range cases {
+		if got := MiseToolAllowed(c.allow, c.backend); got != c.want {
+			t.Errorf("MiseToolAllowed(%v, %s) = %v, want %v", c.allow, c.backend, got, c.want)
+		}
+	}
+}
+
+func TestMiseBackend(t *testing.T) {
+	b, err := MiseBackend([]byte(`{"backend":"core:node","description":null,"url":null,"installed_versions":[],
+		"requested_versions":["22.11.0"],"tool_options":{"os":null,"install_env":{}}}`))
+	if err != nil || b != "core:node" {
+		t.Errorf("backend %q, %v", b, err)
+	}
+	for _, bad := range []string{`{}`, `{"backend":""}`, `nope`} {
+		if _, err := MiseBackend([]byte(bad)); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}
+
+// The program must be inside the installs after following links: a tool's
+// bin/node may be a link to /bin/sh.
+func TestMiseProgramInside(t *testing.T) {
+	skipWindows(t)
+	installs := filepath.Join(t.TempDir(), "installs")
+	bin := filepath.Join(installs, "node", "24", "bin")
+	lib := filepath.Join(installs, "node", "24", "lib")
+	for _, d := range []string{bin, lib} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(bin, "node"), []byte("x"), 0o755)
+	os.WriteFile(filepath.Join(lib, "npm-cli.js"), []byte("x"), 0o755)
+	os.Symlink("../lib/npm-cli.js", filepath.Join(bin, "npm"))
+	os.Symlink("/bin/sh", filepath.Join(bin, "sh"))
+	os.Symlink(filepath.Join(installs, ".."), filepath.Join(bin, "up"))
+	// installs itself reached through a link (like /var -> /private/var).
+	alias := filepath.Join(t.TempDir(), "alias")
+	os.Symlink(installs, alias)
+	for _, c := range []struct {
+		path string
+		ok   bool
+	}{
+		{filepath.Join(bin, "node"), true},
+		{filepath.Join(bin, "npm"), true},
+		{filepath.Join(alias, "node", "24", "bin", "node"), true},
+		{filepath.Join(bin, "sh"), false},
+		{filepath.Join(bin, "up"), false},
+		{filepath.Join(bin, "missing"), false},
+		{"/bin/sh", false},
+	} {
+		got, err := miseProgramInside(c.path, installs)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: %q, %v; want ok=%v", c.path, got, err, c.ok)
 		}
 	}
 }

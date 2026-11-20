@@ -44,6 +44,12 @@ type MiseConfig struct {
 	// runtime named "mise". Empty: whatever provides the runtime "mise"
 	// on this Mac (a `runtimes` entry or a managed runtime command).
 	Binary string `yaml:"binary"`
+	// AllowTools lists the tools tasks may install, by the backend mise
+	// resolves each to (`mise tool NAME`): "core:node", "aqua:jqlang/jq",
+	// a prefix with a trailing * ("aqua:*", "github:astral-sh/*"), or "*"
+	// for every backend. Default ["core:*", "aqua:*"]: mise's own core
+	// tools and aqua packages, which is what most registry names resolve to.
+	AllowTools []string `yaml:"allow_tools"`
 	// Commands optionally narrows which programs tasks may run (bare
 	// names such as "node" or "ffmpeg"). Empty: any program an installed
 	// tool provides. Programs outside the tools never run either way.
@@ -78,6 +84,7 @@ type MiseConfig struct {
 func (m MiseConfig) Locked() bool { return m.RequireLockfile == nil || *m.RequireLockfile }
 
 var (
+	misePatternRe = regexp.MustCompile(`^(\*|[a-z][a-z0-9-]{0,31}:[A-Za-z0-9@._/-]{0,200}\*?)$`)
 	miseCommandRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 )
 
@@ -99,6 +106,14 @@ func (m *MiseConfig) normalize(agentDir string) error {
 		}
 		if !strings.HasPrefix(m.GitHubTokenCommand[0], "/") {
 			return errors.New("mise.github_token_command must start with an absolute executable path")
+		}
+	}
+	if len(m.AllowTools) == 0 {
+		m.AllowTools = []string{"core:*", "aqua:*"}
+	}
+	for _, p := range m.AllowTools {
+		if !misePatternRe.MatchString(p) || strings.HasSuffix(p, ":") {
+			return fmt.Errorf("mise.allow_tools: %q is not backend:name (e.g. core:node, aqua:*, or *)", p)
 		}
 	}
 	for _, c := range m.Commands {
@@ -359,4 +374,44 @@ func CheckMiseConfigFiles(ls []byte, config string) error {
 		return errors.New("mise did not load the task's mise.toml")
 	}
 	return nil
+}
+
+// MiseToolAllowed reports whether allow permits a tool's backend.
+func MiseToolAllowed(allow []string, backend string) bool {
+	for _, p := range allow {
+		if p == backend || (strings.HasSuffix(p, "*") && strings.HasPrefix(backend, strings.TrimSuffix(p, "*"))) {
+			return true
+		}
+	}
+	return false
+}
+
+// MiseBackend reads `mise tool NAME --json`: the backend mise installs the
+// tool with.
+func MiseBackend(tool []byte) (string, error) {
+	var t struct {
+		Backend string `json:"backend"`
+	}
+	if err := json.Unmarshal(tool, &t); err != nil || t.Backend == "" {
+		return "", errors.New("unexpected `mise tool` output")
+	}
+	return t.Backend, nil
+}
+
+// miseProgramInside resolves every link in path and checks the program it
+// leads to is inside installs (resolved too): a tool's bin/node may be a
+// link to /bin/sh. It returns the resolved path.
+func miseProgramInside(path, installs string) (string, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.EvalSymlinks(installs)
+	if err != nil {
+		return "", err
+	}
+	if !insideDir(real, root) {
+		return "", fmt.Errorf("%s leads to %s, outside the installed tools", path, real)
+	}
+	return real, nil
 }

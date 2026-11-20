@@ -114,6 +114,22 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 	if err != nil {
 		return fail(err.Error())
 	}
+	// Each tool's backend, as mise resolves it, must be allowed here.
+	backends := map[string]string{}
+	for _, t := range tools {
+		out, err := query("tool", t, "--json")
+		var b string
+		if err == nil {
+			b, err = MiseBackend(out)
+		}
+		if err != nil {
+			return fail(t + ": " + err.Error())
+		}
+		if !MiseToolAllowed(mc.AllowTools, b) {
+			return fail(fmt.Sprintf("tool %s (%s) is not allowed on this Mac (mise.allow_tools)", t, b))
+		}
+		backends[t] = b
+	}
 	installEnv := menvList
 	if tok, err := a.miseGitHubToken(ctx); err != nil {
 		return macFault(err.Error())
@@ -171,6 +187,11 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 	}
 	if !insideDir(path, filepath.Join(p.Data, "installs")) {
 		return fail(fmt.Sprintf("program %s resolves to %q, outside the installed tools", prog, path))
+	}
+	// Follow links too (bin/node -> /bin/sh). The program still runs by its
+	// own name: some tools behave by the name they are called with.
+	if _, err := miseProgramInside(path, filepath.Join(p.Data, "installs")); err != nil {
+		return fail("program " + prog + ": " + err.Error())
 	}
 	if why := CheckProgram(path); why != "" {
 		return fail(why)

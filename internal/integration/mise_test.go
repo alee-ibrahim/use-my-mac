@@ -18,40 +18,60 @@ import (
 	"github.com/alee-ibrahim/use-my-mac/pkg/api"
 )
 
-// fakeMise stands in for mise where it is not installed (CI). It answers
-// the agent's queries for a config with one tool, "hello": `config
-// explain` (reporting [env] when the file has one), `ls`, `install` (puts
-// a hello program into $MISE_DATA_DIR/installs; fails for a config that
-// mentions "broken"; records the GitHub token it got), `which` and `exec`.
-// The hello program says whether it can see a token.
+// fakeMise stands in for mise where it is not installed (CI). It reads the
+// tool names under [tools] in mise.toml and answers the agent's queries
+// for them: `config ls` and `config explain` (reporting [env] when the file
+// has one), `ls`, `tool` (backend: the name if it has one, else
+// aqua:example/NAME), `install` (puts a program named after each tool,
+// plus a link "shlink" to /bin/sh, into $MISE_DATA_DIR/installs; fails for
+// a config that mentions "broken", or with $FAKE_MISE_FAIL's text; records
+// each install and whether it got a GitHub token), `which` and `exec`.
+// The programs say whether they can see a token.
 const fakeMise = `#!/bin/sh
+tools() { sed -n '/^\[tools\]/,/^\[[a-z]/p' mise.toml | sed -n 's/^"\{0,1\}\([A-Za-z0-9:\/._-]*\)"\{0,1\} *=.*/\1/p'; }
 case "$1" in
 --version) echo "2026.11.9 linux-x64 (2026-11-16)" ;;
 config)
-	if [ "$2" = ls ]; then echo '[{"path":"'"$PWD"'/mise.toml","tools":["hello"]}]'; exit 0; fi
-	if grep -q '^\[env\]' "$4"; then
-		echo '[{"key":"env","path":["env"]},{"key":"env.X","path":["env","X"]},{"key":"tools.hello","path":["tools","hello"]}]'
-	else
-		echo '[{"key":"tools","path":["tools"]},{"key":"tools.hello","path":["tools","hello"]}]'
-	fi
+	if [ "$2" = ls ]; then echo '[{"path":"'"$PWD"'/mise.toml"}]'; exit 0; fi
+	if grep -q '^\[env\]' "$4"; then echo '[{"key":"env","path":["env"]},{"key":"env.X","path":["env","X"]}]'; exit 0; fi
+	printf '[{"key":"tools","path":["tools"]}'
+	for t in $(tools); do printf ',{"key":"tools.%s","path":["tools","%s"]}' "$t" "$t"; done
+	echo ']'
 	;;
 ls)
-	echo '{"hello":[{"requested_version":"1.0.0","source":{"type":"mise.toml","path":"'"$PWD"'/mise.toml"}}]}'
+	sep=; printf '{'
+	for t in $(tools); do
+		printf '%s"%s":[{"requested_version":"1.0.0","source":{"type":"mise.toml","path":"%s/mise.toml"}}]' "$sep" "$t" "$PWD"; sep=,
+	done
+	echo '}'
+	;;
+tool)
+	case "$2" in *:*) b=$2 ;; *) b=aqua:example/$2 ;; esac
+	echo '{"backend":"'"$b"'"}'
 	;;
 install)
-	echo "fake-mise install"
+	shift; want=$*; [ -z "$want" ] && want=$(tools)
+	echo "fake-mise install" $want
 	env | grep -E '^MISE_(SAFE|LOCKED|EXEC_AUTO_INSTALL|SYSTEM_PACKAGES_SUDO)=' | sort
 	[ -n "$MISE_GITHUB_TOKEN" ] && echo "github token: set"
+	echo $want "token=${MISE_GITHUB_TOKEN:+set}" >> "$FAKE_MISE_RECORD/installs"
 	printf %s "$MISE_GITHUB_TOKEN" > "$FAKE_MISE_RECORD/install-token"
+	if [ -n "$FAKE_MISE_FAIL" ]; then echo "mise ERROR $FAKE_MISE_FAIL" >&2; exit 1; fi
 	if grep -q broken mise.toml; then echo "download failed: 404" >&2; exit 1; fi
-	bin="$MISE_DATA_DIR/installs/hello/1.0.0/bin"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\n[ "$1" = exit127 ] && exit 127\necho "hello from the toolchain; task sees token: ${MISE_GITHUB_TOKEN:-none}${GITHUB_TOKEN:-}"\nprintf %%s "$1" > "$2"\n' > "$bin/hello"
-	chmod 755 "$bin/hello"
+	for t in $want; do
+		n=${t##*[:/]}
+		bin="$MISE_DATA_DIR/installs/$n/1.0.0/bin"
+		mkdir -p "$bin"
+		printf '#!/bin/sh\n[ "$1" = exit127 ] && exit 127\necho "hello from the toolchain; task sees token: ${MISE_GITHUB_TOKEN:-none}${GITHUB_TOKEN:-}"\nprintf %%s "$1" > "$2"\n' > "$bin/$n"
+		chmod 755 "$bin/$n"
+		ln -sf /bin/sh "$bin/shlink"
+	done
 	;;
 which)
-	p="$MISE_DATA_DIR/installs/hello/1.0.0/bin/$2"
-	if [ -x "$p" ]; then echo "$p"; else echo "mise ERROR $2 is not a mise bin" >&2; exit 1; fi
+	for p in "$MISE_DATA_DIR"/installs/*/1.0.0/bin/"$2"; do
+		if [ -e "$p" ]; then echo "$p"; exit 0; fi
+	done
+	echo "mise ERROR $2 is not a mise bin" >&2; exit 1
 	;;
 exec)
 	shift; [ "$1" = "--" ] && shift
@@ -203,6 +223,9 @@ func TestMiseToolchain(t *testing.T) {
 		{"MISE_ env", helloToml, nil, map[string]string{"MISE_ENV": "x"}, "may not set MISE_ENV", false},
 		{"token in task env", helloToml, nil, map[string]string{"GITHUB_TOKEN": "x"}, "may not set GITHUB_TOKEN", false},
 		{"install fails", "[tools]\nhello = \"1.0.0\" # broken\n", nil, nil, "installing the tools failed", true},
+		{"link out of the tools", helloToml, []string{"shlink", "-c", "id"}, nil, "outside the installed tools", true},
+		{"tool not allowed", "[tools]\n\"github:someone/tool\" = \"1.0.0\"\n", nil, nil,
+			"github:someone/tool (github:someone/tool) is not allowed on this Mac", false},
 		// The program's own exit 127 is the task's: mise is still there.
 		{"program exits 127", helloToml, []string{"hello", "exit127"}, nil, "exit status 127", true},
 	}
