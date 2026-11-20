@@ -59,9 +59,11 @@ esac
 
 const helloToml = "[tools]\nhello = \"1.0.0\"\n"
 
+// blob uploads an input as the app that submits the jobs (blobs belong to
+// their uploader).
 func (e *env) blob(key, data string) {
 	e.t.Helper()
-	if err := e.admin.UploadBlob(e.ctx, key, strings.NewReader(data), int64(len(data))); err != nil {
+	if err := e.app.UploadBlob(e.ctx, key, strings.NewReader(data), int64(len(data))); err != nil {
 		e.t.Fatal(err)
 	}
 }
