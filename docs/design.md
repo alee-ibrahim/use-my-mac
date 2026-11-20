@@ -452,7 +452,9 @@ checks what mise reports:
   `MISE_SAFE=1` loads it without letting it run code (env templates, hooks, `postinstall`,
   `install_env`); the agent also refuses anything but `[tools]` with plain versions and `min_version`,
   from `mise config explain --json`, so no tool option (`api_url`, `url`, ...) can redirect a download
-  or the token. Auto-install, sudo, netrc, gh CLI tokens and mise's version host are off;
+  or the token. Every mise call but `mise install` runs offline (`MISE_OFFLINE=1`): `mise tool` would otherwise
+  ask api.github.com about aqua tools, unauthenticated. Auto-install, sudo, netrc, gh CLI tokens and
+  mise's version host are off;
   task `env` may not set `MISE_*` or GitHub token variables.
 - **Which tools.** `mise tool NAME --json` gives each tool's backend, which must match
   `mise.allow_tools` (default `core:*` and `aqua:*`).

@@ -615,7 +615,8 @@ What to know:
   `max_cache`; without a lockfile nothing is shared.
 - **Network.** Installs download from wherever the tools are published (e.g. `nodejs.org`, `github.com`
   and `release-assets.githubusercontent.com`). mise's GitHub-based backends (`aqua:`, `github:`, `ubi:`)
-  also call `api.github.com`, even for a locked install. GitHub allows only 60 unauthenticated API calls an
+  also call `api.github.com`, even for a locked install. Only `mise install` uses the network: the
+  agent's other mise calls run offline (`MISE_OFFLINE=1`), so they spend none of the API budget. GitHub allows only 60 unauthenticated API calls an
   hour per public IP address, shared by every Mac behind it, so a fleet behind one address should set
   `github_token_file` or `github_token_command`: for public releases a token with no scopes (or a
   fine-grained token with no repository access) is enough. A download in the shared cache is used
