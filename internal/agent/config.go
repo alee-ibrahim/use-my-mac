@@ -28,6 +28,10 @@ type Config struct {
 	CredentialFile string `yaml:"credential_file"`
 	WorkDir        string `yaml:"work_dir"`
 	MaxTasks       int    `yaml:"max_tasks"`
+	// MaxTasksLimit is the hard cap on concurrency. An admin can set a Mac's
+	// max_tasks on the router; the agent runs at most this many at once
+	// whatever the router asks (default 8, never below max_tasks).
+	MaxTasksLimit int `yaml:"max_tasks_limit"`
 	// Runtimes is the allowlist: name -> fixed argv prefix. Tasks pick a
 	// runtime by name and can only append arguments.
 	Runtimes map[string][]string `yaml:"runtimes"`
@@ -259,6 +263,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.MaxTasks <= 0 {
 		c.MaxTasks = 1
+	}
+	if c.MaxTasksLimit <= 0 {
+		c.MaxTasksLimit = 8
+	}
+	if c.MaxTasksLimit < c.MaxTasks {
+		c.MaxTasksLimit = c.MaxTasks
 	}
 	if len(c.Runtimes) == 0 && !c.ManagedRuntimes.On() {
 		return errors.New("at least one runtime must be allowlisted (or managed_runtimes enabled)")

@@ -17,6 +17,48 @@ type JobSpec struct {
 	Name   string            `json:"name"`
 	Labels map[string]string `json:"labels,omitempty"`
 	Tasks  []TaskSpec        `json:"tasks"`
+	// Macs pins every task that has no Macs of its own to these Macs (IDs
+	// or names; see TaskSpec.Macs).
+	Macs []string `json:"macs,omitempty"`
+	// Prefer is the soft placement default for tasks without their own.
+	Prefer *Prefer `json:"prefer,omitempty"`
+	// Cleanup deletes the job's stored inputs and outputs automatically
+	// once its results have been downloaded and/or some hours after it
+	// finished. nil keeps them until deleted.
+	Cleanup *Cleanup `json:"cleanup,omitempty"`
+}
+
+// Prefer is a soft placement preference: Macs that match get a score bonus,
+// but the others still take work when they are the better (or only) choice.
+type Prefer struct {
+	// Labels must all match for a Mac to count as preferred.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Macs (IDs or names) count as preferred.
+	Macs []string `json:"macs,omitempty"`
+	// Bonus is added to a preferred Mac's score (0-100 scale). 0 means the
+	// default, 25.
+	Bonus float64 `json:"bonus,omitempty"`
+}
+
+// Cleanup is a job's automatic cleanup policy. At least one trigger must be
+// set; the first one that fires runs it, once.
+type Cleanup struct {
+	// AfterDownload runs it once the job has succeeded and every result
+	// (each stored output no other task of the job consumes) has been
+	// downloaded in full, after a short quiet period. Failed and cancelled
+	// jobs are only cleaned by AfterHours, so they can be retried with the
+	// same inputs.
+	AfterDownload bool `json:"after_download,omitempty"`
+	// AfterHours runs it this many hours after the job finished (any final
+	// state). 0 = no time limit.
+	AfterHours int `json:"after_hours,omitempty"`
+	// KeepInputs / KeepOutputs leave those in place. Inputs are the blobs
+	// the job's tasks read that the job's owner uploaded; one still used by
+	// an unfinished job is kept.
+	KeepInputs  bool `json:"keep_inputs,omitempty"`
+	KeepOutputs bool `json:"keep_outputs,omitempty"`
+	// DeleteJob also deletes the job itself (tasks, attempts, logs).
+	DeleteJob bool `json:"delete_job,omitempty"`
 }
 
 // TaskSpec describes one unit of work.
@@ -48,6 +90,13 @@ type TaskSpec struct {
 
 	// DependsOn lists task keys that must succeed before this task can run.
 	DependsOn []string `json:"depends_on,omitempty"`
+
+	// Macs pins the task to these Macs, by ID or name: it only runs on one
+	// of them. The owner must be allowed to use each (a Mac reserved for
+	// other owners cannot be targeted). Combines with Resources.Labels.
+	Macs []string `json:"macs,omitempty"`
+	// Prefer: soft placement (a score bonus for matching Macs).
+	Prefer *Prefer `json:"prefer,omitempty"`
 
 	// Requires names managed runtime packages (from the router's runtime
 	// catalog) that must be installed on the Mac before the task runs; their
@@ -104,7 +153,8 @@ type Resources struct {
 	// plus DiskMB. The router places the task only on a Mac with that much
 	// room, and fails it if no Mac could ever fit it.
 	DiskEstimateMB int `json:"disk_estimate_mb,omitempty"`
-	// Labels must all match the agent's labels (e.g. {"chip":"m2"}).
+	// Labels must all match the Mac's labels (e.g. {"chip":"m2"}): the
+	// agent's own, with labels an admin set on the router taking precedence.
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -141,6 +191,9 @@ type Job struct {
 	// downloading, running, uploading or done.
 	Phase string `json:"phase,omitempty"`
 	Tasks []Task `json:"tasks,omitempty"`
+	// Cleanup is the job's cleanup policy; CleanedAt is when it ran.
+	Cleanup   *Cleanup   `json:"cleanup,omitempty"`
+	CleanedAt *time.Time `json:"cleaned_at,omitempty"`
 }
 
 // Task is the server's view of a task.
@@ -170,6 +223,10 @@ type Task struct {
 	// Progress is the latest live report from the agent running the task
 	// (nil when the task is not running or the agent sent none yet).
 	Progress *TaskProgress `json:"progress,omitempty"`
+	// Waiting explains why a pending task has no Mac yet when the reason is
+	// more than a busy fleet (only reserved Macs fit, its pinned Macs are
+	// unavailable).
+	Waiting string `json:"waiting,omitempty"`
 }
 
 // Task phases (live progress).
@@ -341,21 +398,33 @@ const (
 
 // Mac is the server's view of an enrolled agent.
 type Mac struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Online      bool              `json:"online"`
-	LastSeen    *time.Time        `json:"last_seen,omitempty"`
-	AgentState  string            `json:"agent_state"`
-	Drain       bool              `json:"drain"`
-	OptedOut    bool              `json:"opted_out"`
-	Quarantined *time.Time        `json:"quarantined_until,omitempty"`
-	Runtimes    []string          `json:"runtimes"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Online      bool       `json:"online"`
+	LastSeen    *time.Time `json:"last_seen,omitempty"`
+	AgentState  string     `json:"agent_state"`
+	Drain       bool       `json:"drain"`
+	OptedOut    bool       `json:"opted_out"`
+	Quarantined *time.Time `json:"quarantined_until,omitempty"`
+	Runtimes    []string   `json:"runtimes"`
+	// Labels are the effective labels tasks match against: AgentLabels
+	// (from the Mac's agent.yaml) overridden by AdminLabels (set on the
+	// router by an admin).
 	Labels      map[string]string `json:"labels"`
-	MaxTasks    int               `json:"max_tasks"`
-	Running     []string          `json:"running"`
-	Telemetry   *Telemetry        `json:"telemetry,omitempty"`
-	Version     string            `json:"version,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
+	AgentLabels map[string]string `json:"agent_labels,omitempty"`
+	AdminLabels map[string]string `json:"admin_labels,omitempty"`
+	// Reservation, when set, limits the Mac to tasks of the listed owners.
+	Reservation *MacReservation `json:"reservation,omitempty"`
+	// MaxTasks is the effective concurrency: the router's setting
+	// (MaxTasksSet, 0 = none) capped by the agent's hard limit
+	// (AgentMaxTasks), else the agent's own max_tasks.
+	MaxTasks      int        `json:"max_tasks"`
+	MaxTasksSet   int        `json:"max_tasks_set,omitempty"`
+	AgentMaxTasks int        `json:"agent_max_tasks,omitempty"`
+	Running       []string   `json:"running"`
+	Telemetry     *Telemetry `json:"telemetry,omitempty"`
+	Version       string     `json:"version,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 	// Update is the agent self-update status (nil before the updater has
 	// ever checked in).
 	Update *MacUpdate `json:"update,omitempty"`
@@ -428,8 +497,42 @@ const (
 	RuntimeSourceInstall = "install"
 )
 
+// MacReservation reserves a Mac for some owners: it only runs their tasks.
+type MacReservation struct {
+	// Owners are job owners: "key:<API key ID>" or "user:<subject>". Shown
+	// to admins and viewers only.
+	Owners []string `json:"owners,omitempty"`
+	// OwnerNames maps owners to display names (API key names).
+	OwnerNames map[string]string `json:"owner_names,omitempty"`
+	// Until ends the reservation (nil = until removed).
+	Until *time.Time `json:"until,omitempty"`
+	Note  string     `json:"note,omitempty"`
+	By    string     `json:"by,omitempty"`
+	// Mine is true when the caller is one of the owners.
+	Mine bool `json:"mine"`
+}
+
+// MacReservationRequest sets a reservation (PUT /v1/macs/{id}/reservation).
+type MacReservationRequest struct {
+	// Owners: "key:<id>", a bare API key ID ("key_..."), or "user:<subject>".
+	Owners []string `json:"owners"`
+	// Until or Hours (from now) end it; neither = until removed.
+	Until *time.Time `json:"until,omitempty"`
+	Hours int        `json:"hours,omitempty"`
+	Note  string     `json:"note,omitempty"`
+}
+
+// MacLabels replaces a Mac's router-side labels (PUT /v1/macs/{id}/labels).
+type MacLabels struct {
+	Labels map[string]string `json:"labels"`
+}
+
 // MacPatch is used by admins to drain, opt out or rename a Mac.
 type MacPatch struct {
+	// MaxTasks sets how many tasks the Mac runs at once (1-64; 0 returns to
+	// the agent's own max_tasks). The agent caps it at its hard limit
+	// (agent.yaml max_tasks_limit), so the Mac's owner keeps the final say.
+	MaxTasks *int  `json:"max_tasks,omitempty"`
 	Drain    *bool `json:"drain,omitempty"`
 	OptedOut *bool `json:"opted_out,omitempty"`
 	// Name renames the Mac on the router: 1-64 characters from
@@ -468,6 +571,10 @@ type Heartbeat struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	MaxTasks  int               `json:"max_tasks"`
 	Version   string            `json:"version"`
+	// MaxTasksLimit is the agent's hard cap on concurrency (agent.yaml
+	// max_tasks_limit); the router never asks for more. 0 = an older agent
+	// that ignores router-set concurrency.
+	MaxTasksLimit int `json:"max_tasks_limit,omitempty"`
 	// Runtimes above lists only the runtimes that passed the agent's
 	// preflight (the program exists, is a regular file and the agent's user
 	// may execute it). UnavailableRuntimes are the allowlisted ones that
@@ -494,8 +601,11 @@ type Heartbeat struct {
 
 // HeartbeatResponse tells the agent what to stop.
 type HeartbeatResponse struct {
-	Cancel []string `json:"cancel,omitempty"` // task IDs to stop now
-	Drain  bool     `json:"drain"`
+	// MaxTasks is the concurrency the router wants (0 = the agent's own
+	// max_tasks). The agent applies min(MaxTasks, its hard limit).
+	MaxTasks int      `json:"max_tasks,omitempty"`
+	Cancel   []string `json:"cancel,omitempty"` // task IDs to stop now
+	Drain    bool     `json:"drain"`
 	// DrainReason says why (e.g. "updating"); empty for an admin drain.
 	DrainReason string `json:"drain_reason,omitempty"`
 	// CatalogRevision is the router's runtime catalog revision; the agent
@@ -834,6 +944,60 @@ type APIKey struct {
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	Secret     string     `json:"secret,omitempty"`
+}
+
+// StoredFile is a blob in router storage with its owner (GET /v1/files).
+type StoredFile struct {
+	// Key is the storage key: uploads/<blob> for app uploads,
+	// jobs/<job>/<task>/<output> for task outputs.
+	Key string `json:"key"`
+	// Blob is the key to use as Input.Blob (uploads only).
+	Blob   string `json:"blob,omitempty"`
+	Kind   string `json:"kind"` // upload or output
+	Owner  string `json:"owner"`
+	JobID  string `json:"job_id,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
+	Size   int64  `json:"size"`
+	// CreatedAt is when it was stored; DownloadedAt when it was first
+	// downloaded in full (outputs).
+	CreatedAt    time.Time  `json:"created_at"`
+	DownloadedAt *time.Time `json:"downloaded_at,omitempty"`
+	// InUse: an unfinished job still needs it, so it cannot be deleted.
+	InUse bool `json:"in_use"`
+}
+
+// File kinds.
+const (
+	FileUpload = "upload"
+	FileOutput = "output"
+)
+
+// DeleteFilesRequest deletes several stored files (POST /v1/files/delete).
+// Give Keys, or a filter (Prefix, Kind, JobID) with All set; files still
+// in use by an unfinished job are skipped.
+type DeleteFilesRequest struct {
+	Keys   []string `json:"keys,omitempty"`
+	Prefix string   `json:"prefix,omitempty"`
+	Kind   string   `json:"kind,omitempty"`
+	JobID  string   `json:"job_id,omitempty"`
+	// All confirms a filter-only delete (every matching file of the owner).
+	All bool `json:"all,omitempty"`
+	// Owner: admins may act on another owner's files ("" = their own, "*" =
+	// everyone's).
+	Owner string `json:"owner,omitempty"`
+}
+
+// DeleteFilesResult reports a bulk file delete.
+type DeleteFilesResult struct {
+	Deleted int           `json:"deleted"`
+	Bytes   int64         `json:"bytes"`
+	Skipped []SkippedFile `json:"skipped,omitempty"`
+}
+
+// SkippedFile is a file a bulk delete left in place, and why.
+type SkippedFile struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
 }
 
 // EnrolmentToken is a one-time token used by a new Mac (secret shown once).

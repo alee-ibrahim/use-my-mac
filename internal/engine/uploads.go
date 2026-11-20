@@ -94,8 +94,20 @@ func (e *Engine) createUpload(ctx context.Context, owner, key string, size, part
 // CreateUpload starts an app upload of blob `key` (Input.Blob). direct
 // means presigned part URLs when the backend has them (S3).
 func (e *Engine) CreateUpload(ctx context.Context, owner string, req api.UploadRequest) (*api.Upload, error) {
+	return e.CreateUploadAs(ctx, Caller{Subject: owner}, req)
+}
+
+// CreateUploadAs is CreateUpload for a caller: a key another owner uploaded
+// cannot be overwritten (admins can).
+func (e *Engine) CreateUploadAs(ctx context.Context, c Caller, req api.UploadRequest) (*api.Upload, error) {
+	owner := c.Subject
 	if err := storage.ValidKey(req.Key); err != nil {
 		return nil, err
+	}
+	if _, ok, err := e.blobAccess(ctx, c, UploadKey(req.Key)); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, forbidden("blob %s belongs to another owner", req.Key)
 	}
 	direct := req.Direct && e.blobs.Name() == "s3"
 	return e.createUpload(ctx, owner, UploadKey(req.Key), req.Size, req.PartSize, direct)
@@ -256,6 +268,15 @@ func (e *Engine) CompleteUpload(ctx context.Context, id, owner string, admin boo
 		return nil, err
 	}
 	_ = e.st.DeleteUpload(ctx, u.ID)
+	if _, app := cutUploadKey(u.Key); app && !isAgentOwner(u.Owner) {
+		blobOwner := u.Owner
+		if b, err := e.st.GetBlob(ctx, u.Key); err == nil {
+			blobOwner = b.Owner // an admin replaced someone's blob
+		}
+		if err := e.recordUpload(ctx, u.Key, blobOwner, u.Size); err != nil {
+			e.log.Warn("record upload owner", "key", u.Key, "err", err)
+		}
+	}
 	e.log.Info("multipart upload completed", "upload", u.ID, "key", u.Key, "size", u.Size, "parts", v.Parts)
 	v.URLs = nil
 	return v, nil

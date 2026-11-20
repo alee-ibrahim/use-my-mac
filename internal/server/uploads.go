@@ -37,7 +37,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "file is larger than the router accepts ("+strconv.FormatInt(s.MaxUploadBytes, 10)+" bytes)")
 		return
 	}
-	u, err := s.E.CreateUpload(r.Context(), who(r).Subject, req)
+	u, err := s.E.CreateUploadAs(r.Context(), caller(r), req)
 	if err != nil {
 		s.fail(w, err)
 		return

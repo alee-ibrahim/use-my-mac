@@ -42,8 +42,14 @@ Commands:
                                  download a task output (parallel ranges, with progress)
   cancel JOB                     cancel a job
   macs [list | delete MAC...]    list Macs with live telemetry; delete removed Macs (admin)
-  jobs [list | delete JOB... | purge -older-than 30d [-state failed]]
-                                 list jobs; delete finished jobs (admin)
+  macs label MAC [k=v...] [-rm K] [-clear]       router-side labels, merged over the agent's (admin)
+  macs reserve MAC -for key_a[,key_b] [-hours N | -until T] [-note X] | unreserve MAC
+                                 only run these owners' tasks on a Mac (admin)
+  macs max-tasks MAC N           tasks a Mac runs at once (0 = its agent.yaml value; admin)
+  jobs [list | rm JOB... [-inputs] | rm -finished [-state S] [-older-than 7d] [-inputs]]
+                                 list jobs; delete your jobs (running ones are cancelled first)
+  files [ls] [-kind K] [-job J] [-prefix P] | rm KEY... | rm -all [filters]
+                                 your stored files (uploads and outputs); delete them
   metrics                        fleet summary: Macs, tasks, success rate, compute hours
   events [-kind mac.,key.] [-limit N]   activity and audit log
   retention [show | set -jobs-days N -events-days N -raw-hours N -rollup-days N]
@@ -192,6 +198,8 @@ func run(ctx context.Context, cmd string, args []string) error {
 		return macsCmd(ctx, c, args)
 	case "jobs":
 		return jobsCmd(ctx, c, args)
+	case "files":
+		return filesCmd(ctx, c, args)
 	case "metrics":
 		return metricsCmd(ctx, c, args)
 	case "events":
@@ -398,6 +406,16 @@ func listMacs(ctx context.Context, c *client.Client) error {
 		}
 		if m.Quarantined != nil {
 			flags = append(flags, "quarantined")
+		}
+		if r := m.Reservation; r != nil {
+			who := "others"
+			if r.Mine {
+				who = "you"
+			}
+			if len(r.Owners) > 0 {
+				who = strings.Join(r.Owners, "+")
+			}
+			flags = append(flags, "reserved:"+who)
 		}
 		var un []string
 		for _, u := range m.UnavailableRuntimes {

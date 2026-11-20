@@ -66,6 +66,11 @@ export function MacStateBadges({ m }: { m: Mac }) {
       {m.drain && <Badge variant="outline">drained</Badge>}
       {m.opted_out && <Badge variant="outline">opted out</Badge>}
       {m.quarantined_until && <Badge variant="destructive">quarantined</Badge>}
+      {m.reservation && (
+        <Badge variant="secondary">
+          {m.reservation.mine ? "reserved for you" : "reserved"}
+        </Badge>
+      )}
     </div>
   )
 }

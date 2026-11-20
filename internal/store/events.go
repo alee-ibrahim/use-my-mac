@@ -200,6 +200,11 @@ func (s *Store) PruneEnrolTokens(ctx context.Context, now int64) (int64, error) 
 // FinishedJobs returns IDs of finished jobs that finished before `before`
 // (Unix ms), optionally only in the given states, oldest first.
 func (s *Store) FinishedJobs(ctx context.Context, before int64, states []string, limit int) ([]string, error) {
+	return s.FinishedJobsOf(ctx, "", before, states, limit)
+}
+
+// FinishedJobsOf is FinishedJobs limited to one owner ("" = everyone's).
+func (s *Store) FinishedJobsOf(ctx context.Context, owner string, before int64, states []string, limit int) ([]string, error) {
 	if len(states) == 0 {
 		states = []string{"succeeded", "failed", "cancelled"}
 	}
@@ -208,8 +213,12 @@ func (s *Store) FinishedJobs(ctx context.Context, before int64, states []string,
 	for _, st := range states {
 		args = append(args, st)
 	}
-	rows, err := s.query(ctx, `SELECT id FROM jobs WHERE finished_at<>0 AND finished_at<? AND state IN (`+ph+`)
-		ORDER BY finished_at LIMIT `+strconv.Itoa(limit), args...)
+	q := `SELECT id FROM jobs WHERE finished_at<>0 AND finished_at<? AND state IN (` + ph + `)`
+	if owner != "" {
+		q += ` AND owner=?`
+		args = append(args, owner)
+	}
+	rows, err := s.query(ctx, q+` ORDER BY finished_at LIMIT `+strconv.Itoa(limit), args...)
 	if err != nil {
 		return nil, err
 	}

@@ -45,8 +45,6 @@ func TestOpsAuthz(t *testing.T) {
 		{"POST", "/v1/api-keys/" + old.ID + "/purge", ""},
 		{"POST", "/v1/api-keys/purge", ""},
 		{"POST", "/v1/install-tokens/purge", ""},
-		{"POST", "/v1/jobs/purge", `{"older_than_days":30}`},
-		{"DELETE", "/v1/jobs/job_x", ""},
 		{"DELETE", "/v1/macs/mac_x", ""},
 		{"PUT", "/v1/retention", `{"jobs_days":30}`},
 	}
@@ -56,6 +54,23 @@ func TestOpsAuthz(t *testing.T) {
 				t.Fatalf("non-admin %s %s: %d", wr.method, wr.path, w.Code)
 			}
 		}
+	}
+
+	// Job deletes are for owners (apps) and admins, not viewers.
+	if w := e.do("POST", "/v1/jobs/purge", `{"older_than_days":30}`, bearerAs(viewer.Secret)); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer purge: %d", w.Code)
+	}
+	if w := e.do("DELETE", "/v1/jobs/job_x", "", bearerAs(viewer.Secret)); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer delete job: %d", w.Code)
+	}
+	if w := e.do("POST", "/v1/jobs/purge", `{"older_than_days":30,"owner":"key:someone"}`, bearerAs(e.app)); w.Code != http.StatusForbidden {
+		t.Fatalf("app purge of another owner: %d", w.Code)
+	}
+	if w := e.do("POST", "/v1/jobs/purge", `{"older_than_days":30}`, bearerAs(e.app)); w.Code != http.StatusOK {
+		t.Fatalf("app purge of its own: %d", w.Code)
+	}
+	if w := e.do("DELETE", "/v1/jobs/job_x", "", bearerAs(e.app)); w.Code != http.StatusNotFound {
+		t.Fatalf("app delete missing job: %d", w.Code)
 	}
 
 	// Admin: an active key is refused with 409, a revoked one deleted.

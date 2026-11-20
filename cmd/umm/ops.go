@@ -98,6 +98,8 @@ func jobsCmd(ctx context.Context, c *client.Client, args []string) error {
 		return listJobs(ctx, c)
 	}
 	switch args[0] {
+	case "rm":
+		return jobsRm(ctx, c, args[1:])
 	case "delete":
 		if len(args) < 2 {
 			return errors.New("usage: umm jobs delete JOB...")
@@ -129,7 +131,7 @@ func jobsCmd(ctx context.Context, c *client.Client, args []string) error {
 		fmt.Printf("deleted %d jobs\n", n)
 		return nil
 	}
-	return errors.New("usage: umm jobs list | delete JOB... | purge -older-than 30d [-state failed]")
+	return errors.New("usage: umm jobs list | rm JOB... [-inputs] | rm -finished [-state S] [-older-than 7d] [-inputs] | purge -older-than 30d [-state failed]")
 }
 
 func parseDays(v string) (int, error) {
@@ -153,6 +155,23 @@ func macsCmd(ctx context.Context, c *client.Client, args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		return listMacs(ctx, c)
 	}
+	switch args[0] {
+	case "label", "labels":
+		return macLabelCmd(ctx, c, args[1:])
+	case "reserve":
+		return macReserveCmd(ctx, c, args[1:])
+	case "unreserve":
+		if len(args) != 2 {
+			return errors.New("usage: umm macs unreserve MAC")
+		}
+		m, err := resolveMac(ctx, c, args[1])
+		if err != nil {
+			return err
+		}
+		return c.UnreserveMac(ctx, m.ID)
+	case "max-tasks":
+		return macMaxTasksCmd(ctx, c, args[1:])
+	}
 	if args[0] == "delete" && len(args) >= 2 {
 		for _, id := range args[1:] {
 			if err := c.DeleteMac(ctx, id); err != nil {
@@ -162,5 +181,5 @@ func macsCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		return nil
 	}
-	return errors.New("usage: umm macs [list | delete MAC...]")
+	return errors.New("usage: umm macs [list | delete MAC... | label MAC k=v... | reserve MAC -for KEYS | unreserve MAC | max-tasks MAC N]")
 }

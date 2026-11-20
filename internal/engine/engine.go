@@ -144,6 +144,23 @@ type Engine struct {
 	subs  map[chan string]struct{}
 	// catalog is the managed runtime catalog (see catalog.go).
 	catalog api.RuntimeCatalog
+	// jobOwner caches job owners for placement (under mu).
+	jobOwner map[string]string
+	// waiting explains pending tasks no Mac took (see waitingReason).
+	waitMu  sync.Mutex
+	waiting map[string]string
+
+	// Downloads of outputs (for after_download cleanup) and outputs of
+	// deleted jobs to delete again (see ownership.go).
+	dlMu         sync.Mutex
+	dlBytes      map[string]int64
+	lastDownload map[string]time.Time
+	tombstones   map[string]tombstone
+}
+
+type tombstone struct {
+	at   time.Time
+	keys []string
 }
 
 // Options for New.
@@ -177,6 +194,8 @@ func New(ctx context.Context, o Options) (*Engine, error) {
 		live: map[string]*live{}, placement: map[string][]sched.Result{}, diskNeed: map[string]uint64{}, kick: make(chan struct{}, 1),
 		version: o.Version, retentionDefault: o.Retention,
 		prog: map[string]*taskProg{}, subs: map[chan string]struct{}{},
+		waiting: map[string]string{}, jobOwner: map[string]string{},
+		dlBytes: map[string]int64{}, lastDownload: map[string]time.Time{}, tombstones: map[string]tombstone{},
 	}
 	e.h.last = o.Now()
 	if e.version == "" {
@@ -213,7 +232,7 @@ func (e *Engine) Kick() {
 func (e *Engine) Run(ctx context.Context) {
 	t := time.NewTicker(e.cfg.TickInterval)
 	defer t.Stop()
-	lastSweep := time.Time{}
+	lastSweep, lastCleanup := time.Time{}, time.Time{}
 	for {
 		if err := e.Tick(ctx); err != nil && ctx.Err() == nil {
 			e.log.Error("scheduler tick", "err", err)
@@ -221,6 +240,10 @@ func (e *Engine) Run(ctx context.Context) {
 		if now := e.now(); now.Sub(lastSweep) > uploadSweepEvery {
 			lastSweep = now
 			e.ExpireUploads(ctx)
+		}
+		if now := e.now(); now.Sub(lastCleanup) >= cleanupSweepEvery {
+			lastCleanup = now
+			e.SweepCleanup(ctx)
 		}
 		select {
 		case <-ctx.Done():
@@ -428,7 +451,8 @@ func (e *Engine) Heartbeat(ctx context.Context, agentID string, hb api.Heartbeat
 		"idle_seconds": hb.Telemetry.UserIdleSeconds,
 	})
 
-	resp := api.HeartbeatResponse{Drain: a.Drain || a.OptedOut, CatalogRevision: e.catalogRevisionLocked()}
+	resp := api.HeartbeatResponse{Drain: a.Drain || a.OptedOut, CatalogRevision: e.catalogRevisionLocked(),
+		MaxTasks: a.MaxTasksSet}
 	if !resp.Drain && e.updateDrainingLocked(agentID, now) {
 		resp.Drain, resp.DrainReason = true, "updating"
 	}
@@ -654,6 +678,7 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		if err := e.st.UpdateTask(ctx, t); err != nil {
 			return err
 		}
+		e.recordOutputsLocked(ctx, t, spec, u.Outputs)
 		if a, err := e.st.GetAgent(ctx, agentID); err == nil && a.ConsecFailures > 0 {
 			_ = e.st.SetAgentHealth(ctx, agentID, 0, a.QuarantinedUntil)
 		}
@@ -945,12 +970,13 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 	var out []sched.Candidate
 	for _, a := range agents {
 		c := sched.Candidate{
-			ID: a.ID, Online: e.online(a.ID, now), Drain: a.Drain || e.updateDrainingLocked(a.ID, now), OptedOut: a.OptedOut,
+			ID: a.ID, Name: a.Name, ReservedFor: reservedFor(a, now), Online: e.online(a.ID, now), Drain: a.Drain || e.updateDrainingLocked(a.ID, now), OptedOut: a.OptedOut,
 			Quarantined: a.QuarantinedUntil > ms(now), MaxTasks: a.MaxTasks,
 			Active: active[a.ID], ReservedMB: reserved[a.ID], ReservedDisk: disk[a.ID],
 		}
 		if l := e.live[a.ID]; l != nil {
-			c.AgentState, c.Telemetry, c.Runtimes, c.Labels = l.hb.State, l.hb.Telemetry, l.runtimes, l.hb.Labels
+			c.AgentState, c.Telemetry, c.Runtimes = l.hb.State, l.hb.Telemetry, l.runtimes
+			c.Labels = mergeLabels(l.hb.Labels, parseLabels(a.AdminLabels))
 			if iso := l.hb.Isolation; iso != nil {
 				c.WorkKnown, c.WorkSpace, c.WorkCapacity = true, iso.WorkSpaceBytes, iso.WorkCapacityBytes
 			}
@@ -965,6 +991,9 @@ func (e *Engine) candidatesLocked(agents []*store.Agent, tasks []*store.Task, no
 			if l.hb.MaxTasks > 0 {
 				c.MaxTasks = l.hb.MaxTasks
 			}
+			c.MaxTasks = effectiveMaxTasks(a.MaxTasksSet, c.MaxTasks, l.hb.MaxTasksLimit)
+		} else {
+			c.Labels = parseLabels(a.AdminLabels)
 		}
 		if c.Telemetry.CPUCount > maxCPU {
 			maxCPU = c.Telemetry.CPUCount
@@ -1005,11 +1034,12 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 			cs[i].Excluded = ex[cs[i].ID] > ms(now)
 		}
 		need := e.diskNeedLocked(ctx, t, spec)
-		best, all := sched.Pick(cs, sched.Need{Runtime: spec.Runtime, Requires: spec.Requires, Resources: spec.Resources,
-			DiskBytes: need},
-			e.cfg.Weights, e.cfg.Limits)
+		n := sched.Need{Runtime: spec.Runtime, Requires: spec.Requires, Resources: spec.Resources,
+			DiskBytes: need, Owner: e.ownerLocked(ctx, t.JobID), Macs: spec.Macs, Prefer: spec.Prefer}
+		best, all := sched.Pick(cs, n, e.cfg.Weights, e.cfg.Limits)
 		e.placement[t.ID] = all
 		if best == nil {
+			e.setWaiting(t.ID, waitingReason(cs, n, all, e.cfg.Weights, e.cfg.Limits))
 			if ok, biggest, _ := sched.FitsAnywhere(cs, spec.Runtime, need); !ok {
 				e.failNoSpaceLocked(ctx, t, fmt.Sprintf("no Mac has enough work space: the task needs %s, the largest Mac "+
 					"holds %s (split the work into smaller tasks, or set resources.disk_estimate_mb if the estimate is wrong)",
@@ -1018,6 +1048,7 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 			}
 			continue
 		}
+		e.setWaiting(t.ID, "")
 		t.State, t.AgentID, t.AssignedAt, t.Score = api.StateAssigned, best.ID, ms(now), best.Score
 		if err := e.st.UpdateTask(ctx, t); err != nil {
 			return err
@@ -1032,6 +1063,19 @@ func (e *Engine) placeLocked(ctx context.Context, tasks []*store.Task, agents []
 		e.wakeAgent(best.ID)
 	}
 	return nil
+}
+
+// ownerLocked returns a job's owner (cached).
+func (e *Engine) ownerLocked(ctx context.Context, jobID string) string {
+	if o, ok := e.jobOwner[jobID]; ok {
+		return o
+	}
+	j, err := e.st.GetJob(ctx, jobID)
+	if err != nil {
+		return ""
+	}
+	e.jobOwner[jobID] = j.Owner
+	return j.Owner
 }
 
 // diskNeedLocked returns (and caches) a task's work-space need: its
@@ -1094,7 +1138,9 @@ func (e *Engine) updateJobLocked(ctx context.Context, jobID string, now time.Tim
 				for _, t := range ts {
 					delete(e.placement, t.ID)
 					delete(e.diskNeed, t.ID)
+					e.setWaiting(t.ID, "")
 				}
+				delete(e.jobOwner, jobID)
 			}
 		}
 		if err := e.st.UpdateJob(ctx, j); err != nil {
