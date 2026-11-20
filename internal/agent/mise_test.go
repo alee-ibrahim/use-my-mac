@@ -374,3 +374,13 @@ func TestMiseProgramInside(t *testing.T) {
 		}
 	}
 }
+
+func TestMiseTokenBackend(t *testing.T) {
+	for b, want := range map[string]bool{"aqua:jqlang/jq": true, "github:astral-sh/uv": true, "ubi:owner/repo": true,
+		"core:node": false, "core:python": false, "npm:prettier": false, "pipx:black": false, "cargo:ripgrep": false,
+		"go:example.com/tool": false, "asdf:mise-plugins/x": false, "vfox:x": false, "http:x": false, "aquax:y": false} {
+		if got := MiseTokenBackend(b); got != want {
+			t.Errorf("MiseTokenBackend(%s) = %v, want %v", b, got, want)
+		}
+	}
+}

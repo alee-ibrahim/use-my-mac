@@ -174,6 +174,7 @@ func TestMiseToolchain(t *testing.T) {
 	}
 	record := t.TempDir()
 	mac, cache := e.miseMac("mise-mac", bin, func(c *agent.Config) {
+		c.Mise.AllowTools = []string{"aqua:*", "npm:*"}
 		c.Mise.GitHubTokenFile = tokenFile
 		c.TaskEnv["FAKE_MISE_RECORD"] = record
 	})
@@ -248,11 +249,29 @@ func TestMiseToolchain(t *testing.T) {
 		t.Errorf("task errors must not make the mise runtime unavailable: %+v", m.UnavailableRuntimes)
 	}
 
+	// The token goes only to installs of tools whose backend just downloads
+	// release files (aqua:, github:, ubi:), never to backends that run
+	// install-time code (npm: here): they install in a separate step.
+	mixed := e.runOne(api.TaskSpec{Args: []string{"hello", "x", "{out:o.txt}"},
+		Inputs:  e.miseInputs("mixed", "[tools]\nhello = \"1.0.0\"\n\"npm:thing\" = \"1.0.0\"\n", lock),
+		Outputs: []api.Output{{Name: "o.txt"}}})
+	if mixed.State != api.StateSucceeded {
+		t.Fatalf("mixed: %s %s\n%s", mixed.State, e.taskError(mixed.ID), e.logs(mixed.ID))
+	}
+	b, _ := os.ReadFile(filepath.Join(record, "installs"))
+	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); !slices.Contains(lines, "npm:thing token=") ||
+		!slices.Contains(lines, "hello token=set") {
+		t.Errorf("installs of the mixed task: %q", lines)
+	}
+
 	// A token from a command (a secrets manager's CLI): only its standard
-	// output counts, and it reaches the install only.
+	// output counts, it reaches the install only, and the command gets a
+	// minimal environment, not the agent's.
+	t.Setenv("UMM_TEST_AGENT_SECRET", "agent-only")
 	record2 := t.TempDir()
 	e.miseMac("cmd-mac", bin, func(c *agent.Config) {
-		c.Mise.GitHubTokenCommand = []string{"/bin/sh", "-c", "echo noise-" + token + " >&2; echo " + token + "-cmd"}
+		c.Mise.GitHubTokenCommand = []string{"/bin/sh", "-c",
+			"env > " + filepath.Join(record2, "cmd-env") + "; echo noise-" + token + " >&2; echo " + token + "-cmd"}
 		c.TaskEnv["FAKE_MISE_RECORD"] = record2
 	})
 	if err := e.admin.PatchMac(e.ctx, mac.id, api.MacPatch{Drain: ptr(true)}); err != nil {
@@ -266,6 +285,13 @@ func TestMiseToolchain(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(record2, "install-token")); string(b) != token+"-cmd" {
 		t.Errorf("mise install got token %q", b)
+	}
+	b, _ = os.ReadFile(filepath.Join(record2, "cmd-env"))
+	for _, kv := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		k, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains([]string{"PATH", "HOME", "LANG", "PWD", "SHLVL", "_", "OLDPWD"}, k) {
+			t.Errorf("token command saw %s", k)
+		}
 	}
 }
 

@@ -130,51 +130,80 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 		}
 		backends[t] = b
 	}
-	installEnv := menvList
-	if tok, err := a.miseGitHubToken(ctx); err != nil {
+	tok, err := a.miseGitHubToken(ctx)
+	if err != nil {
 		return macFault(err.Error())
-	} else if tok != "" {
-		// For `mise install` only: never the task's program, never logged.
-		installEnv = withEnv(menvList, map[string]string{"MISE_GITHUB_TOKEN": tok})
 	}
-
-	fmt.Fprintf(logs, "[agent] mise: installing %s\n", strings.Join(tools, ", "))
+	// The token goes only to installs of tools whose backend just downloads
+	// release files; tools whose backend runs install-time code (package
+	// managers, source builds) install in a separate step without it.
+	var plain, withToken []string
+	for _, t := range tools {
+		if tok != "" && MiseTokenBackend(backends[t]) {
+			withToken = append(withToken, t)
+		} else {
+			plain = append(plain, t)
+		}
+	}
 	ictx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	start := time.Now()
-	full := &diskFullTap{}
-	argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, a.currentQoS()), mise, []string{"install"})
-	cmd := exec.CommandContext(ictx, argv[0], argv[1:]...)
-	cmd.Dir, cmd.Env = workdir, installEnv
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(logs, full), io.MultiWriter(logs, full)
-	cmd.WaitDelay = a.cfg.StopGrace
-	setupProc(cmd)
-	if err := cmd.Start(); err != nil {
-		if why := execFailureReason(mise[0], err, 0); why != "" {
-			upd.RuntimeUnavailable = why
-			a.markExecFault(MiseRuntime, why)
+	install := func(names []string, env []string) *api.TaskUpdate {
+		fmt.Fprintf(logs, "[agent] mise: installing %s\n", strings.Join(names, ", "))
+		full := &diskFullTap{}
+		args := []string{"install"}
+		if len(names) < len(tools) {
+			args = append(args, names...)
 		}
-		return fail("start: " + err.Error())
+		argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, a.currentQoS()), mise, args)
+		cmd := exec.CommandContext(ictx, argv[0], argv[1:]...)
+		cmd.Dir, cmd.Env = workdir, env
+		cmd.Stdout, cmd.Stderr = io.MultiWriter(logs, full), io.MultiWriter(logs, full)
+		cmd.WaitDelay = a.cfg.StopGrace
+		setupProc(cmd)
+		if err := cmd.Start(); err != nil {
+			if why := execFailureReason(mise[0], err, 0); why != "" {
+				upd.RuntimeUnavailable = why
+				a.markExecFault(MiseRuntime, why)
+			}
+			_, u := fail("start: " + err.Error())
+			return u
+		}
+		a.setPgid(r, cmd.Process.Pid) // its CPU is ours, not the Mac user's
+		werr := cmd.Wait()
+		killGroup(cmd.Process.Pid)
+		a.setPgid(r, 0)
+		switch {
+		case ctx.Err() != nil:
+			u := a.stopped(ctx, upd, "")
+			return &u
+		case errors.Is(ictx.Err(), context.DeadlineExceeded):
+			u := upd
+			u.Outcome, u.Error = api.OutcomeTimeout, "mise: installing the tools did not finish within the task's timeout"
+			return &u
+		case werr != nil && full.seen:
+			_, u := macFault("install ran out of disk space (" + werr.Error() + ")")
+			return u
+		case werr != nil:
+			if why := CheckProgram(mise[0]); why != "" {
+				upd.RuntimeUnavailable = why
+				a.markExecFault(MiseRuntime, why)
+			}
+			_, u := fail("installing the tools failed (" + werr.Error() + "); mise's output is in the task log")
+			return u
+		}
+		return nil
 	}
-	a.setPgid(r, cmd.Process.Pid) // its CPU is ours, not the Mac user's
-	werr := cmd.Wait()
-	killGroup(cmd.Process.Pid)
-	a.setPgid(r, 0)
-	switch {
-	case ctx.Err() != nil:
-		u := a.stopped(ctx, upd, "")
-		return nil, &u
-	case errors.Is(ictx.Err(), context.DeadlineExceeded):
-		upd.Outcome, upd.Error = api.OutcomeTimeout, "mise: installing the tools did not finish within the task's timeout"
-		return nil, &upd
-	case werr != nil && full.seen:
-		return macFault("install ran out of disk space (" + werr.Error() + ")")
-	case werr != nil:
-		if why := CheckProgram(mise[0]); why != "" {
-			upd.RuntimeUnavailable = why
-			a.markExecFault(MiseRuntime, why)
+	if len(plain) > 0 {
+		if u := install(plain, menvList); u != nil {
+			return nil, u
 		}
-		return fail("installing the tools failed (" + werr.Error() + "); mise's output is in the task log")
+	}
+	if len(withToken) > 0 {
+		// Never the task's program, never logged.
+		if u := install(withToken, withEnv(menvList, map[string]string{"MISE_GITHUB_TOKEN": tok})); u != nil {
+			return nil, u
+		}
 	}
 	fmt.Fprintf(logs, "[agent] mise: tools ready in %s\n", time.Since(start).Round(100*time.Millisecond))
 
@@ -275,6 +304,12 @@ func (a *Agent) miseGitHubToken(ctx context.Context) (string, error) {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(cctx, mc.GitHubTokenCommand[0], mc.GitHubTokenCommand[1:]...)
+		// Not the agent's environment: only what a CLI needs to find its
+		// own configuration.
+		cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=en_US.UTF-8"}
+		if home, err := os.UserHomeDir(); err == nil {
+			cmd.Env = append(cmd.Env, "HOME="+home)
+		}
 		var out bytes.Buffer
 		cmd.Stdout = &limitWriter{w: &out, n: 64 << 10}
 		// stderr is dropped: a secrets manager may echo what it fetched.

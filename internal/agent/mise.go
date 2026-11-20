@@ -415,3 +415,14 @@ func miseProgramInside(path, installs string) (string, error) {
 	}
 	return real, nil
 }
+
+// MiseTokenBackend reports whether installing a tool with this backend may
+// get the GitHub token: one that only downloads release files.
+func MiseTokenBackend(backend string) bool {
+	for _, p := range []string{"aqua:", "github:", "ubi:"} {
+		if strings.HasPrefix(backend, p) {
+			return true
+		}
+	}
+	return false
+}
