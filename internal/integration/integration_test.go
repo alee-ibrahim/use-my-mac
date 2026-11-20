@@ -148,6 +148,12 @@ func activeTel() api.Telemetry {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvCfg(t, nil)
+}
+
+// newEnvCfg is newEnv with a hook to adjust the router's config.
+func newEnvCfg(t *testing.T, mut func(*engine.Config)) *env {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	st, err := store.Open(ctx, "sqlite://"+t.TempDir()+"/umm.db")
 	if err != nil {
@@ -164,6 +170,9 @@ func newEnv(t *testing.T) *env {
 	cfg.HeartbeatTimeout = 2 * time.Second
 	cfg.AssignTimeout = 5 * time.Second
 	cfg.BackoffBase = 100 * time.Millisecond
+	if mut != nil {
+		mut(&cfg)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	m := metrics.New()
 	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Config: cfg, Metrics: m, Logger: logger.With("c", "router")})
