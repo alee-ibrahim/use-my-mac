@@ -119,7 +119,7 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 	// Each tool's backend, as mise resolves it, must be allowed here.
 	backends := map[string]string{}
 	for _, t := range tools {
-		out, err := query("tool", t, "--json")
+		out, err := query("tool", "--json", "--", t)
 		var b string
 		if err == nil {
 			b, err = MiseBackend(out)
@@ -156,7 +156,7 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 		tail := &tailBuffer{max: 64 << 10}
 		args := []string{"install"}
 		if len(names) < len(tools) {
-			args = append(args, names...)
+			args = append(append(args, "--"), names...)
 		}
 		argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, a.currentQoS()), mise, args)
 		cmd := exec.CommandContext(ictx, argv[0], argv[1:]...)
@@ -218,7 +218,7 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 
 	// The program must come from one of the installed tools, never from
 	// the system (/bin/sh, a Homebrew program).
-	out, err = query("which", prog)
+	out, err = query("which", "--", prog)
 	path := strings.TrimSpace(string(out))
 	if err != nil {
 		return fail(fmt.Sprintf("no installed tool provides %s (%v)", prog, err))

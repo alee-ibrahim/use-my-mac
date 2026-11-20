@@ -49,11 +49,18 @@ ls)
 	echo '}'
 	;;
 tool)
-	case "$2" in *:*) b=$2 ;; *) b=aqua:example/$2 ;; esac
+	# The agent passes names after --: mise tool --json -- NAME.
+	[ "$2 $3" = "--json --" ] || { echo "mise ERROR expected: tool --json -- NAME" >&2; exit 2; }
+	case "$4" in *:*) b=$4 ;; *) b=aqua:example/$4 ;; esac
 	echo '{"backend":"'"$b"'"}'
 	;;
 install)
-	shift; want=$*; [ -z "$want" ] && want=$(tools)
+	shift
+	if [ $# -gt 0 ]; then
+		[ "$1" = -- ] || { echo "mise ERROR expected: install -- TOOL..." >&2; exit 2; }
+		shift
+	fi
+	want=$*; [ -z "$want" ] && want=$(tools)
 	echo "fake-mise install" $want
 	env | grep -E '^MISE_(SAFE|LOCKED|EXEC_AUTO_INSTALL|SYSTEM_PACKAGES_SUDO)=' | sort
 	[ -n "$MISE_GITHUB_TOKEN" ] && echo "github token: set"
@@ -71,10 +78,11 @@ install)
 	done
 	;;
 which)
-	for p in "$MISE_DATA_DIR"/installs/*/1.0.0/bin/"$2"; do
+	[ "$2" = -- ] || { echo "mise ERROR expected: which -- PROGRAM" >&2; exit 2; }
+	for p in "$MISE_DATA_DIR"/installs/*/1.0.0/bin/"$3"; do
 		if [ -e "$p" ]; then echo "$p"; exit 0; fi
 	done
-	echo "mise ERROR $2 is not a mise bin" >&2; exit 1
+	echo "mise ERROR $3 is not a mise bin" >&2; exit 1
 	;;
 exec)
 	shift; [ "$1" = "--" ] && shift
