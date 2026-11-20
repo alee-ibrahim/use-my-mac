@@ -103,7 +103,8 @@ umm macs                            # quick check
 | `umm watch JOB` | follow a job live: state, percent and phase until it finishes |
 | `umm status [JOB]` | recent jobs, or one job and its tasks |
 | `umm logs TASK [-attempt N]` | task logs (all attempts by default) |
-| `umm download TASK OUTPUT [-o FILE] [-concurrency 4]` | download an output (parallel byte ranges, with progress) |
+| `umm download TASK OUTPUT [-o FILE] [-concurrency 4] [-direct \| -relay]` | download an output (parallel byte ranges, with progress, SHA-256 checked). Straight from S3 when the router uses the `s3` backend; `-relay` streams through the router instead |
+| `umm download TASK OUTPUT -url [-ttl 1h]` | print a presigned URL for the output, for other tools (`s3` backend) |
 | `umm cancel JOB` | cancel a job |
 | `umm jobs rm JOB... [-inputs]` | delete your jobs; running ones are cancelled first. `-inputs` also deletes the input files you uploaded for them |
 | `umm jobs rm -finished [-state failed] [-older-than 7d] [-inputs]` | delete all your finished jobs (admins: everyone's, or `-owner`) |
@@ -181,7 +182,7 @@ on one left out that way. Deleting a job frees its client IDs.
 
 The Mac computes each output's SHA-256 while it uploads it. A task's `output_sha256` (and `sha256` in
 `GET /v1/files`) has it; `umm download` checks the downloaded file against it (`-no-verify` skips that) and
-the SDK's `VerifyOutputFile` does the same. Outputs made by agents from before this have none.
+the SDK's `VerifyOutputFile` does the same (direct downloads check it themselves). Outputs made by agents from before this have none.
 
 ### Progress
 
@@ -259,6 +260,20 @@ _, err = c.DownloadOutputFile(ctx, final.Tasks[0].ID, "enc.mp4", "enc.mp4", nil)
 part, `Direct` (send parts straight to S3 with presigned URLs instead of through the router) and
 `OnUpload`, which hands you the upload ID so that `ResumeUpload` can finish an interrupted upload later.
 `UploadBlob` and `DownloadOutput` still stream a file in one request.
+
+With the `s3` backend, `DownloadOutputFile` with `Direct: true` fetches the output straight from the bucket
+in parallel ranges on a presigned URL, checks the Mac's SHA-256 (`SkipVerify` skips that) and then tells the
+router (`ConfirmDownload`), which is what `after_download` cleanup counts. `DownloadOutputFileInfo` does the
+same and says whether it went direct, was verified and was confirmed. `URLTTL` sets the URL lifetime.
+`Me` reports the router's `storage` backend, so you can choose. For other tools, `OutputURL` and `BlobURL`
+return a presigned URL (`{url, expires_at, size, sha256}`); downloads through it are invisible to the router,
+so call `ConfirmDownload(ctx, taskID, name, sha256)` afterwards when the job uses `after_download`:
+
+```go
+d, err := c.OutputURL(ctx, taskID, "enc.mp4", time.Hour) // curl -o enc.mp4 "$URL", ffmpeg -i "$URL", ...
+// ... fetch d.URL elsewhere, check d.SHA256 ...
+err = c.ConfirmDownload(ctx, taskID, "enc.mp4", d.SHA256)
+```
 
 The client also has `Job`, `Jobs`, `CancelJob`, `RemoveJob`, `PurgeJobs`, `Files`, `DeleteFile`,
 `DeleteFiles`, `Task`, `Logs`, `Macs` and the admin calls (`PatchMac`, `SetMacLabels`, `ReserveMac`,
@@ -622,7 +637,33 @@ Files bigger than one part (8 MiB by default) move in parallel parts, both ways 
 - **Outputs**: agents upload outputs that go to router storage in parallel parts, to presigned (S3) or
   signed (local) URLs. Outputs with your own `url` get a single `PUT`.
 - **Downloads**: agents and `umm download` fetch in parallel byte ranges when the server supports `Range`
-  (the router and S3 do), and stream otherwise.
+  (the router's `local` backend and S3 do), and stream otherwise.
+
+### Direct downloads (s3 backend)
+
+With the `s3` backend the bytes of an output or blob need not pass through the router.
+`GET /v1/tasks/{id}/outputs/{name}?direct=1` and `GET /v1/blobs/{key}?direct=1` return a presigned `GET` URL
+instead of the file:
+
+```json
+{"url": "https://s3.example.com/bucket/...&X-Amz-Signature=...", "expires_at": "2026-01-01T13:00:00Z",
+ "size": 12582912, "sha256": "9f86d0..."}
+```
+
+- Fetch the URL with a plain `GET`, without your `Authorization` header. `Range` headers work (parallel
+  ranges); the URL signs only the host, so send no other headers such as `Content-Type` or `x-amz-*`.
+- `ttl=SECONDS` (60 to 604800, 7 days) sets the lifetime; the default is the router's
+  `storage.direct_download_ttl_minutes` (60). `redirect=1` answers `307` to the URL instead of JSON, for tools
+  that follow redirects.
+- Who may ask is the same as for streaming: the job's owner or an admin (viewers get `403`), and a blob's owner
+  or an admin (`404` for other app keys).
+- With the `local` backend `direct=1` gets `400` ("direct downloads need the s3 storage backend"); download
+  without it. `GET /v1/me` reports the backend as `storage`, and `umm download` goes direct only when it is
+  `s3`.
+- The router never sees these bytes. For `after_download` cleanup, confirm a complete download with
+  `POST /v1/tasks/{id}/outputs/{name}/downloaded` and `{"sha256": "<hex>"}` (optional; a mismatch with the
+  Mac's checksum is refused with `409` and not counted). `umm download` and the SDK do that after the checksum
+  passes. Issuing a URL alone never counts.
 
 Agents set the part size and parallelism in `agent.yaml` (`transfer: {part_size_mb: 8, concurrency: 4}`).
 Uploads that are never completed are aborted, and their parts deleted, after 24 hours. A part can be up to
@@ -663,8 +704,10 @@ can:
   ```
 
   *Results* are the stored outputs that no other task of the job consumes (a reduce's input is not a result).
-  A download counts once every byte of the file was served (parallel ranges add up); cleanup then waits two
-  quiet minutes. Failed and cancelled jobs are only cleaned by `after_hours`, so you can retry them with the
+  A download counts once every byte of the file was served (parallel ranges add up), or when a direct
+  download from S3 is confirmed (`POST .../downloaded`, which `umm download` and the SDK send once the
+  checksum passes; see [Direct downloads](#direct-downloads-s3-backend)); cleanup then waits two quiet
+  minutes. Fetching a presigned URL with another tool does not count until you confirm it. Failed and cancelled jobs are only cleaned by `after_hours`, so you can retry them with the
   same inputs. Inputs are only deleted when the job's owner uploaded them and no unfinished job uses them.
   The job shows `cleaned_at` afterwards; the activity log records `job.cleaned`.
 
@@ -713,7 +756,7 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 
 | Method and path | Role | Does |
 | --- | --- | --- |
-| `GET /v1/me` | any | who you are and your role |
+| `GET /v1/me` | any | who you are, your role and the router's `storage` backend |
 | `POST /v1/jobs` | app, admin | submit a job (body: job spec); returns the job (`201`), or the existing one (`200`, `existing: true`) for a repeated `client_id` / `Idempotency-Key` |
 | `GET /v1/jobs?state=&limit=` | any | list jobs (apps see only their own) |
 | `GET /v1/jobs/{id}` | any | a job, its tasks and state counts |
@@ -725,7 +768,8 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `POST /v1/files/delete` | app (own), admin | `{"keys": [...]}` or a filter `{"prefix", "kind", "job_id", "all": true}` → `{deleted, bytes, skipped}` |
 | `GET /v1/tasks/{id}` | any | a task with its attempts and placement scores |
 | `GET /v1/tasks/{id}/logs?attempt=N` | any | logs as plain text (all attempts when `attempt` is 0 or missing) |
-| `GET /v1/tasks/{id}/outputs/{name}` | any | download an output |
+| `GET /v1/tasks/{id}/outputs/{name}` | any | download an output; `?direct=1[&ttl=S][&redirect=1]` (owner, admin; `s3` backend) returns a presigned URL `{url, expires_at, size, sha256}` or a `307` to it |
+| `POST /v1/tasks/{id}/outputs/{name}/downloaded` | app (own), admin | confirm a complete direct download `{"sha256"}` (optional, `409` on a mismatch) so `after_download` counts it → `204` |
 | `PUT /v1/blobs/{key}` | app, admin | upload an input (raw body) |
 | `POST /v1/uploads` | app, admin | start a multipart upload `{key, size, part_size?, direct?}` → `{id, parts, part_size, urls}` (`201`) |
 | `GET /v1/uploads/{id}` | app, admin | parts already stored (`done`) and fresh URLs for the rest |
@@ -734,7 +778,7 @@ All endpoints take and return JSON unless noted. Authenticate with `Authorizatio
 | `DELETE /v1/uploads/{id}` | app, admin | abort an upload and drop its parts |
 | `GET /v1/jobs/{id}/stream` | any | server-sent events: `job` (the job with its tasks) on every change, then `end`, or `removed` |
 | `GET /v1/jobs/stream?state=&limit=` | any | server-sent events: `jobs` (the list), then `job` and `removed` as jobs change |
-| `GET /v1/blobs/{key}` | app, admin | download a blob |
+| `GET /v1/blobs/{key}` | app, admin | download a blob; `?direct=1` as for outputs |
 | `GET /v1/macs` | any | Macs with state and live telemetry |
 | `PATCH /v1/macs/{id}` | admin | `{"drain": true}`, `{"opted_out": true}`, `{"name": "Lab Mac 2"}` or `{"max_tasks": 4}` (0 = the agent's own) |
 | `PUT /v1/macs/{id}/labels` | admin | `{"labels": {"class": "studio"}}` replaces the router-side labels |

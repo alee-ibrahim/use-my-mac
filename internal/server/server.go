@@ -49,6 +49,9 @@ type Server struct {
 	MaxUploadBytes int64
 	// SecureCookies sets the Secure flag (use behind HTTPS).
 	SecureCookies bool
+	// DirectDownloadTTL is the default lifetime of presigned download URLs
+	// (?direct=1); 0 means one hour. Requests may ask for up to 7 days.
+	DirectDownloadTTL time.Duration
 	// PollWaitMax caps agent long-poll duration.
 	PollWaitMax time.Duration
 	Now         func() time.Time
@@ -118,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{id}", s.need(roleAny, s.getTask))
 	mux.HandleFunc("GET /v1/tasks/{id}/logs", s.need(roleAny, s.taskLogs))
 	mux.HandleFunc("GET /v1/tasks/{id}/outputs/{name}", s.need(roleAny, s.taskOutput))
+	mux.HandleFunc("POST /v1/tasks/{id}/outputs/{name}/downloaded", s.need(roleSubmit, s.confirmDownload))
 	mux.HandleFunc("PUT /v1/blobs/{key...}", s.need(roleSubmit, s.putBlob))
 	mux.HandleFunc("GET /v1/blobs/{key...}", s.need(roleSubmit, s.getBlob))
 	mux.HandleFunc("GET /v1/macs", s.need(roleAny, s.listMacs))
@@ -223,6 +227,10 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, engine.ErrForbidden):
 		writeErr(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, engine.ErrActive):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, engine.ErrNoDirect):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, engine.ErrChecksumMismatch):
 		writeErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, engine.ErrStale):
 		writeErr(w, http.StatusConflict, err.Error())
@@ -356,7 +364,8 @@ func canSee(id *identity, owner string) bool {
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	id := who(r)
-	writeJSON(w, http.StatusOK, api.Me{Subject: id.Subject, Name: id.Name, Role: id.Role, Via: id.Via})
+	writeJSON(w, http.StatusOK, api.Me{Subject: id.Subject, Name: id.Name, Role: id.Role, Via: id.Via,
+		Storage: s.E.Blobs().Name()})
 }
 
 func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
@@ -467,6 +476,23 @@ func (s *Server) taskOutput(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
+	if wantDirect(r) {
+		if who(r).Role == api.RoleViewer {
+			writeErr(w, http.StatusForbidden, "direct downloads are for the job's owner and admins")
+			return
+		}
+		ttl, ok := s.directTTL(w, r)
+		if !ok {
+			return
+		}
+		d, err := s.E.DirectOutputURL(r.Context(), t.ID, r.PathValue("name"), ttl)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		writeDirect(w, r, d)
+		return
+	}
 	rc, err := s.E.OpenOutput(r.Context(), t.ID, r.PathValue("name"))
 	if err != nil {
 		s.fail(w, err)
@@ -525,6 +551,19 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	if err := storage.ValidKey(key); err != nil {
 		s.fail(w, err)
+		return
+	}
+	if wantDirect(r) {
+		ttl, ok := s.directTTL(w, r)
+		if !ok {
+			return
+		}
+		d, err := s.E.DirectBlobURL(r.Context(), caller(r), key, ttl)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		writeDirect(w, r, d)
 		return
 	}
 	rc, err := s.E.OpenBlob(r.Context(), caller(r), key)

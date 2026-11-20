@@ -152,7 +152,8 @@ func serve(args []string) error {
 
 	srv := &server.Server{E: eng, Log: log, Metrics: m, SessionKey: []byte(cfg.SecretKey), WebDir: cfg.WebDir,
 		MaxUploadBytes: cfg.MaxUploadMB << 20, SecureCookies: strings.HasPrefix(cfg.PublicURL, "https://"),
-		Updates: cfg.Updates, PublicURL: cfg.PublicURL, Install: cfg.Install}
+		Updates: cfg.Updates, PublicURL: cfg.PublicURL, Install: cfg.Install,
+		DirectDownloadTTL: time.Duration(cfg.Storage.DirectDownloadTTLMinutes) * time.Minute}
 	if cfg.SecureCookies != nil {
 		srv.SecureCookies = *cfg.SecureCookies
 	}

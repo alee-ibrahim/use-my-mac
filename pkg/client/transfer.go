@@ -29,9 +29,16 @@ type TransferOptions struct {
 	Concurrency int
 	// Retries per part (default 4).
 	Retries int
-	// Direct asks for presigned part URLs straight to object storage when
-	// the router uses S3 (default: through the router).
+	// Direct moves the bytes straight between you and object storage with
+	// presigned URLs when the router uses S3 (default: through the router).
+	// Uploads fall back to the router when it cannot; downloads fail with
+	// 400 on a router without S3 (check Me().Storage first).
 	Direct bool
+	// URLTTL is how long presigned download URLs live (default: the
+	// router's, 1 hour unless configured; at most 7 days).
+	URLTTL time.Duration
+	// SkipVerify skips the SHA-256 check of direct downloads.
+	SkipVerify bool
 	// OnProgress is called about every ProgressEvery (default 250 ms) and
 	// once at the end.
 	OnProgress    func(Progress)
@@ -182,34 +189,6 @@ func isStatus(err error, codes ...int) bool {
 		}
 	}
 	return false
-}
-
-// DownloadOutputFile saves a task output to path, in parallel byte ranges
-// when the router can serve them, with progress.
-func (c *Client) DownloadOutputFile(ctx context.Context, taskID, name, path string, opt *TransferOptions) (int64, error) {
-	o := opt.norm()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	m := transfer.NewMeter(0)
-	stop := m.Report(o.ProgressEvery, o.OnProgress)
-	n, err := transfer.Download(ctx, c.HTTP,
-		c.BaseURL+"/v1/tasks/"+url.PathEscape(taskID)+"/outputs/"+url.PathEscape(name), f,
-		transfer.DownloadOptions{Chunk: o.PartSize, Concurrency: o.Concurrency, Retries: o.Retries,
-			Header: c.authHeader(), Meter: m})
-	stop()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		os.Remove(path)
-		var se *transfer.StatusError
-		if errors.As(err, &se) {
-			return 0, &Error{Status: se.Code, Message: se.Body}
-		}
-	}
-	return n, err
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ data:
     web_dir: /app/web
     storage:
       backend: {{ .Values.storage.backend }}
+      direct_download_ttl_minutes: {{ .Values.storage.directDownloadTTLMinutes | default 60 }}
       local:
         dir: /data/blobs
       {{- if eq .Values.storage.backend "s3" }}

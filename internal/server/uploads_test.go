@@ -101,3 +101,47 @@ func TestJobsStream(t *testing.T) {
 		t.Fatalf("change event %s %s", ev, data)
 	}
 }
+
+// Direct downloads need the s3 backend: the local backend answers 400 with
+// a clear message; viewers and bad ttls are refused first.
+func TestDirectDownloadLocalBackend(t *testing.T) {
+	e := newAuthEnv(t, false, true, false)
+	viewer, _ := e.srv.E.CreateAPIKey(context.Background(), "viewer", api.RoleViewer)
+	if w := e.do("PUT", "/v1/blobs/app/a.txt", "hello", bearerAs(e.app)); w.Code != http.StatusCreated {
+		t.Fatalf("put: %d %s", w.Code, w.Body)
+	}
+	w := e.do("GET", "/v1/blobs/app/a.txt?direct=1", "", bearerAs(e.app))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "s3 storage backend") {
+		t.Fatalf("local direct blob: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "/v1/blobs/app/a.txt?direct=1&ttl=10", "", bearerAs(e.app)); w.Code != http.StatusBadRequest ||
+		!strings.Contains(w.Body.String(), "ttl") {
+		t.Fatalf("short ttl: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "/v1/blobs/app/a.txt", "", bearerAs(e.app)); w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("relay still works: %d %s", w.Code, w.Body)
+	}
+	var me api.Me
+	if w := e.do("GET", "/v1/me", "", bearerAs(e.app)); json.Unmarshal(w.Body.Bytes(), &me) != nil || me.Storage != "local" {
+		t.Fatalf("me: %s", w.Body)
+	}
+	w = e.do("POST", "/v1/jobs", `{"tasks":[{"key":"t","runtime":"sh","outputs":[{"name":"o"}]}]}`, bearerAs(e.app))
+	var job api.Job
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &job) != nil {
+		t.Fatalf("submit: %d %s", w.Code, w.Body)
+	}
+	full, _ := e.srv.E.Job(context.Background(), job.ID, true)
+	path := "/v1/tasks/" + full.Tasks[0].ID + "/outputs/o"
+	if w := e.do("GET", path+"?direct=1", "", bearerAs(viewer.Secret)); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer direct: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", path+"?direct=1", "", bearerAs(e.app)); w.Code != http.StatusBadRequest {
+		t.Fatalf("local direct output: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("POST", path+"/downloaded", `{}`, bearerAs(viewer.Secret)); w.Code != http.StatusForbidden {
+		t.Fatalf("viewer confirm: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("POST", path+"/downloaded", `{}`, bearerAs(e.app)); w.Code != http.StatusNotFound {
+		t.Fatalf("confirm before the output exists: %d %s", w.Code, w.Body)
+	}
+}
