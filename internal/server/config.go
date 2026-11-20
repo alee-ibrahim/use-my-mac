@@ -148,7 +148,11 @@ func (u UpdatesConfig) RelayEnabled() bool { return u.Relay == nil || *u.Relay }
 // StorageConfig selects the blob backend.
 type StorageConfig struct {
 	Backend string `yaml:"backend"` // local (default) or s3
-	Local   struct {
+	// DirectDownloadTTLMinutes is the default lifetime of presigned
+	// download URLs handed to apps (?direct=1, s3 only). Default 60,
+	// at most 10080 (7 days).
+	DirectDownloadTTLMinutes int `yaml:"direct_download_ttl_minutes"`
+	Local                    struct {
 		Dir string `yaml:"dir"`
 	} `yaml:"local"`
 	S3 struct {
@@ -201,6 +205,9 @@ func (c *Config) validate() error {
 	c.PublicURL = strings.TrimRight(c.PublicURL, "/")
 	if c.SecretKey != "" && len(c.SecretKey) < 32 {
 		return errors.New("UMM_SECRET_KEY must be at least 32 characters")
+	}
+	if m := c.Storage.DirectDownloadTTLMinutes; m < 0 || m > 7*24*60 {
+		return errors.New("storage.direct_download_ttl_minutes must be between 0 and 10080 (7 days)")
 	}
 	switch c.Storage.Backend {
 	case "local", "":

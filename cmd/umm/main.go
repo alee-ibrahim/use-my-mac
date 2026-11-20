@@ -39,8 +39,10 @@ Commands:
   watch JOB                      follow a job live (state, % and phase) until it finishes
   status [JOB]                   list recent jobs, or show one job and its tasks
   logs TASK [-attempt N]         print a task's logs
-  download TASK OUTPUT [-o F] [-concurrency 4]
-                                 download a task output (parallel ranges, with progress)
+  download TASK OUTPUT [-o F] [-concurrency 4] [-direct | -relay] [-url [-ttl 1h]]
+                                 download a task output (parallel ranges, with progress, SHA-256
+                                 checked); straight from S3 when the router uses it (-relay: via
+                                 the router); -url prints a presigned URL for other tools
   cancel JOB                     cancel a job
   macs [list | delete MAC...]    list Macs with live telemetry; delete removed Macs (admin)
   macs label MAC [k=v...] [-rm K] [-clear]       router-side labels, merged over the agent's (admin)

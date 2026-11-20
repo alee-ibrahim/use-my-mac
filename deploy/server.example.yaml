@@ -15,6 +15,9 @@ storage:
   # local: the router stores and relays files itself (zero extra infra).
   # s3:    any S3-compatible store; agents get short-lived presigned URLs.
   backend: local
+  # s3 only: lifetime of presigned download URLs handed to apps
+  # (GET .../outputs/NAME?direct=1). Default 60, max 10080 (7 days).
+  direct_download_ttl_minutes: 60
   local:
     dir: /data/blobs
   s3:
