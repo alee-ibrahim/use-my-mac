@@ -238,10 +238,24 @@ func (e *Engine) SubmitJobAs(ctx context.Context, c Caller, spec api.JobSpec) (*
 	if err := e.checkMacSelectors(ctx, owner, &spec); err != nil {
 		return nil, err
 	}
+	if err := validateClientIDs(&spec); err != nil {
+		return nil, err
+	}
+	// Submits are serialised so two copies of one client ID cannot race.
+	e.submitMu.Lock()
+	defer e.submitMu.Unlock()
+	hash := specHash(&spec)
+	prev, existing, err := e.dedupe(ctx, owner, &spec, hash)
+	if err != nil || prev != nil {
+		return prev, err
+	}
 	now := e.now()
 	j := &store.Job{
 		ID: "job_" + auth.NewID(), Name: spec.Name, Owner: owner, Labels: jsonStr(nonNilMap(spec.Labels)),
-		State: JobQueued, CreatedAt: ms(now),
+		State: JobQueued, CreatedAt: ms(now), ClientID: spec.ClientID,
+	}
+	if spec.ClientID != "" {
+		j.ClientHash = hash
 	}
 	if spec.Cleanup != nil {
 		j.Cleanup = jsonStr(spec.Cleanup)
@@ -252,18 +266,27 @@ func (e *Engine) SubmitJobAs(ctx context.Context, c Caller, spec api.JobSpec) (*
 		if len(ts.DependsOn) > 0 {
 			st = api.StateBlocked
 		}
-		rows = append(rows, &store.Task{
+		row := &store.Task{
 			ID: "tsk_" + auth.NewID(), JobID: j.ID, Key: ts.Key, Spec: jsonStr(ts), State: st,
 			Excluded: "{}", Outputs: "[]", CreatedAt: ms(now) + int64(i), // keep submission order
-		})
+		}
+		if ts.ClientID != "" {
+			row.ClientKey = clientKey(owner, ts.ClientID)
+		}
+		rows = append(rows, row)
 	}
 	if err := e.st.CreateJob(ctx, j, rows); err != nil {
 		return nil, err
 	}
-	e.log.Info("job submitted", "job", j.ID, "name", j.Name, "tasks", len(rows), "owner", owner)
+	e.log.Info("job submitted", "job", j.ID, "name", j.Name, "tasks", len(rows), "owner", owner,
+		"existing_tasks", len(existing))
 	e.notify(j.ID)
 	e.Kick()
-	return e.Job(ctx, j.ID, false)
+	v, err := e.Job(ctx, j.ID, false)
+	if v != nil {
+		v.ExistingTasks = existing
+	}
+	return v, err
 }
 
 // CancelJob cancels every unfinished task; running ones are stopped by their
@@ -354,6 +377,9 @@ func taskView(t *store.Task) api.Task {
 	}
 	_ = json.Unmarshal([]byte(t.Spec), &v.Spec)
 	_ = json.Unmarshal([]byte(t.Outputs), &v.OutputsDone)
+	if t.OutputSHA256 != "" && t.OutputSHA256 != "{}" {
+		_ = json.Unmarshal([]byte(t.OutputSHA256), &v.OutputSHA256)
+	}
 	now := time.Now().UnixMilli()
 	for id, until := range excludedMap(t) {
 		if until > now {
@@ -379,6 +405,7 @@ func (e *Engine) Job(ctx context.Context, id string, withTasks bool) (*api.Job, 
 		}
 	}
 	v.CleanedAt = tptr(j.CleanedAt)
+	v.ClientID = j.ClientID
 	if v.Counts, err = e.st.TaskCounts(ctx, id); err != nil {
 		return nil, err
 	}

@@ -29,7 +29,12 @@ anchor), `internal/server` (HTTP),
   `timeout_seconds`, `max_retries` and `depends_on`. States: `blocked`, `pending`, `assigned`, `running`,
   then `succeeded`, `failed` or `cancelled`.
 - **Stored file:** a blob in router storage with an owner (`blobs` table): app uploads (`uploads/<key>`,
-  owned by the uploader) and task outputs (`jobs/<job>/<task>/<output>`, owned by the job's owner).
+  owned by the uploader) and task outputs (`jobs/<job>/<task>/<output>`, owned by the job's owner, with the
+  SHA-256 the Mac computed while uploading it).
+- **Client IDs:** optional, on jobs (`jobs.client_id`, unique per owner, with a hash of the submitted spec)
+  and tasks (`tasks.client_key` = owner + client ID, unique). Submits are serialised in the router; a
+  repeated job client ID returns the existing job (a different spec is refused), and tasks whose client ID
+  exists are left out of the new job and reported. Unique partial indexes back both.
 - **Attempt:** one try of a task on one Mac, with its placement score and outcome: `succeeded`, `failed`,
   `timeout`, `yielded`, `lost` or `cancelled`.
 

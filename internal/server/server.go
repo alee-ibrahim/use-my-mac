@@ -364,12 +364,23 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &spec, 32<<20) {
 		return
 	}
+	if k := strings.TrimSpace(r.Header.Get("Idempotency-Key")); k != "" {
+		if spec.ClientID != "" && spec.ClientID != k {
+			writeErr(w, http.StatusBadRequest, "Idempotency-Key and client_id differ")
+			return
+		}
+		spec.ClientID = k
+	}
 	j, err := s.E.SubmitJobAs(r.Context(), caller(r), spec)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, j)
+	code := http.StatusCreated
+	if j.Existing {
+		code = http.StatusOK
+	}
+	writeJSON(w, code, j)
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {

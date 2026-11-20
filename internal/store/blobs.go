@@ -41,13 +41,15 @@ const (
 type Blob struct {
 	Key, Owner, Kind, JobID, TaskID string
 	Size, CreatedAt, DownloadedAt   int64
+	// SHA256 of the content (hex), when known (outputs).
+	SHA256 string
 }
 
-const blobCols = `key, owner, kind, job_id, task_id, size, created_at, downloaded_at`
+const blobCols = `key, owner, kind, job_id, task_id, size, created_at, downloaded_at, sha256`
 
 func scanBlob(sc interface{ Scan(...any) error }) (*Blob, error) {
 	var b Blob
-	err := sc.Scan(&b.Key, &b.Owner, &b.Kind, &b.JobID, &b.TaskID, &b.Size, &b.CreatedAt, &b.DownloadedAt)
+	err := sc.Scan(&b.Key, &b.Owner, &b.Kind, &b.JobID, &b.TaskID, &b.Size, &b.CreatedAt, &b.DownloadedAt, &b.SHA256)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -58,10 +60,11 @@ func scanBlob(sc interface{ Scan(...any) error }) (*Blob, error) {
 // written again: owner, size and time are updated, the download mark is
 // cleared).
 func (s *Store) PutBlob(ctx context.Context, b *Blob) error {
-	_, err := s.exec(ctx, `INSERT INTO blobs(`+blobCols+`) VALUES(?,?,?,?,?,?,?,0)
+	_, err := s.exec(ctx, `INSERT INTO blobs(`+blobCols+`) VALUES(?,?,?,?,?,?,?,0,?)
 		ON CONFLICT (key) DO UPDATE SET owner = excluded.owner, kind = excluded.kind, job_id = excluded.job_id,
-		task_id = excluded.task_id, size = excluded.size, created_at = excluded.created_at, downloaded_at = 0`,
-		b.Key, b.Owner, b.Kind, b.JobID, b.TaskID, b.Size, b.CreatedAt)
+		task_id = excluded.task_id, size = excluded.size, created_at = excluded.created_at, downloaded_at = 0,
+		sha256 = excluded.sha256`,
+		b.Key, b.Owner, b.Kind, b.JobID, b.TaskID, b.Size, b.CreatedAt, b.SHA256)
 	return err
 }
 

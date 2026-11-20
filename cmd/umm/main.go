@@ -31,8 +31,9 @@ Environment:
   UMM_API_KEY        API key (or UMM_API_KEY_FILE, or ~/.config/umm/api-key)
 
 Commands:
-  submit FILE [-wait] [-part-size 8MiB] [-concurrency 4]
-                                 submit a job spec (YAML or JSON); inputs with "file:" are uploaded first
+  submit FILE [-wait] [-client-id ID] [-part-size 8MiB] [-concurrency 4]
+                                 submit a job spec (YAML or JSON); inputs with "file:" are uploaded first;
+                                 with a client ID a re-submit returns the existing job
   upload FILE [KEY] [-part-size 8MiB] [-concurrency 4] [-resume ID]
                                  upload an input blob in parallel parts, with progress; prints the key
   watch JOB                      follow a job live (state, % and phase) until it finishes
@@ -142,12 +143,13 @@ func run(ctx context.Context, cmd string, args []string) error {
 	switch cmd {
 	case "submit":
 		wait := fs.Bool("wait", false, "wait for the job to finish")
+		clientID := fs.String("client-id", "", "idempotency key: submitting again with it returns the existing job")
 		tf := addTransferFlags(fs)
 		pos := parseFlags(fs, args)
 		if len(pos) != 1 {
-			return errors.New("usage: umm submit FILE [-wait] [-part-size 8MiB] [-concurrency 4]")
+			return errors.New("usage: umm submit FILE [-wait] [-client-id ID] [-part-size 8MiB] [-concurrency 4]")
 		}
-		return submit(ctx, c, pos[0], *wait, tf)
+		return submit(ctx, c, pos[0], *wait, *clientID, tf)
 	case "upload":
 		return uploadCmd(ctx, c, args)
 	case "watch":
@@ -246,7 +248,7 @@ func run(ctx context.Context, cmd string, args []string) error {
 
 // submit reads a YAML/JSON spec. Inputs may use `file: path` which is
 // uploaded and rewritten to a blob reference.
-func submit(ctx context.Context, c *client.Client, path string, wait bool, tf *transferFlags) error {
+func submit(ctx context.Context, c *client.Client, path string, wait bool, clientID string, tf *transferFlags) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -285,11 +287,20 @@ func submit(ctx context.Context, c *client.Client, path string, wait bool, tf *t
 	if err := dec.Decode(&spec); err != nil {
 		return fmt.Errorf("job spec: %w", err)
 	}
+	if clientID != "" {
+		spec.ClientID = clientID
+	}
 	job, err := c.SubmitJob(ctx, spec)
 	if err != nil {
 		return err
 	}
 	fmt.Println(job.ID)
+	if job.Existing {
+		fmt.Fprintln(os.Stderr, "already submitted (same client_id): nothing new was created")
+	}
+	for _, x := range job.ExistingTasks {
+		fmt.Fprintf(os.Stderr, "task %s already exists: %s in %s (%s)\n", x.ClientID, x.TaskID, x.JobID, x.State)
+	}
 	if !wait {
 		return nil
 	}

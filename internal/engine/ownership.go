@@ -120,6 +120,8 @@ func (e *Engine) checkInputOwnership(ctx context.Context, c Caller, spec *api.Jo
 
 // recordOutputsLocked notes the stored outputs of a task that succeeded.
 func (e *Engine) recordOutputsLocked(ctx context.Context, t *store.Task, spec api.TaskSpec, done []string) {
+	digests := map[string]string{}
+	_ = json.Unmarshal([]byte(t.OutputSHA256), &digests)
 	j, err := e.st.GetJob(ctx, t.JobID)
 	if err != nil {
 		return
@@ -135,7 +137,7 @@ func (e *Engine) recordOutputsLocked(ctx context.Context, t *store.Task, spec ap
 		}
 		key := OutputKey(t.JobID, t.Key, o.Name)
 		if err := e.st.PutBlob(ctx, &store.Blob{Key: key, Owner: j.Owner, Kind: store.BlobOutput, JobID: t.JobID,
-			TaskID: t.ID, Size: e.sizeOf(ctx, key), CreatedAt: now}); err != nil {
+			TaskID: t.ID, Size: e.sizeOf(ctx, key), CreatedAt: now, SHA256: digests[o.Name]}); err != nil {
 			e.log.Warn("record output", "key", key, "err", err)
 		}
 	}
@@ -181,7 +183,8 @@ func fileInUse(b *store.Blob, uploads, jobs map[string]bool) bool {
 
 func fileView(b *store.Blob, uploads, jobs map[string]bool) api.StoredFile {
 	f := api.StoredFile{Key: b.Key, Kind: b.Kind, Owner: b.Owner, JobID: b.JobID, TaskID: b.TaskID, Size: b.Size,
-		CreatedAt: time.UnixMilli(b.CreatedAt).UTC(), DownloadedAt: tptr(b.DownloadedAt), InUse: fileInUse(b, uploads, jobs)}
+		CreatedAt: time.UnixMilli(b.CreatedAt).UTC(), DownloadedAt: tptr(b.DownloadedAt), InUse: fileInUse(b, uploads, jobs),
+		SHA256: b.SHA256}
 	if k, ok := cutUploadKey(b.Key); ok && b.Kind == store.BlobUpload {
 		f.Blob = k
 	}

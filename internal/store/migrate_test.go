@@ -96,7 +96,7 @@ func TestMigrateOldDatabase(t *testing.T) {
 					}
 				}
 				j, err := s.GetJob(ctx, "job_old")
-				if err != nil || j.Cleanup != "" || j.CleanedAt != 0 || j.State != "succeeded" {
+				if err != nil || j.Cleanup != "" || j.CleanedAt != 0 || j.State != "succeeded" || j.ClientID != "" || j.ClientHash != "" {
 					t.Fatalf("job after migration: %+v %v", j, err)
 				}
 				if err := s.PutBlob(ctx, &Blob{Key: "uploads/x" + rid(), Owner: "key:k", Kind: BlobUpload, CreatedAt: 1}); err != nil {
@@ -212,6 +212,55 @@ func TestBlobsAndNewColumns(t *testing.T) {
 			}
 			if ids, _ := s.FinishedJobsOf(ctx, "key:other", 100, nil, 10); len(ids) != 0 {
 				t.Fatalf("other owner: %v", ids)
+			}
+		})
+	}
+}
+
+// TestClientIDsUnique: the unique indexes on client IDs hold per owner.
+func TestClientIDsUnique(t *testing.T) {
+	urls := map[string]string{"sqlite": "sqlite://" + t.TempDir() + "/t.db"}
+	if pg := os.Getenv("UMM_TEST_POSTGRES_URL"); pg != "" {
+		urls["postgres"] = pg
+	}
+	for name, u := range urls {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s, err := Open(ctx, u)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			owner, cid := "key:"+rid(), "batch-"+rid()
+			mk := func(owner string) error {
+				id := "job_" + rid()
+				return s.CreateJob(ctx, &Job{ID: id, Name: "j", Owner: owner, Labels: "{}", State: "queued", CreatedAt: 1,
+					ClientID: cid, ClientHash: "h"}, []*Task{{ID: "tsk_" + rid(), JobID: id, Key: "t", Spec: "{}", State: "pending",
+					Excluded: "{}", Outputs: "[]", CreatedAt: 1, ClientKey: owner + "\n" + cid}})
+			}
+			if err := mk(owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := mk(owner); err == nil {
+				t.Fatal("duplicate client_id for one owner must fail")
+			}
+			if err := mk("key:" + rid()); err != nil {
+				t.Fatalf("another owner may reuse it: %v", err)
+			}
+			j, err := s.JobByClientID(ctx, owner, cid)
+			if err != nil || j.ClientHash != "h" {
+				t.Fatalf("by client id: %+v %v", j, err)
+			}
+			ts, err := s.TasksByClientKeys(ctx, []string{owner + "\n" + cid, "nope"})
+			if err != nil || len(ts) != 1 || ts[0].JobID != j.ID {
+				t.Fatalf("tasks by key: %+v %v", ts, err)
+			}
+			// Jobs without client IDs never collide.
+			for range 2 {
+				id := "job_" + rid()
+				if err := s.CreateJob(ctx, &Job{ID: id, Name: "j", Owner: owner, Labels: "{}", State: "queued", CreatedAt: 1}, nil); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}

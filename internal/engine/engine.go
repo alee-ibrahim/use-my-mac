@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -144,6 +145,8 @@ type Engine struct {
 	subs  map[chan string]struct{}
 	// catalog is the managed runtime catalog (see catalog.go).
 	catalog api.RuntimeCatalog
+	// submitMu serialises job submits (client ID checks).
+	submitMu sync.Mutex
 	// jobOwner caches job owners for placement (under mu).
 	jobOwner map[string]string
 	// waiting explains pending tasks no Mac took (see waitingReason).
@@ -675,6 +678,7 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 		e.dropProgress(t.ID)
 		t.State, t.FinishedAt, t.ExitCode, t.Error = api.StateSucceeded, ms(now), u.ExitCode, ""
 		t.Outputs = jsonStr(nonNil(u.Outputs))
+		t.OutputSHA256 = jsonStr(outputDigests(u))
 		if err := e.st.UpdateTask(ctx, t); err != nil {
 			return err
 		}
@@ -708,6 +712,19 @@ func (e *Engine) TaskUpdate(ctx context.Context, agentID, taskID string, u api.T
 	e.Kick()
 	return nil
 }
+
+// outputDigests keeps the well-formed SHA-256s of uploaded outputs.
+func outputDigests(u api.TaskUpdate) map[string]string {
+	out := map[string]string{}
+	for _, o := range u.Outputs {
+		if d := strings.ToLower(u.OutputSHA256[o]); sha256RE.MatchString(d) {
+			out[o] = d
+		}
+	}
+	return out
+}
+
+var sha256RE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func nz(s, def string) string {
 	if s == "" {

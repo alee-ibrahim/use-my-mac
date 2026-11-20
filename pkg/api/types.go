@@ -26,6 +26,20 @@ type JobSpec struct {
 	// once its results have been downloaded and/or some hours after it
 	// finished. nil keeps them until deleted.
 	Cleanup *Cleanup `json:"cleanup,omitempty"`
+	// ClientID makes submitting idempotent: it is unique per owner, and a
+	// job submitted again with the same ClientID (and the same spec) returns
+	// the existing job instead of a new one. The Idempotency-Key header
+	// sets it too. Up to 200 characters.
+	ClientID string `json:"client_id,omitempty"`
+}
+
+// ExistingTask is a task that was not created again because a task with
+// its ClientID already exists for the owner.
+type ExistingTask struct {
+	ClientID string `json:"client_id"`
+	TaskID   string `json:"task_id"`
+	JobID    string `json:"job_id"`
+	State    string `json:"state"`
 }
 
 // Prefer is a soft placement preference: Macs that match get a score bonus,
@@ -97,6 +111,10 @@ type TaskSpec struct {
 	Macs []string `json:"macs,omitempty"`
 	// Prefer: soft placement (a score bonus for matching Macs).
 	Prefer *Prefer `json:"prefer,omitempty"`
+	// ClientID identifies the task for idempotent submits: unique per owner
+	// across jobs. A task whose ClientID already exists is not created
+	// again; the response lists it under Job.ExistingTasks.
+	ClientID string `json:"client_id,omitempty"`
 
 	// Requires names managed runtime packages (from the router's runtime
 	// catalog) that must be installed on the Mac before the task runs; their
@@ -194,6 +212,13 @@ type Job struct {
 	// Cleanup is the job's cleanup policy; CleanedAt is when it ran.
 	Cleanup   *Cleanup   `json:"cleanup,omitempty"`
 	CleanedAt *time.Time `json:"cleaned_at,omitempty"`
+	ClientID  string     `json:"client_id,omitempty"`
+	// Existing is set on a submit response when nothing new was created:
+	// the job (or all its tasks) had been submitted before.
+	Existing bool `json:"existing,omitempty"`
+	// ExistingTasks lists tasks of a submit that already existed (by
+	// TaskSpec.ClientID) and were left out of this job.
+	ExistingTasks []ExistingTask `json:"existing_tasks,omitempty"`
 }
 
 // Task is the server's view of a task.
@@ -215,6 +240,9 @@ type Task struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	Attempts    []Attempt  `json:"attempts,omitempty"`
 	OutputsDone []string   `json:"outputs_done,omitempty"`
+	// OutputSHA256 maps each uploaded output to its SHA-256 (hex), as the
+	// Mac computed it from the file it uploaded.
+	OutputSHA256 map[string]string `json:"output_sha256,omitempty"`
 	// Phase is queued, starting, downloading, running, uploading or done.
 	Phase string `json:"phase,omitempty"`
 	// Percent is the task's overall progress (0-100). Downloading inputs
@@ -675,6 +703,8 @@ type TaskUpdate struct {
 	ExitCode *int     `json:"exit_code,omitempty"`
 	Error    string   `json:"error,omitempty"`
 	Outputs  []string `json:"outputs,omitempty"` // names uploaded successfully
+	// OutputSHA256 maps uploaded outputs to the SHA-256 (hex) of the file.
+	OutputSHA256 map[string]string `json:"output_sha256,omitempty"`
 	// RuntimeUnavailable is set (with the reason) when the agent could not
 	// execute the runtime's program at all (exec ENOENT/EACCES, or exit
 	// 127 from the launcher). The router then treats the attempt as a Mac
@@ -958,6 +988,8 @@ type StoredFile struct {
 	JobID  string `json:"job_id,omitempty"`
 	TaskID string `json:"task_id,omitempty"`
 	Size   int64  `json:"size"`
+	// SHA256 of an output (hex), as computed by the Mac that produced it.
+	SHA256 string `json:"sha256,omitempty"`
 	// CreatedAt is when it was stored; DownloadedAt when it was first
 	// downloaded in full (outputs).
 	CreatedAt    time.Time  `json:"created_at"`
