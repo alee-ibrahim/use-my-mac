@@ -382,22 +382,52 @@ func TestMiseRealInstall(t *testing.T) {
 		}
 	}
 	var allLogs strings.Builder
-	// logs returns a task's log, skipping the test when an install without
-	// a token ran into GitHub's per-IP rate limit.
 	logs := func(task api.Task) string {
 		l := e.logs(task.ID)
 		allLogs.WriteString(l)
-		if task.State != api.StateSucceeded && token == "" && strings.Contains(l, "rate limit exceeded") {
-			t.Skip("GitHub's unauthenticated API rate limit was hit; set UMM_TEST_MISE_GITHUB_TOKEN_FILE")
-		}
 		return l
+	}
+	// run submits a one-task job and waits for it. A rate-limited install
+	// is a Mac fault, so with this one Mac the task would wait for another:
+	// without a token that skips the test, with one it fails it.
+	run := func(ts api.TaskSpec) api.Task {
+		t.Helper()
+		zero := 0
+		ts.Key, ts.MaxRetries, ts.Runtime = "t", &zero, agent.MiseRuntime
+		job, err := e.app.SubmitJob(e.ctx, api.JobSpec{Name: "mise", Tasks: []api.TaskSpec{ts}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			j, err := e.app.Job(e.ctx, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := j.Tasks[0]
+			switch task.State {
+			case api.StateSucceeded, api.StateFailed, api.StateCancelled:
+				return task
+			}
+			d, _ := e.app.Task(e.ctx, task.ID)
+			for _, a := range d.Attempts {
+				if a.Outcome == api.OutcomeUnavailable && strings.Contains(a.Error, "rate limit") {
+					logs(task)
+					if token == "" {
+						t.Skip("GitHub's unauthenticated API rate limit was hit; set UMM_TEST_MISE_GITHUB_TOKEN_FILE")
+					}
+					t.Fatalf("rate-limited even with a token: %s", a.Error)
+				}
+			}
+		}
+		t.Fatal("the task did not finish")
+		return api.Task{}
 	}
 	jq := "[tools]\n\"aqua:jqlang/jq\" = \"1.7.1\"\n"
 	in := e.miseInputs("jq", jq, realJQLock)
 	ts := api.TaskSpec{Args: []string{"jq", "-n", "-c", `{"tool": "jq", "args": $ARGS.positional}`, "--args", "pinned"},
 		Inputs: in, TimeoutSeconds: 300}
 	for i := 0; i < 2; i++ {
-		task := e.runOne(ts)
+		task := run(ts)
 		l := logs(task)
 		if task.State != api.StateSucceeded || !strings.Contains(l, `{"tool":"jq","args":["pinned"]}`) {
 			t.Fatalf("run %d: %s %s\n%s", i, task.State, e.taskError(task.ID), l)
@@ -406,7 +436,7 @@ func TestMiseRealInstall(t *testing.T) {
 	}
 	// The task's program does not see the token (jq can print its env), nor
 	// anything from the planted config.
-	task := e.runOne(api.TaskSpec{Args: []string{"jq", "-n", "-r",
+	task := run(api.TaskSpec{Args: []string{"jq", "-n", "-r",
 		`"token in task env: " + (env.MISE_GITHUB_TOKEN // env.GITHUB_TOKEN // env.GITHUB_API_TOKEN // "none") + ", planted: " + (env.PLANTED // "none")`},
 		Inputs: in, TimeoutSeconds: 300})
 	if l := logs(task); task.State != api.StateSucceeded || !strings.Contains(l, "token in task env: none, planted: none\n") {
@@ -424,13 +454,13 @@ func TestMiseRealInstall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	task = e.runOne(ts)
+	task = run(ts)
 	if l := logs(task); task.State != api.StateSucceeded || strings.Contains(l, "tampered") ||
 		!strings.Contains(l, `{"tool":"jq","args":["pinned"]}`) {
 		t.Fatalf("tampered cache: %s %s\n%s", task.State, e.taskError(task.ID), l)
 	}
 
-	task = e.runOne(api.TaskSpec{Args: []string{"sh", "-c", "id"}, Inputs: in, TimeoutSeconds: 300})
+	task = run(api.TaskSpec{Args: []string{"sh", "-c", "id"}, Inputs: in, TimeoutSeconds: 300})
 	logs(task)
 	if msg := e.taskError(task.ID); task.State != api.StateFailed || !strings.Contains(msg, "no installed tool provides sh") {
 		t.Errorf("sh: %s %q", task.State, msg)
@@ -443,7 +473,7 @@ func TestMiseRealInstall(t *testing.T) {
 		bad = strings.ReplaceAll(bad, sum, strings.Repeat("0", 64))
 	}
 	ts.Inputs = e.miseInputs("jq-bad", jq, bad)
-	task = e.runOne(ts)
+	task = run(ts)
 	if l := logs(task); task.State != api.StateFailed || !strings.Contains(l, "Checksum mismatch") {
 		t.Fatalf("bad checksum: %s %s\n%s", task.State, e.taskError(task.ID), l)
 	}
