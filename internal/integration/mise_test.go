@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 // The hello program says whether it can see a token.
 const fakeMise = `#!/bin/sh
 case "$1" in
+--version) echo "2026.11.9 linux-x64 (2026-11-16)" ;;
 config)
 	if grep -q '^\[env\]' "$4"; then
 		echo '[{"key":"env","path":["env"]},{"key":"env.X","path":["env","X"]},{"key":"tools.hello","path":["tools","hello"]}]'
@@ -84,11 +87,7 @@ func (e *env) miseMac(name, miseBin string, mut func(*agent.Config)) (*fakeMac, 
 	cache := filepath.Join(e.t.TempDir(), "mise-cache")
 	f := e.macCfg(name, 1, quietTel(), nil, func(c *agent.Config) {
 		c.Mise = agent.MiseConfig{Enabled: true, Binary: miseBin, CacheDir: cache}
-		// The macOS defaults check the host (home folders, disk reserve,
-		// work volume), which a CI runner does not pass.
-		off, zero := false, 0.0
-		c.HomeCheck.Disabled, c.WorkVolume.Enabled = true, &off
-		c.MinFreeDisk.Min, c.MinFreeDisk.Percent = "0", &zero
+		miseHostChecksOff(c)
 		if mut != nil {
 			mut(c)
 		}
@@ -419,3 +418,65 @@ checksum = "sha256:0bbe619e663e0de2c550be2fe0d240d076799d6f8a652b70fa04aea8a8362
 url = "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64"
 url_api = "https://api.github.com/repos/jqlang/jq/releases/assets/140521010"
 `
+
+// scriptPackage builds a tar.gz with bin/<name> holding script.
+func scriptPackage(name, script string) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	tw.WriteHeader(&tar.Header{Name: "bin/", Typeflag: tar.TypeDir, Mode: 0o755})
+	tw.WriteHeader(&tar.Header{Name: "bin/" + name, Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(script))})
+	tw.Write([]byte(script))
+	tw.Close()
+	zw.Close()
+	return buf.Bytes()
+}
+
+// The runtime name "mise" belongs to mise toolchains: a managed package
+// providing a mise command is not offered or run as a plain runtime on a
+// Mac without mise.enabled. With mise enabled and no mise.binary, that
+// package is how the Mac gets mise (the default deployment), and tasks run
+// through the protected path.
+func TestMiseReservedName(t *testing.T) {
+	skipNoShell(t)
+	e := newEnv(t)
+	s := newSigner(t)
+	s.publish(e, "mise", "2026.11.9", scriptPackage("mise", fakeMise), "", false)
+	record := t.TempDir()
+	off, _ := e.managedMacCfg("off-mac", s, nil, nil)
+	on, _ := e.managedMacCfg("on-mac", s, nil, func(c *agent.Config) {
+		c.Mise = agent.MiseConfig{Enabled: true, CacheDir: filepath.Join(t.TempDir(), "cache")}
+		c.TaskEnv["FAKE_MISE_RECORD"] = record
+		miseHostChecksOff(c)
+	})
+	waitFor(t, "on-mac to offer mise", 5*time.Second, func() bool {
+		m := macByID(e, on.id)
+		return slices.Contains(m.Runtimes, agent.MiseRuntime) || slices.Contains(m.InstallableRuntimes, agent.MiseRuntime)
+	})
+	m := macByID(e, off.id)
+	if slices.Contains(m.Runtimes, agent.MiseRuntime) || slices.Contains(m.InstallableRuntimes, agent.MiseRuntime) {
+		t.Fatalf("off-mac offers mise without mise.enabled: %+v %+v", m.Runtimes, m.InstallableRuntimes)
+	}
+	task := e.runOne(api.TaskSpec{Args: []string{"hello", "managed", "{out:o.txt}"},
+		Inputs: e.miseInputs("reserved", helloToml, "lockfile_version = 4\n"), Outputs: []api.Output{{Name: "o.txt"}}})
+	logs := e.logs(task.ID)
+	if task.State != api.StateSucceeded || task.AgentID != on.id || !strings.Contains(logs, "fake-mise install") ||
+		!strings.Contains(logs, "MISE_SAFE=1") {
+		t.Fatalf("task %s on %s: %s\n%s", task.State, task.AgentID, e.taskError(task.ID), logs)
+	}
+	if d, _ := e.app.Task(e.ctx, task.ID); d != nil {
+		for _, a := range d.Attempts {
+			if a.AgentID == off.id {
+				t.Errorf("an attempt ran on off-mac: %+v", a)
+			}
+		}
+	}
+}
+
+// miseHostChecksOff turns off the macOS host checks (home folders, disk
+// reserve, work volume), which a CI runner does not pass.
+func miseHostChecksOff(c *agent.Config) {
+	off, zero := false, 0.0
+	c.HomeCheck.Disabled, c.WorkVolume.Enabled = true, &off
+	c.MinFreeDisk.Min, c.MinFreeDisk.Percent = "0", &zero
+}

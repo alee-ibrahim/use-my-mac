@@ -100,6 +100,14 @@ func (a *Agent) preflightLocked(now time.Time) {
 	}
 	ready := map[string][]string{}
 	for _, n := range names {
+		if n == MiseRuntime && !a.cfg.Mise.Enabled {
+			// A managed package may provide a mise command, but the name is
+			// reserved for mise toolchains, which are off here.
+			delete(a.faults, n)
+			unavail = append(unavail, api.UnavailableRuntime{Name: n, Reason: miseOffReason,
+				Source: api.RuntimeSourcePreflight, Since: &now})
+			continue
+		}
 		var prog, why, source string
 		if argv, ok := a.runtimes[n]; ok {
 			prog = argv[0]
@@ -235,6 +243,9 @@ func (a *Agent) markExecFault(name, reason string) {
 func (a *Agent) runtimeFor(name string) (argv []string, install string, why string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if name == MiseRuntime && !a.cfg.Mise.Enabled {
+		return nil, "", "runtime mise unavailable on this Mac: " + miseOffReason
+	}
 	if u, bad := a.unavail[name]; bad {
 		return nil, "", "runtime " + name + " unavailable on this Mac: " + u.Reason
 	}

@@ -278,15 +278,18 @@ func (c *Config) Normalize() error {
 	if err := c.Mise.normalize(agentDir); err != nil {
 		return err
 	}
+	// The runtime name mise belongs to mise toolchains, which only run
+	// through the protected path (mise_run.go): never as a plain runtime.
+	if rt, ok := c.Runtimes[MiseRuntime]; ok && !(c.Mise.Enabled && len(rt) == 1 && rt[0] == c.Mise.Binary) {
+		return errors.New("the runtime name mise is reserved for mise toolchains: set mise.enabled and mise.binary " +
+			"(or publish mise as a managed runtime) instead of a runtimes entry")
+	}
 	if c.Mise.Enabled {
 		if d := path.Clean(filepath.ToSlash(c.Mise.CacheDir)); d == path.Clean(filepath.ToSlash(c.WorkDir)) ||
 			strings.HasPrefix(d, path.Clean(filepath.ToSlash(c.WorkDir))+"/") {
 			return errors.New("mise.cache_dir must not be inside work_dir (it is emptied at startup)")
 		}
 		if c.Mise.Binary != "" {
-			if rt, dup := c.Runtimes[MiseRuntime]; dup && !(len(rt) == 1 && rt[0] == c.Mise.Binary) {
-				return errors.New("set mise.binary or a runtime named mise, not both")
-			}
 			if c.Runtimes == nil {
 				c.Runtimes = map[string][]string{}
 			}

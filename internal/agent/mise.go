@@ -19,8 +19,12 @@ import (
 // runs the task's program with `mise exec`. The agent only checks mise's
 // reports. The functions here are pure; the wiring is in mise_run.go.
 
-// MiseRuntime is the runtime name tasks use for a mise toolchain.
+// MiseRuntime is the runtime name tasks use for a mise toolchain. It is
+// reserved: it only ever runs through the protected path, and only on Macs
+// with mise.enabled.
 const MiseRuntime = "mise"
+
+const miseOffReason = "reserved for mise toolchains, which are not enabled on this Mac (mise.enabled)"
 
 // The inputs a mise task provides.
 const (

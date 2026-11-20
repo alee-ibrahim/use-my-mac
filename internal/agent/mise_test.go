@@ -193,8 +193,7 @@ func TestMiseConfigNormalize(t *testing.T) {
 		t.Errorf("second Normalize: %v", err)
 	}
 
-	// Without binary, the runtime named mise comes from runtimes or a
-	// managed runtime.
+	// Without binary, mise comes from a managed runtime.
 	c = base()
 	c.Mise = MiseConfig{Enabled: true}
 	if err := c.Normalize(); err != nil {
@@ -236,10 +235,17 @@ func TestMiseConfigNormalize(t *testing.T) {
 		{"tiny max_cache", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, MaxCache: "1000"}
 		}, "at least 1MiB"},
+		{"runtime named mise, mise off", func(c *Config) {
+			c.Runtimes[MiseRuntime] = []string{"/usr/local/bin/mise"}
+		}, "reserved"},
+		{"runtime named mise, mise on", func(c *Config) {
+			c.Runtimes[MiseRuntime] = []string{"/usr/local/bin/mise"}
+			c.Mise = MiseConfig{Enabled: true}
+		}, "reserved"},
 		{"two mise runtimes", func(c *Config) {
 			c.Runtimes[MiseRuntime] = []string{"/usr/local/bin/mise"}
 			c.Mise = MiseConfig{Enabled: true, Binary: "/opt/homebrew/bin/mise"}
-		}, "not both"},
+		}, "reserved"},
 	}
 	for _, b := range bad {
 		c := base()

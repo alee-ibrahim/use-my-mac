@@ -735,7 +735,7 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		return upd
 	}
 	// A mise task brings its own toolchain (see mise.go).
-	useMise := as.Runtime == MiseRuntime && a.cfg.Mise.Enabled
+	useMise := as.Runtime == MiseRuntime // runtimeFor refused it unless mise.enabled
 	workdir := filepath.Join(a.cfg.WorkDir, fmt.Sprintf("%s-%d", as.TaskID, as.Attempt))
 	defer os.RemoveAll(workdir)
 	for _, d := range []string{"in", "out", "tmp"} {

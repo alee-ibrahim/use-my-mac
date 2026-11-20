@@ -89,6 +89,12 @@ func (s *signer) publish(e *env, name, version string, data []byte, sha string, 
 // runtimes.
 func (e *env) managedMac(name string, s *signer, extra map[string][]string) (*fakeMac, string) {
 	e.t.Helper()
+	return e.managedMacCfg(name, s, extra, nil)
+}
+
+// managedMacCfg is managedMac with a hook to adjust the agent config.
+func (e *env) managedMacCfg(name string, s *signer, extra map[string][]string, mut func(*agent.Config)) (*fakeMac, string) {
+	e.t.Helper()
 	base := e.t.TempDir()
 	dir := filepath.Join(base, "umm-runtimes")
 	os.MkdirAll(filepath.Join(base, "umm", "work"), 0o700)
@@ -108,6 +114,9 @@ func (e *env) managedMac(name string, s *signer, extra map[string][]string) (*fa
 					}
 				}()
 			}}
+		if mut != nil {
+			mut(c)
+		}
 	})
 	return f, dir
 }
