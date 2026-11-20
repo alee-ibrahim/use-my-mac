@@ -84,6 +84,11 @@ func (e *env) miseMac(name, miseBin string, mut func(*agent.Config)) (*fakeMac, 
 	cache := filepath.Join(e.t.TempDir(), "mise-cache")
 	f := e.macCfg(name, 1, quietTel(), nil, func(c *agent.Config) {
 		c.Mise = agent.MiseConfig{Enabled: true, Binary: miseBin, CacheDir: cache}
+		// The macOS defaults check the host (home folders, disk reserve,
+		// work volume), which a CI runner does not pass.
+		off, zero := false, 0.0
+		c.HomeCheck.Disabled, c.WorkVolume.Enabled = true, &off
+		c.MinFreeDisk.Min, c.MinFreeDisk.Percent = "0", &zero
 		if mut != nil {
 			mut(c)
 		}
@@ -284,9 +289,10 @@ func TestMiseRealChecks(t *testing.T) {
 
 // With UMM_TEST_MISE=1 the agent runs a real locked install of jq
 // (downloaded from GitHub; needs network access to github.com) and
-// `mise exec`. A second task gets the download from the shared cache,
-// checked against the lockfile again; a lockfile with the wrong checksum
-// fails; a program from outside the tools never runs.
+// `mise exec`. A second task gets the download from the shared cache; one
+// a task tampered with is fetched again; a lockfile with the wrong
+// checksum fails; a program from outside the tools never runs. The macOS
+// CI job runs these as a non-admin user, like _umm on a Mac.
 func TestMiseRealInstall(t *testing.T) {
 	if os.Getenv("UMM_TEST_MISE") == "" {
 		t.Skip("set UMM_TEST_MISE=1 to run a real mise install (downloads jq from github.com)")
@@ -310,11 +316,25 @@ func TestMiseRealInstall(t *testing.T) {
 		}
 		t.Logf("run %d log:\n%s", i, logs)
 	}
-	if ents, err := os.ReadDir(filepath.Join(cache, "downloads-cas", "blobs")); err != nil || len(ents) == 0 {
-		t.Errorf("shared download cache is empty: %v", err)
+	// The cache is shared by tasks running as the same user, so a task can
+	// overwrite a download in it. mise re-checks each one against the
+	// locked checksum before use, drops it and fetches it again.
+	blobs, _ := filepath.Glob(filepath.Join(cache, "downloads-cas", "blobs", "*", "artifact"))
+	if len(blobs) == 0 {
+		t.Fatal("shared download cache is empty")
+	}
+	for _, b := range blobs {
+		if err := os.WriteFile(b, []byte("#!/bin/sh\necho tampered\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := e.runOne(ts)
+	if logs := e.logs(task.ID); task.State != api.StateSucceeded || strings.Contains(logs, "tampered") ||
+		!strings.Contains(logs, `{"tool":"jq","args":["pinned"]}`) {
+		t.Fatalf("tampered cache: %s %s\n%s", task.State, e.taskError(task.ID), logs)
 	}
 
-	task := e.runOne(api.TaskSpec{Args: []string{"sh", "-c", "id"}, Inputs: in, TimeoutSeconds: 300})
+	task = e.runOne(api.TaskSpec{Args: []string{"sh", "-c", "id"}, Inputs: in, TimeoutSeconds: 300})
 	if msg := e.taskError(task.ID); task.State != api.StateFailed || !strings.Contains(msg, "no installed tool provides sh") {
 		t.Errorf("sh: %s %q", task.State, msg)
 	}

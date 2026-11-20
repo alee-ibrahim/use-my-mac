@@ -1,0 +1,101 @@
+name: macos-mise
+
+# Smoke test of mise toolchains on a real Apple Silicon Mac: the agent's
+# mise tests run as a hidden non-admin user, like _umm on an enrolled Mac,
+# with a pinned, checksum-verified mise. Needs no secrets.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - internal/agent/**
+      - internal/engine/runtimes.go
+      - internal/integration/**
+      - pkg/api/**
+      - go.mod
+      - .github/workflows/macos-mise.yml
+  pull_request:
+    paths:
+      - internal/agent/**
+      - internal/engine/runtimes.go
+      - internal/integration/**
+      - pkg/api/**
+      - go.mod
+      - .github/workflows/macos-mise.yml
+
+permissions:
+  contents: read
+
+jobs:
+  mise:
+    runs-on: macos-26 # Apple Silicon
+    timeout-minutes: 15
+    env:
+      MISE_VERSION: "2026.11.9"
+      # SHA-256 of mise-v2026.11.9-macos-arm64 from the release's SHASUMS256.txt.
+      MISE_SHA256: f3bb0e8cbe0217a0b52444ecc0042364563ddd1de0490313bb7e702ecab41a14
+      TASK_USER: _ummci
+      CI_DIR: /usr/local/var/ummci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install mise (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          f="mise-v${MISE_VERSION}-macos-arm64"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/$f"
+          echo "${MISE_SHA256}  $RUNNER_TEMP/$f" | shasum -a 256 -c -
+          sudo install -d -o root -g wheel -m 0755 /usr/local/bin
+          sudo install -o root -g wheel -m 0755 "$RUNNER_TEMP/$f" /usr/local/bin/mise
+          /usr/local/bin/mise --version
+
+      - name: Build the agent and the integration tests
+        run: |
+          set -euo pipefail
+          make agent-darwin
+          go test -race -c -o "$RUNNER_TEMP/integration.test" ./internal/integration/
+
+      - name: Create a hidden non-admin task user (as the installer creates _umm)
+        run: |
+          set -euo pipefail
+          uid=""
+          for candidate in $(seq 450 499); do
+            if ! dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$candidate" &&
+               ! dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$candidate"; then
+              uid=$candidate; break
+            fi
+          done
+          test -n "$uid"
+          sudo dscl . -create "/Groups/$TASK_USER"
+          sudo dscl . -create "/Groups/$TASK_USER" PrimaryGroupID "$uid"
+          sudo dscl . -create "/Users/$TASK_USER"
+          sudo dscl . -create "/Users/$TASK_USER" UniqueID "$uid"
+          sudo dscl . -create "/Users/$TASK_USER" PrimaryGroupID "$uid"
+          sudo dscl . -create "/Users/$TASK_USER" UserShell /usr/bin/false
+          sudo dscl . -create "/Users/$TASK_USER" NFSHomeDirectory "$CI_DIR"
+          sudo dscl . -create "/Users/$TASK_USER" IsHidden 1
+          sudo dscl . -create "/Users/$TASK_USER" Password "*"
+          sudo mkdir -p "$(dirname "$CI_DIR")"
+          sudo install -d -o "$TASK_USER" -g "$TASK_USER" -m 0700 "$CI_DIR" "$CI_DIR/tmp"
+          sudo install -o "$TASK_USER" -g "$TASK_USER" -m 0700 "$RUNNER_TEMP/integration.test" "$CI_DIR/integration.test"
+          id "$TASK_USER"
+          if dseditgroup -o checkmember -m "$TASK_USER" admin | grep -q '^yes'; then
+            echo "$TASK_USER must not be an admin"; exit 1
+          fi
+
+      - name: mise tests as the task user (real locked install from github.com)
+        run: |
+          set -euo pipefail
+          cd / # the task user cannot read the runner's workspace
+          sudo -u "$TASK_USER" env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$CI_DIR" TMPDIR="$CI_DIR/tmp" \
+            UMM_TEST_MISE=1 UMM_TEST_MISE_BIN=/usr/local/bin/mise \
+            "$CI_DIR/integration.test" -test.run '^TestMise' -test.v -test.count=1 -test.timeout 8m 2>&1 |
+            grep -v ' level=' | tee "$RUNNER_TEMP/mise-tests.log"
+          # Every mise test ran (none skipped) and passed.
+          for t in TestMiseToolchain TestMiseRealChecks TestMiseRealInstall; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/mise-tests.log" || { echo "$t did not pass"; exit 1; }
+          done
