@@ -111,6 +111,10 @@ type Config struct {
 	// ManagedRuntimes lets the agent install signed runtime packages from
 	// the router's catalog by itself when a task needs one.
 	ManagedRuntimes ManagedRuntimesConfig `yaml:"managed_runtimes"`
+
+	// Mise lets tasks bring a pinned toolchain (runtime "mise"). Off by
+	// default; see mise.go.
+	Mise MiseConfig `yaml:"mise"`
 }
 
 // WorkVolumeConfig configures the dedicated work volume.
@@ -260,6 +264,25 @@ func (c *Config) Normalize() error {
 	if c.MaxTasks <= 0 {
 		c.MaxTasks = 1
 	}
+	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
+	if err := c.Mise.normalize(agentDir); err != nil {
+		return err
+	}
+	if c.Mise.Enabled {
+		if d := path.Clean(filepath.ToSlash(c.Mise.CacheDir)); d == path.Clean(filepath.ToSlash(c.WorkDir)) ||
+			strings.HasPrefix(d, path.Clean(filepath.ToSlash(c.WorkDir))+"/") {
+			return errors.New("mise.cache_dir must not be inside work_dir (it is emptied at startup)")
+		}
+		if c.Mise.Binary != "" {
+			if rt, dup := c.Runtimes[MiseRuntime]; dup && !(len(rt) == 1 && rt[0] == c.Mise.Binary) {
+				return errors.New("set mise.binary or a runtime named mise, not both")
+			}
+			if c.Runtimes == nil {
+				c.Runtimes = map[string][]string{}
+			}
+			c.Runtimes[MiseRuntime] = []string{c.Mise.Binary}
+		}
+	}
 	if len(c.Runtimes) == 0 && !c.ManagedRuntimes.On() {
 		return errors.New("at least one runtime must be allowlisted (or managed_runtimes enabled)")
 	}
@@ -354,7 +377,6 @@ func (c *Config) Normalize() error {
 		c.Update.VerifyTimeout = 2 * time.Minute
 	}
 	mr := &c.ManagedRuntimes
-	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
 	if mr.Dir == "" {
 		mr.Dir = path.Join(path.Dir(agentDir), "umm-runtimes")
 	}
