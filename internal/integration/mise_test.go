@@ -360,6 +360,7 @@ func TestMiseRealChecks(t *testing.T) {
 		{"tasks", jq + "[tasks.build]\nrun = \"id\"\n", realJQLock, "tasks is not allowed"},
 		{"hooks", "[hooks]\nenter = \"id\"\n" + jq, realJQLock, "hooks is not allowed"},
 		{"settings", "[settings]\nlocked = false\n" + jq, realJQLock, "settings is not allowed"},
+		{"tool option", "[tools]\n\"aqua:jqlang/jq\" = { version = \"1.7.1\", exe = \"jq\" }\n", realJQLock, "tool option exe is not allowed"},
 		{"no tools", "min_version = \"2026.1.0\"\n", realJQLock, "[tools] is missing"},
 		{"not toml", "[tools\n", realJQLock, "mise config"},
 		{"no lockfile", jq, "", "cannot resolve aqua:jqlang/jq"},

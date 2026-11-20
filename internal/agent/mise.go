@@ -154,11 +154,11 @@ func (m *MiseConfig) normalize(workDir string) error {
 }
 
 // CheckMiseKeys checks `mise config explain --json` of the task's
-// mise.toml: only [tools] (and min_version) may be set. [env], [tasks],
-// [hooks], [settings], plugins and aliases are refused rather than left to
-// MISE_SAFE. Tool options are mise's to police: MISE_SAFE refuses the ones
-// that run code or change the install environment (postinstall,
-// install_env).
+// mise.toml: only [tools] with plain versions (and min_version) may be
+// set. [env], [tasks], [hooks], [settings], plugins, aliases and tool
+// options are refused: options such as api_url or url decide where a tool
+// downloads from and where the GitHub token is sent, and MISE_SAFE only
+// covers the ones that run code (postinstall, install_env).
 // It returns the tools the file lists.
 func CheckMiseKeys(explain []byte) ([]string, error) {
 	var keys []struct {
@@ -173,10 +173,15 @@ func CheckMiseKeys(explain []byte) ([]string, error) {
 		switch {
 		case len(p) == 0:
 		case p[0] == "min_version" && (len(p) == 1 || (len(p) == 2 && (p[1] == "hard" || p[1] == "soft"))):
-		case p[0] == "tools":
+		case p[0] == "tools" && len(p) <= 2:
 			if len(p) == 2 {
 				tools = append(tools, p[1])
 			}
+		case p[0] == "tools" && len(p) == 3 && p[2] == "version":
+		case p[0] == "tools":
+			// Options can change where a tool comes from and where the
+			// token goes (api_url, url, asset patterns), not just run code.
+			return nil, fmt.Errorf("mise.toml: tool option %s is not allowed (only a version)", strings.Join(p[2:], "."))
 		default:
 			return nil, fmt.Errorf("mise.toml: %s is not allowed (only [tools] and min_version)", strings.Join(p, "."))
 		}

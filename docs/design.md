@@ -450,8 +450,9 @@ checks what mise reports:
   itself would hide the task's own file), so the work volume's root, writable by every task, is never
   read. The agent then requires `mise config ls --json` to list exactly the task's `mise.toml`.
   `MISE_SAFE=1` loads it without letting it run code (env templates, hooks, `postinstall`,
-  `install_env`); the agent also refuses anything but `[tools]` and `min_version`, from
-  `mise config explain --json`. Auto-install, sudo, netrc, gh CLI tokens and mise's version host are off;
+  `install_env`); the agent also refuses anything but `[tools]` with plain versions and `min_version`,
+  from `mise config explain --json`, so no tool option (`api_url`, `url`, ...) can redirect a download
+  or the token. Auto-install, sudo, netrc, gh CLI tokens and mise's version host are off;
   task `env` may not set `MISE_*` or GitHub token variables.
 - **Which tools.** `mise tool NAME --json` gives each tool's backend, which must match
   `mise.allow_tools` (default `core:*` and `aqua:*`).

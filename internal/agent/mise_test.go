@@ -16,9 +16,13 @@ func TestCheckMiseKeys(t *testing.T) {
 	}{
 		{"tools and min_version", `[{"key":"min_version","path":["min_version"]},{"key":"min_version.hard","path":["min_version","hard"]},
 			{"key":"tools","path":["tools"]},{"key":"tools.node","path":["tools","node"]}]`, ""},
-		{"tool options are mise's to police", `[{"key":"tools","path":["tools"]},{"key":"tools.aqua:jqlang/jq","path":["tools","aqua:jqlang/jq"]},
+		{"version in a table", `[{"key":"tools","path":["tools"]},{"key":"tools.aqua:jqlang/jq","path":["tools","aqua:jqlang/jq"]},
+			{"key":"tools.aqua:jqlang/jq.version","path":["tools","aqua:jqlang/jq","version"]}]`, ""},
+		{"tool option", `[{"key":"tools","path":["tools"]},{"key":"tools.aqua:jqlang/jq","path":["tools","aqua:jqlang/jq"]},
 			{"key":"tools.aqua:jqlang/jq.version","path":["tools","aqua:jqlang/jq","version"]},
-			{"key":"tools.aqua:jqlang/jq.exe","path":["tools","aqua:jqlang/jq","exe"]}]`, ""},
+			{"key":"tools.aqua:jqlang/jq.exe","path":["tools","aqua:jqlang/jq","exe"]}]`, "tool option exe is not allowed"},
+		{"api_url option", `[{"key":"tools.github:o/r","path":["tools","github:o/r"]},
+			{"key":"tools.github:o/r.api_url","path":["tools","github:o/r","api_url"]}]`, "tool option api_url is not allowed"},
 		{"env", `[{"key":"env","path":["env"]},{"key":"env.A","path":["env","A"]},{"key":"tools","path":["tools"]},
 			{"key":"tools.node","path":["tools","node"]}]`, "env is not allowed"},
 		{"tasks", `[{"key":"tasks","path":["tasks"]},{"key":"tasks.b","path":["tasks","b"]},{"key":"tasks.b.run","path":["tasks","b","run"]},
@@ -40,7 +44,7 @@ func TestCheckMiseKeys(t *testing.T) {
 		}
 	}
 	tools, _ := CheckMiseKeys([]byte(`[{"key":"tools","path":["tools"]},{"key":"tools.node","path":["tools","node"]},
-		{"key":"tools.aqua:jqlang/jq","path":["tools","aqua:jqlang/jq"]},{"key":"tools.aqua:jqlang/jq.exe","path":["tools","aqua:jqlang/jq","exe"]}]`))
+		{"key":"tools.aqua:jqlang/jq","path":["tools","aqua:jqlang/jq"]},{"key":"tools.aqua:jqlang/jq.version","path":["tools","aqua:jqlang/jq","version"]}]`))
 	if strings.Join(tools, ",") != "aqua:jqlang/jq,node" {
 		t.Errorf("tools %v", tools)
 	}

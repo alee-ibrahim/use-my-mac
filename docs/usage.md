@@ -577,8 +577,10 @@ How it runs, on the Mac, in the task's own work dir:
    no search above the work dir, and safe mode (`MISE_SAFE=1`: nothing in the config runs code; tool
    options such as `postinstall` or `install_env` fail the install). mise must report
    (`mise config ls --json`) that it loaded exactly the task's `mise.toml`, so nothing an earlier task left
-   in the work volume carries over. Only `[tools]` and `min_version` are accepted (`mise config explain
-   --json`): `[env]`, `[tasks]`, `[hooks]`, `[settings]` and the rest fail the task.
+   in the work volume carries over. Only `[tools]` with plain versions (`node = "24.22.3"` or
+   `{ version = "24.22.3" }`) and `min_version` are accepted (`mise config explain --json`): `[env]`,
+   `[tasks]`, `[hooks]`, `[settings]` and tool options fail the task. Options such as `api_url` or `url`
+   would decide where a tool downloads from and where the GitHub token goes.
 2. Each tool must be allowed (`mise tool NAME --json` names its backend; see below).
 3. `mise install` installs the tools into the work dir (its output is in the task log). With
    `require_lockfile` it runs locked: every tool must be in `mise.lock` with a URL and checksum for the
