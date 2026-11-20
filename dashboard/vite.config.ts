@@ -6,7 +6,7 @@ import { defineConfig } from "vite"
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  // `npm run dev` proxies the API to a local umm-server.
+  // `pnpm dev` proxies the API to a local umm-server.
   server: {
     proxy: {
       "/v1": "http://localhost:8080",

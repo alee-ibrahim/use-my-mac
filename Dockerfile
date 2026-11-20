@@ -2,11 +2,12 @@
 # Router image: Go server + built dashboard on a distroless, non-root base.
 
 FROM --platform=$BUILDPLATFORM node:24-alpine AS web
+RUN npm install -g pnpm@12.21.0
 WORKDIR /web
-COPY dashboard/package.json dashboard/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+COPY dashboard/package.json dashboard/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY dashboard/ ./
-RUN npm run build
+RUN pnpm build
 
 # Cross-compile on the build platform (pure Go, no cgo) instead of emulating.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
