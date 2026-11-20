@@ -122,18 +122,22 @@ managed_runtimes:
 
 # mise toolchains (docs/usage.md "Toolchains with mise"): tasks with runtime
 # "mise" bring a mise.toml and mise.lock; this Mac's mise installs those tools
-# into the task's work dir and runs a program they provide. Off by default:
-# such a task picks its tools (from any mise backend) and runs their programs.
+# into the task's work dir and runs a program they provide. Off by default: a
+# mise task runs code its tools bring. The runtime name mise is reserved.
 mise:
   enabled: false
-  binary: /usr/local/bin/mise   # verify it against the release checksums; tested with mise 2026.11.9
-  # commands: [node, ffmpeg]    # optional: the only programs tasks may run
-  require_lockfile: true        # locked installs; only checksummed downloads are shared
-  # cache_dir: /usr/local/var/umm/mise-cache
+  # Default: publish mise as a managed runtime with a "mise" command. Or a
+  # root-owned binary you installed and checked against the release checksums:
+  # binary: /usr/local/bin/mise
+  # versions: ["2026.11.9"]          # mise versions accepted (default: the tested one)
+  # allow_tools: ["core:*", "aqua:*"] # default; by the backend mise resolves each tool to
+  # commands: [node, jq]             # optional: the only programs tasks may run
+  require_lockfile: true             # locked installs; only checksummed downloads are shared
+  # cache_dir: /usr/local/var/umm/work/.mise-cache   # default: on the work volume
   max_cache: 2GiB
   # A GitHub token for the GitHub API (60 unauthenticated calls an hour per public
   # IP, shared by Macs behind it; a token with no scopes is enough for public
-  # releases) and for private releases. At most one; the token reaches
-  # `mise install` only, but tasks run as _umm and could read the file:
+  # releases) and for private releases. At most one. It reaches only installs of
+  # aqua:/github:/ubi: tools, but tasks run as _umm and can read the file:
   # github_token_file: /usr/local/etc/umm/github-token   # mode 0600, owned by _umm
   # github_token_command: ["/usr/local/bin/your-secrets-cli", "kv", "get", "-field=token", "secret/github-read"]

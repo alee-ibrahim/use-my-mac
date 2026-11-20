@@ -432,35 +432,51 @@ comment names that package and version; the Mac's own check is the one that matt
 ## mise toolchains
 
 A task with runtime `mise` brings its toolchain as a `mise.toml` and `mise.lock`. The agent does not
-interpret either file; the admin's mise binary does all of it, under settings the agent fixes:
+interpret either file; the admin's mise does all of it, under settings the agent fixes, and the agent
+checks what mise reports:
 
-- **Opt-in per Mac.** `mise.enabled` in the root-owned `agent.yaml` (default off) adds the runtime `mise`,
-  backed by `mise.binary` (or a `runtimes`/managed runtime named `mise`), so the scheduler only places these
-  tasks on Macs that enabled it, through the normal runtime filter and preflight. A task never chooses the
-  mise binary.
-- **What mise reads.** Config files are copied into the task's work dir. Every directory mise reads config,
-  state or tools from (`MISE_DATA_DIR`, `MISE_CACHE_DIR`, `MISE_STATE_DIR`, `MISE_CONFIG_DIR`,
-  `MISE_SYSTEM_DATA_DIR`, the global and system config files) points inside the work dir, and
-  `MISE_CEILING_PATHS` stops the search for parent configs, so only the task's files count (the agent checks
-  `mise ls` says so). `MISE_SAFE=1` loads them without letting them run code (env templates, hooks,
-  `postinstall`, `install_env`); the agent also refuses anything but `[tools]` and `min_version`, from
+- **Opt-in per Mac, reserved name.** `mise.enabled` in the root-owned `agent.yaml` (default off) adds the
+  runtime `mise`, backed by a managed runtime with a `mise` command (the default deployment) or
+  `mise.binary`. The name is reserved: a `runtimes` entry called `mise` is a config error, and without
+  `mise.enabled` the preflight reports it unavailable and the agent refuses it, so a managed package
+  providing `mise` never runs as a plain runtime. The preflight also refuses a `mise.binary` writable by
+  `_umm` (file or directory) and a version not in `mise.versions` (default: the tested 2026.11.9, since the
+  agent reads mise's JSON output). A task never chooses the mise binary.
+- **What mise reads.** The config files are copied into the task's work dir. Every directory mise reads
+  config, state or tools from (`MISE_DATA_DIR`, `MISE_CACHE_DIR`, `MISE_STATE_DIR`, `MISE_CONFIG_DIR`,
+  `MISE_SYSTEM_DATA_DIR`, the global and system config files) points inside the work dir; only
+  `mise.toml` is a config file name (`MISE_OVERRIDE_CONFIG_FILENAMES`, no `.tool-versions`); and
+  `MISE_CEILING_PATHS` is the work dir's parent, which mise does not search (a ceiling at the work dir
+  itself would hide the task's own file), so the work volume's root, writable by every task, is never
+  read. The agent then requires `mise config ls --json` to list exactly the task's `mise.toml`.
+  `MISE_SAFE=1` loads it without letting it run code (env templates, hooks, `postinstall`,
+  `install_env`); the agent also refuses anything but `[tools]` and `min_version`, from
   `mise config explain --json`. Auto-install, sudo, netrc, gh CLI tokens and mise's version host are off;
-  task `env` may not set `MISE_*`.
+  task `env` may not set `MISE_*` or GitHub token variables.
+- **Which tools.** `mise tool NAME --json` gives each tool's backend, which must match
+  `mise.allow_tools` (default `core:*` and `aqua:*`).
 - **Install, then exec.** `mise install` runs (locked by default: URLs and checksums from `mise.lock`) as
   `_umm` with the task's priority and process group, so its CPU counts as ours and yields stop it. The
-  program is resolved with `mise which` and must lie under the task's installs; it runs through
-  `mise exec --` like any task. Exit codes from the program are the task's; only a missing mise binary is a
-  Mac fault.
+  program is resolved with `mise which` and must lie under the task's installs after
+  `filepath.EvalSymlinks`; it runs through `mise exec --` like any task. Exit codes from the program are
+  the task's (`program_exit`).
+- **Faults.** The task's own mistakes are task failures. An install that fails on the Mac's network
+  (rate limits, 429, DNS, refused or timed-out connections, 5xx, a rejected admin token; read from
+  mise's output, the task's own errors such as a checksum mismatch winning) or runs out of disk is a Mac
+  fault, so one rate-limited address neither fails good jobs nor quarantines Macs.
 - **Sharing.** Installs are per task and deleted with the work dir: the agent and its tasks are the same
   user, so a shared install tree would let one task change what the next one runs. Only mise's
   content-addressed download cache (`downloads-cas`) is shared, through a link from each task's cache dir,
   and only with a lockfile: in locked mode mise keeps and reuses only downloads with a locked checksum and
-  checks them again on every use, so a tampered entry is dropped and fetched again. mise evicts least
-  recently used downloads above `max_cache`.
-- **Tokens.** An optional admin token (`github_token_file` or `github_token_command`) is added to the
-  environment of `mise install` only, as `MISE_GITHUB_TOKEN`. Because tasks run as the agent's user, this
-  keeps the token out of the task's environment and logs but not out of reach of a task that goes looking
-  for the file; a separate installing user would close that, and is not done yet.
+  checks them again before use, so a tampered entry is dropped and fetched again. It lives in
+  `<work_dir>/.mise-cache` on the work volume (its quota and work space; startup and the busy-dir check
+  leave dot-directories alone), and mise evicts least recently used downloads above `max_cache`.
+- **Tokens.** An optional admin token (`github_token_file`, or `github_token_command` run with only
+  `PATH`, `HOME` and `LANG`) is given, as `MISE_GITHUB_TOKEN`, only to the install of tools whose backend
+  just downloads release files (`aqua:`, `github:`, `ubi:`); other tools install in a separate step
+  without it. It never reaches the task's program or logs. Because tasks run as the agent's user, a task
+  can still read the token file, run the command or read what it reads; a separate installing user would
+  close that, and is not done yet.
 
 ## Agent self-update
 
