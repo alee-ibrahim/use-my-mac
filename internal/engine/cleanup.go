@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -112,26 +111,36 @@ func (e *Engine) deleteJob(ctx context.Context, id string) error {
 	if err := e.st.DeleteJob(ctx, id); err != nil {
 		return err
 	}
-	// Outputs in router storage (best effort; app-provided URLs are not ours).
+	// Outputs in router storage (best effort; app-provided URLs are not ours),
+	// unfinished output uploads, and the ownership rows.
+	keys := jobOutputKeys(id, tasks)
 	if e.blobs != nil {
-		for _, t := range tasks {
-			var spec api.TaskSpec
-			if json.Unmarshal([]byte(t.Spec), &spec) != nil {
-				continue
+		for _, k := range keys {
+			if err := e.blobs.Delete(ctx, k); err != nil {
+				e.log.Warn("delete job output", "job", id, "key", k, "err", err)
 			}
-			for _, o := range spec.Outputs {
-				if o.URL == "" {
-					if err := e.blobs.Delete(ctx, OutputKey(id, t.Key, o.Name)); err != nil {
-						e.log.Warn("delete job output", "job", id, "key", t.Key, "output", o.Name, "err", err)
-					}
-				}
+		}
+		if us, err := e.st.UploadsUnder(ctx, "jobs/"+id+"/"); err == nil {
+			for _, u := range us {
+				_ = e.abort(ctx, u)
 			}
 		}
 	}
+	_ = e.st.DeleteJobBlobRows(ctx, id)
+	e.dlMu.Lock()
+	if len(keys) > 0 {
+		// An agent stopped mid-upload may still finish a PUT: delete again later.
+		e.tombstones[id] = tombstone{at: e.now(), keys: keys}
+	}
+	delete(e.lastDownload, id)
+	e.dlMu.Unlock()
 	e.mu.Lock()
 	for _, t := range tasks {
 		delete(e.placement, t.ID)
+		e.setWaiting(t.ID, "")
+		delete(e.diskNeed, t.ID)
 	}
+	delete(e.jobOwner, id)
 	e.mu.Unlock()
 	e.notify(id)
 	return nil
@@ -153,7 +162,7 @@ func (e *Engine) PurgeJobs(ctx context.Context, req api.PurgeJobsRequest, actor 
 	}
 	n := 0
 	for {
-		ids, err := e.st.FinishedJobs(ctx, before, req.States, 200)
+		ids, err := e.st.FinishedJobsOf(ctx, req.Owner, before, req.States, 200)
 		if err != nil {
 			return n, err
 		}
@@ -161,7 +170,15 @@ func (e *Engine) PurgeJobs(ctx context.Context, req api.PurgeJobsRequest, actor 
 			break
 		}
 		for _, id := range ids {
-			if err := e.deleteJob(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			if req.Inputs {
+				j, err := e.st.GetJob(ctx, id)
+				if err == nil {
+					_, err = e.deleteJobFiles(ctx, j, true)
+				}
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					return n, err
+				}
+			} else if err := e.deleteJob(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return n, err
 			}
 			n++
@@ -175,8 +192,14 @@ func (e *Engine) PurgeJobs(ctx context.Context, req api.PurgeJobsRequest, actor 
 		if len(req.States) > 0 {
 			what = fmt.Sprint(req.States)
 		}
-		e.Audit(ctx, api.EventJobsPurged, actor, "", "deleted "+strconv.Itoa(n)+" "+what+" jobs older than "+
-			strconv.Itoa(req.OlderThanDays)+" days")
+		msg := "deleted " + strconv.Itoa(n) + " " + what + " jobs older than " + strconv.Itoa(req.OlderThanDays) + " days"
+		if req.Owner != "" {
+			msg += " of " + req.Owner
+		}
+		if req.Inputs {
+			msg += ", with their input files"
+		}
+		e.Audit(ctx, api.EventJobsPurged, actor, "", msg)
 	}
 	return n, nil
 }

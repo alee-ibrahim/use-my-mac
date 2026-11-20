@@ -95,6 +95,14 @@ const (
 	EventMacFault = "mac.fault"
 	// Managed runtime catalog changes (publish, remove, prewarm).
 	EventRuntimeCatalog = "runtime.catalog"
+	// EventJobCleaned: a job's cleanup policy deleted its files.
+	EventJobCleaned = "job.cleaned"
+	// EventFilesDeleted: stored files (uploads, outputs) deleted.
+	EventFilesDeleted = "files.deleted"
+	// Router-side Mac settings changed: labels, reservation, concurrency.
+	EventMacLabels   = "mac.labels"
+	EventMacReserved = "mac.reserved"
+	EventMacMaxTasks = "mac.max_tasks"
 )
 
 // Retention controls background pruning. Zero means "keep forever" for
@@ -119,6 +127,12 @@ type PurgeJobsRequest struct {
 	// States limits the purge (succeeded, failed, cancelled); empty = all
 	// finished states.
 	States []string `json:"states,omitempty"`
+	// Inputs also deletes the input blobs the jobs' owner uploaded, unless
+	// an unfinished job still uses them.
+	Inputs bool `json:"inputs,omitempty"`
+	// Owner limits the purge to one owner's jobs (admins; apps always purge
+	// only their own).
+	Owner string `json:"owner,omitempty"`
 }
 
 // PurgeResult reports how many records a cleanup removed.

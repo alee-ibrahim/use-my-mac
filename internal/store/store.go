@@ -228,7 +228,68 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	for _, c := range columns {
+		if err := s.addColumn(ctx, c); err != nil {
+			return fmt.Errorf("migrate: add %s.%s: %w", c.table, c.name, err)
+		}
+	}
+	for _, q := range indexes {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
 	return nil
+}
+
+// column is a column added to an existing table after its first release.
+// Tables are created by schema (CREATE TABLE IF NOT EXISTS), so databases
+// from older versions get new columns here. Definitions must have a
+// constant default (SQLite cannot add NOT NULL columns without one).
+type column struct{ table, name, def string }
+
+// columns lists the added columns in order. Never remove or reorder
+// entries; append new ones.
+var columns = []column{
+	// Router-side Mac labels and reservations (admin-managed).
+	{"agents", "admin_labels", `TEXT NOT NULL DEFAULT '{}'`},
+	{"agents", "reserved_for", `TEXT NOT NULL DEFAULT '[]'`},
+	{"agents", "reserved_until", `BIGINT NOT NULL DEFAULT 0`},
+	{"agents", "reserved_note", `TEXT NOT NULL DEFAULT ''`},
+	{"agents", "reserved_by", `TEXT NOT NULL DEFAULT ''`},
+	{"agents", "max_tasks_set", `INTEGER NOT NULL DEFAULT 0`},
+	// Per-job automatic cleanup of inputs and outputs.
+	{"jobs", "cleanup", `TEXT NOT NULL DEFAULT ''`},
+	{"jobs", "cleaned_at", `BIGINT NOT NULL DEFAULT 0`},
+	// Idempotent submits (client IDs) and output checksums.
+	{"jobs", "client_id", `TEXT NOT NULL DEFAULT ''`},
+	{"jobs", "client_hash", `TEXT NOT NULL DEFAULT ''`},
+	{"tasks", "client_key", `TEXT NOT NULL DEFAULT ''`},
+	{"tasks", "output_sha256", `TEXT NOT NULL DEFAULT '{}'`},
+	{"blobs", "sha256", `TEXT NOT NULL DEFAULT ''`},
+}
+
+// indexes run after columns (they may use added columns).
+var indexes = []string{
+	`CREATE UNIQUE INDEX IF NOT EXISTS jobs_client ON jobs(owner, client_id) WHERE client_id <> ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS tasks_client ON tasks(client_key) WHERE client_key <> ''`,
+}
+
+// addColumn adds c unless the table already has it.
+func (s *Store) addColumn(ctx context.Context, c column) error {
+	if s.postgres {
+		_, err := s.db.ExecContext(ctx, `ALTER TABLE `+c.table+` ADD COLUMN IF NOT EXISTS `+c.name+` `+c.def)
+		return err
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.name).
+		Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE `+c.table+` ADD COLUMN `+c.name+` `+c.def)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -294,16 +355,30 @@ type Agent struct {
 	Labels           string
 	MaxTasks         int
 	Version          string
+	// Router-side, set by admins: labels merged over the agent's own
+	// (AdminLabels, JSON map) and a reservation (ReservedFor, JSON list of
+	// owners; ReservedUntil 0 = no end).
+	AdminLabels   string
+	ReservedFor   string
+	ReservedUntil int64
+	ReservedNote  string
+	ReservedBy    string
+	// MaxTasksSet is the concurrency an admin set on the router (0 = the
+	// agent's own max_tasks).
+	MaxTasksSet int
 }
 
 const agentCols = `id, name, cred_hash, created_at, last_seen, drain, opted_out, quarantined_until,
-	consec_failures, state, reason, telemetry, runtimes, labels, max_tasks, version`
+	consec_failures, state, reason, telemetry, runtimes, labels, max_tasks, version,
+	admin_labels, reserved_for, reserved_until, reserved_note, reserved_by, max_tasks_set`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
 	var drain, opt int
 	err := sc.Scan(&a.ID, &a.Name, &a.CredHash, &a.CreatedAt, &a.LastSeen, &drain, &opt, &a.QuarantinedUntil,
-		&a.ConsecFailures, &a.State, &a.Reason, &a.Telemetry, &a.Runtimes, &a.Labels, &a.MaxTasks, &a.Version)
+		&a.ConsecFailures, &a.State, &a.Reason, &a.Telemetry, &a.Runtimes, &a.Labels, &a.MaxTasks, &a.Version,
+		&a.AdminLabels, &a.ReservedFor, &a.ReservedUntil, &a.ReservedNote, &a.ReservedBy,
+		&a.MaxTasksSet)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -320,9 +395,16 @@ func b2i(b bool) int {
 
 // CreateAgent inserts a new agent.
 func (s *Store) CreateAgent(ctx context.Context, a *Agent) error {
-	_, err := s.exec(ctx, `INSERT INTO agents(`+agentCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if a.AdminLabels == "" {
+		a.AdminLabels = "{}"
+	}
+	if a.ReservedFor == "" {
+		a.ReservedFor = "[]"
+	}
+	_, err := s.exec(ctx, `INSERT INTO agents(`+agentCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.Name, a.CredHash, a.CreatedAt, a.LastSeen, b2i(a.Drain), b2i(a.OptedOut), a.QuarantinedUntil,
-		a.ConsecFailures, a.State, a.Reason, a.Telemetry, a.Runtimes, a.Labels, a.MaxTasks, a.Version)
+		a.ConsecFailures, a.State, a.Reason, a.Telemetry, a.Runtimes, a.Labels, a.MaxTasks, a.Version,
+		a.AdminLabels, a.ReservedFor, a.ReservedUntil, a.ReservedNote, a.ReservedBy, a.MaxTasksSet)
 	return err
 }
 
@@ -377,6 +459,43 @@ func (s *Store) SetAgentName(ctx context.Context, id, name string) error {
 // SetAgentFlags sets drain / opt-out.
 func (s *Store) SetAgentFlags(ctx context.Context, id string, drain, optedOut bool) error {
 	res, err := s.exec(ctx, `UPDATE agents SET drain=?, opted_out=? WHERE id=?`, b2i(drain), b2i(optedOut), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAgentAdminLabels stores the router-side labels (JSON map).
+func (s *Store) SetAgentAdminLabels(ctx context.Context, id, labels string) error {
+	res, err := s.exec(ctx, `UPDATE agents SET admin_labels=? WHERE id=?`, labels, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAgentMaxTasks stores the router-set concurrency (0 = agent's own).
+func (s *Store) SetAgentMaxTasks(ctx context.Context, id string, n int) error {
+	res, err := s.exec(ctx, `UPDATE agents SET max_tasks_set=? WHERE id=?`, n, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAgentReservation stores a reservation (owners "[]" clears it).
+func (s *Store) SetAgentReservation(ctx context.Context, id, owners string, until int64, note, by string) error {
+	res, err := s.exec(ctx, `UPDATE agents SET reserved_for=?, reserved_until=?, reserved_note=?, reserved_by=? WHERE id=?`,
+		owners, until, note, by, id)
 	if err != nil {
 		return err
 	}
@@ -544,6 +663,11 @@ func (s *Store) APIKeyByHash(ctx context.Context, hash string) (*APIKey, error) 
 	return scanKey(s.queryRow(ctx, `SELECT `+keyCols+` FROM api_keys WHERE hash=? AND revoked_at=0`, hash))
 }
 
+// GetAPIKey returns a key by ID (revoked or not).
+func (s *Store) GetAPIKey(ctx context.Context, id string) (*APIKey, error) {
+	return scanKey(s.queryRow(ctx, `SELECT `+keyCols+` FROM api_keys WHERE id=?`, id))
+}
+
 // TouchAPIKey records usage.
 func (s *Store) TouchAPIKey(ctx context.Context, id string, now int64) error {
 	_, err := s.exec(ctx, `UPDATE api_keys SET last_used_at=? WHERE id=?`, now, id)
@@ -596,6 +720,13 @@ type Job struct {
 	ID, Name, Owner, Labels, State string
 	CancelRequested                bool
 	CreatedAt, FinishedAt          int64
+	// Cleanup is the job's automatic cleanup policy (JSON, "" = none);
+	// CleanedAt when it ran.
+	Cleanup   string
+	CleanedAt int64
+	// ClientID (unique per owner) and ClientHash (of the submitted spec)
+	// make submits idempotent.
+	ClientID, ClientHash string
 }
 
 // Task is a row of tasks.
@@ -614,16 +745,22 @@ type Task struct {
 	Outputs                     string // JSON []string of uploaded outputs
 	Score                       float64
 	CreatedAt                   int64
+	// ClientKey is "<owner>\n<client_id>" for tasks submitted with a
+	// client ID (unique). OutputSHA256 is a JSON map output -> hex digest.
+	ClientKey    string
+	OutputSHA256 string
 }
 
-const jobCols = `id, name, owner, labels, state, cancel_requested, created_at, finished_at`
+const jobCols = `id, name, owner, labels, state, cancel_requested, created_at, finished_at, cleanup, cleaned_at,
+	client_id, client_hash`
 const taskCols = `id, job_id, key, spec, state, attempt, failures, agent_id, excluded, not_before, assigned_at,
-	started_at, deadline_at, finished_at, exit_code, error, outputs, score, created_at`
+	started_at, deadline_at, finished_at, exit_code, error, outputs, score, created_at, client_key, output_sha256`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	var j Job
 	var c int
-	err := sc.Scan(&j.ID, &j.Name, &j.Owner, &j.Labels, &j.State, &c, &j.CreatedAt, &j.FinishedAt)
+	err := sc.Scan(&j.ID, &j.Name, &j.Owner, &j.Labels, &j.State, &c, &j.CreatedAt, &j.FinishedAt, &j.Cleanup, &j.CleanedAt,
+		&j.ClientID, &j.ClientHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -636,7 +773,7 @@ func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var exit sql.NullInt64
 	err := sc.Scan(&t.ID, &t.JobID, &t.Key, &t.Spec, &t.State, &t.Attempt, &t.Failures, &t.AgentID, &t.Excluded,
 		&t.NotBefore, &t.AssignedAt, &t.StartedAt, &t.DeadlineAt, &t.FinishedAt, &exit, &t.Error, &t.Outputs,
-		&t.Score, &t.CreatedAt)
+		&t.Score, &t.CreatedAt, &t.ClientKey, &t.OutputSHA256)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -654,14 +791,19 @@ func (s *Store) CreateJob(ctx context.Context, j *Job, tasks []*Task) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO jobs(`+jobCols+`) VALUES(?,?,?,?,?,?,?,?)`),
-		j.ID, j.Name, j.Owner, j.Labels, j.State, b2i(j.CancelRequested), j.CreatedAt, j.FinishedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO jobs(`+jobCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`),
+		j.ID, j.Name, j.Owner, j.Labels, j.State, b2i(j.CancelRequested), j.CreatedAt, j.FinishedAt, j.Cleanup,
+		j.CleanedAt, j.ClientID, j.ClientHash); err != nil {
 		return err
 	}
 	for _, t := range tasks {
-		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO tasks(`+taskCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+		if t.OutputSHA256 == "" {
+			t.OutputSHA256 = "{}"
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO tasks(`+taskCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 			t.ID, t.JobID, t.Key, t.Spec, t.State, t.Attempt, t.Failures, t.AgentID, t.Excluded, t.NotBefore,
-			t.AssignedAt, t.StartedAt, t.DeadlineAt, t.FinishedAt, t.ExitCode, t.Error, t.Outputs, t.Score, t.CreatedAt); err != nil {
+			t.AssignedAt, t.StartedAt, t.DeadlineAt, t.FinishedAt, t.ExitCode, t.Error, t.Outputs, t.Score, t.CreatedAt,
+			t.ClientKey, t.OutputSHA256); err != nil {
 			return err
 		}
 	}
@@ -712,6 +854,37 @@ func (s *Store) UpdateJob(ctx context.Context, j *Job) error {
 	return err
 }
 
+// JobByClientID returns an owner's job with that client ID.
+func (s *Store) JobByClientID(ctx context.Context, owner, clientID string) (*Job, error) {
+	return scanJob(s.queryRow(ctx, `SELECT `+jobCols+` FROM jobs WHERE owner=? AND client_id=?`, owner, clientID))
+}
+
+// TasksByClientKeys returns the tasks with these client keys.
+func (s *Store) TasksByClientKeys(ctx context.Context, keys []string) ([]*Task, error) {
+	var out []*Task
+	for len(keys) > 0 {
+		n := min(len(keys), 500)
+		args := make([]any, n)
+		for i, k := range keys[:n] {
+			args[i] = k
+		}
+		ts, err := s.listTasks(ctx, `client_key IN (`+strings.TrimSuffix(strings.Repeat("?,", n), ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ts...)
+		keys = keys[n:]
+	}
+	return out, nil
+}
+
+func nz(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
 // GetTask by ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
 	return scanTask(s.queryRow(ctx, `SELECT `+taskCols+` FROM tasks WHERE id=?`, id))
@@ -752,9 +925,10 @@ func (s *Store) RunningTasksForAgent(ctx context.Context, agentID string) ([]*Ta
 // UpdateTask writes all mutable task fields.
 func (s *Store) UpdateTask(ctx context.Context, t *Task) error {
 	_, err := s.exec(ctx, `UPDATE tasks SET state=?, attempt=?, failures=?, agent_id=?, excluded=?, not_before=?,
-		assigned_at=?, started_at=?, deadline_at=?, finished_at=?, exit_code=?, error=?, outputs=?, score=? WHERE id=?`,
+		assigned_at=?, started_at=?, deadline_at=?, finished_at=?, exit_code=?, error=?, outputs=?, score=?,
+		output_sha256=? WHERE id=?`,
 		t.State, t.Attempt, t.Failures, t.AgentID, t.Excluded, t.NotBefore, t.AssignedAt, t.StartedAt, t.DeadlineAt,
-		t.FinishedAt, t.ExitCode, t.Error, t.Outputs, t.Score, t.ID)
+		t.FinishedAt, t.ExitCode, t.Error, t.Outputs, t.Score, nz(t.OutputSHA256, "{}"), t.ID)
 	return err
 }
 

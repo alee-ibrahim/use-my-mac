@@ -101,6 +101,14 @@ func TestMultipartTransfersAndLiveProgress(t *testing.T) {
 	if n != int64(len(want)) || !bytes.Equal(got, want) {
 		t.Fatalf("output differs: %d bytes", n)
 	}
+	// The Mac reported the output's SHA-256; the download matches it.
+	if err := e.app.VerifyOutputFile(e.ctx, full.Tasks[0].ID, "out.bin", dst); err != nil {
+		t.Fatalf("verify output: %v", err)
+	}
+	os.WriteFile(dst, []byte("tampered"), 0o644)
+	if err := e.app.VerifyOutputFile(e.ctx, full.Tasks[0].ID, "out.bin", dst); err == nil {
+		t.Fatal("a changed file must not verify")
+	}
 	// The finished upload is gone: resuming it fails.
 	if _, err := e.app.UploadStatus(e.ctx, uploadID); err == nil {
 		t.Fatal("completed upload still listed")

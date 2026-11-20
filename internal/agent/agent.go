@@ -8,6 +8,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,8 +54,11 @@ type Agent struct {
 	drain  bool
 	// drainReason is the router's reason for a drain ("" = admin).
 	drainReason string
-	running     map[string]*run
-	capacity    chan struct{}
+	// routerMax is the concurrency an admin set on the router (0 = use
+	// cfg.MaxTasks); it is capped at cfg.MaxTasksLimit.
+	routerMax int
+	running   map[string]*run
+	capacity  chan struct{}
 	// lastTel is the latest telemetry (for adaptive priority).
 	lastTel api.Telemetry
 	haveTel bool
@@ -490,7 +495,7 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 
 	hb := api.Heartbeat{State: state, Reason: reason, Telemetry: tel, Running: nonNilS(running),
 		Runtimes: avail, UnavailableRuntimes: unavail, PreflightID: preflightID,
-		Labels: a.cfg.Labels, MaxTasks: a.cfg.MaxTasks, Version: Version, Isolation: &iso,
+		Labels: a.cfg.Labels, MaxTasks: a.maxTasks(), MaxTasksLimit: a.cfg.MaxTasksLimit, Version: Version, Isolation: &iso,
 		InstallableRuntimes: installable, InstallablePackages: installablePkgs, Packages: packages}
 	if a.managed != nil {
 		hb.CatalogRevision = a.managed.Revision()
@@ -505,6 +510,14 @@ func (a *Agent) heartbeatOnce(ctx context.Context) {
 	a.mu.Lock()
 	wasDrain := a.drain
 	a.drain, a.drainReason = resp.Drain, resp.DrainReason
+	oldMax := a.maxTasksLocked()
+	a.routerMax = resp.MaxTasks
+	if newMax := a.maxTasksLocked(); newMax != oldMax {
+		a.log.Info("concurrency changed by the router", "max_tasks", newMax, "limit", a.cfg.MaxTasksLimit)
+		if newMax > oldMax {
+			defer a.signalCapacity()
+		}
+	}
 	for _, id := range resp.Cancel {
 		if r := a.running[id]; r != nil {
 			a.log.Info("router cancelled task", "task", id)
@@ -600,7 +613,33 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 func (a *Agent) canTakeWork() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.state == api.AgentReady && !a.drain && len(a.running) < a.cfg.MaxTasks
+	return a.state == api.AgentReady && !a.drain && len(a.running) < a.maxTasksLocked()
+}
+
+// maxTasks is how many tasks the agent runs at once: the router's setting
+// capped at max_tasks_limit, else max_tasks from agent.yaml. Lowering it
+// never stops running tasks; the agent just takes no more until it is
+// below the new value.
+func (a *Agent) maxTasks() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.maxTasksLocked()
+}
+
+func (a *Agent) maxTasksLocked() int {
+	return EffectiveMaxTasks(a.cfg.MaxTasks, a.cfg.MaxTasksLimit, a.routerMax)
+}
+
+// EffectiveMaxTasks combines agent.yaml's max_tasks and max_tasks_limit with
+// the router's setting (0 = none).
+func EffectiveMaxTasks(own, limit, router int) int {
+	if router <= 0 {
+		return max(own, 1)
+	}
+	if limit > 0 && router > limit {
+		return limit
+	}
+	return router
 }
 
 func (a *Agent) pollLoop(ctx context.Context) {
@@ -893,7 +932,12 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 			continue
 		}
 		p := filepath.Join(workdir, "out", o.Name)
-		if err := a.upload(ctx, as, o, p, sizes[i], m); err != nil {
+		// Hash the file while it uploads (a second read, in parallel).
+		sum := make(chan hashResult, 1)
+		go func() { d, err := fileSHA256(ctx, p); sum <- hashResult{d, err} }()
+		err := a.upload(ctx, as, o, p, sizes[i], m)
+		h := <-sum
+		if err != nil {
 			if ctx.Err() != nil {
 				return a.stopped(ctx, upd, "")
 			}
@@ -901,6 +945,14 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 			return upd
 		}
 		upd.Outputs = append(upd.Outputs, o.Name)
+		if h.err == nil {
+			if upd.OutputSHA256 == nil {
+				upd.OutputSHA256 = map[string]string{}
+			}
+			upd.OutputSHA256[o.Name] = h.digest
+		} else {
+			a.log.Warn("hash output", "task", as.TaskID, "output", o.Name, "err", h.err)
+		}
 	}
 	upd.Outcome = api.OutcomeSucceeded
 	return upd
@@ -999,6 +1051,37 @@ func (a *Agent) upload(ctx context.Context, as api.Assignment, o api.AssignedOut
 		return a.uploadParts(ctx, as, o.Name, f, size, partSize, m)
 	}
 	return transfer.Put(ctx, a.blobHTTP, o.URL, nil, transfer.CountingReader(f, m), size)
+}
+
+type hashResult struct {
+	digest string
+	err    error
+}
+
+// fileSHA256 returns the hex SHA-256 of a file.
+func fileSHA256(ctx context.Context, path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 func (a *Agent) uploadParts(ctx context.Context, as api.Assignment, name string, f *os.File, size, partSize int64, m *transfer.Meter) error {

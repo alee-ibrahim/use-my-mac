@@ -25,7 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { api, since, terminal, type Job } from "@/lib/api"
+import { api, since, type Job } from "@/lib/api"
 import { href, useLive } from "@/lib/hooks"
 
 // progress: tasks done, and the job's overall percent (the router folds in
@@ -156,7 +156,7 @@ export function JobsPage({ admin }: { admin: boolean }) {
   const mobile = useIsMobile()
 
   const jobs = data ?? []
-  const deletable = jobs.filter((j) => terminal(j.state))
+  const deletable = jobs
   const sel = deletable.filter((j) => selected.has(j.id))
   const toggle = (id: string, on: boolean) =>
     setSelected((s) => {
@@ -169,7 +169,8 @@ export function JobsPage({ admin }: { admin: boolean }) {
   function deleteSelected() {
     ask({
       title: `Delete ${sel.length} job${sel.length === 1 ? "" : "s"}?`,
-      description: "Their tasks, logs and stored outputs are deleted for good.",
+      description:
+        "Unfinished ones are cancelled first. Their tasks, logs and stored outputs are deleted for good.",
       action: "Delete",
       run: async () => {
         let n = 0
@@ -235,7 +236,6 @@ export function JobsPage({ admin }: { admin: boolean }) {
                       <Checkbox
                         className="size-5"
                         aria-label={`Select ${j.name}`}
-                        disabled={!terminal(j.state)}
                         checked={selected.has(j.id)}
                         onCheckedChange={(c) => toggle(j.id, c === true)}
                       />
@@ -299,8 +299,7 @@ export function JobsPage({ admin }: { admin: boolean }) {
                         <TableCell onClick={(e) => e.stopPropagation()}>
                           <Checkbox
                             aria-label={`Select ${j.name}`}
-                            disabled={!terminal(j.state)}
-                            checked={selected.has(j.id)}
+                                checked={selected.has(j.id)}
                             onCheckedChange={(c) => toggle(j.id, c === true)}
                           />
                         </TableCell>

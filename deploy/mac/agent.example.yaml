@@ -5,6 +5,8 @@ name: "studio-01"
 credential_file: /usr/local/etc/umm/credential
 work_dir: /usr/local/var/umm/work
 max_tasks: 1
+# Hard cap when an admin sets max_tasks on the router (default 8).
+# max_tasks_limit: 8
 labels:
   chip: m2-pro
 

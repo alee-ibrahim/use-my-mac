@@ -122,6 +122,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/blobs/{key...}", s.need(roleSubmit, s.getBlob))
 	mux.HandleFunc("GET /v1/macs", s.need(roleAny, s.listMacs))
 	mux.HandleFunc("PATCH /v1/macs/{id}", s.need(roleAdmin, s.patchMac))
+	mux.HandleFunc("PUT /v1/macs/{id}/labels", s.need(roleAdmin, s.putMacLabels))
+	mux.HandleFunc("PUT /v1/macs/{id}/reservation", s.need(roleAdmin, s.putMacReservation))
+	mux.HandleFunc("DELETE /v1/macs/{id}/reservation", s.need(roleAdmin, s.deleteMacReservation))
+	mux.HandleFunc("GET /v1/files", s.need(roleSubmit, s.listFiles))
+	mux.HandleFunc("DELETE /v1/files/{key...}", s.need(roleSubmit, s.deleteFile))
+	mux.HandleFunc("POST /v1/files/delete", s.need(roleSubmit, s.deleteFiles))
 	mux.HandleFunc("DELETE /v1/macs/{id}", s.need(roleAdmin, s.deleteMac))
 	mux.HandleFunc("POST /v1/enrolment-tokens", s.need(roleAdmin, s.createEnrolToken))
 	mux.HandleFunc("GET /v1/api-keys", s.need(roleAdmin, s.listKeys))
@@ -206,9 +212,12 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	var ve *engine.ValidationError
+	var fe *engine.ForbiddenError
 	switch {
 	case errors.As(err, &ve):
 		writeErr(w, http.StatusBadRequest, ve.Msg)
+	case errors.As(err, &fe):
+		writeErr(w, http.StatusForbidden, fe.Msg)
 	case errors.Is(err, engine.ErrNotFound), errors.Is(err, storage.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, engine.ErrForbidden):
@@ -330,6 +339,12 @@ func (s *Server) need(check roleCheck, h http.HandlerFunc) http.HandlerFunc {
 
 func who(r *http.Request) *identity { return r.Context().Value(identKey).(*identity) }
 
+// caller is the engine's view of who is acting.
+func caller(r *http.Request) engine.Caller {
+	id := who(r)
+	return engine.Caller{Subject: id.Subject, Admin: id.Role == api.RoleAdmin, Actor: actor(r)}
+}
+
 // canSee: apps only see their own jobs; viewers and admins see everything.
 func canSee(id *identity, owner string) bool {
 	return id.Role == api.RoleAdmin || id.Role == api.RoleViewer || id.Subject == owner
@@ -349,12 +364,23 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &spec, 32<<20) {
 		return
 	}
-	j, err := s.E.SubmitJob(r.Context(), who(r).Subject, spec)
+	if k := strings.TrimSpace(r.Header.Get("Idempotency-Key")); k != "" {
+		if spec.ClientID != "" && spec.ClientID != k {
+			writeErr(w, http.StatusBadRequest, "Idempotency-Key and client_id differ")
+			return
+		}
+		spec.ClientID = k
+	}
+	j, err := s.E.SubmitJobAs(r.Context(), caller(r), spec)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, j)
+	code := http.StatusCreated
+	if j.Existing {
+		code = http.StatusOK
+	}
+	writeJSON(w, code, j)
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +473,38 @@ func (s *Server) taskOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+r.PathValue("name")+`"`)
-	serveBlob(w, r, rc)
+	cw := &countingWriter{ResponseWriter: w}
+	serveBlob(cw, r, rc)
+	if r.Method == http.MethodGet && (cw.status == 0 || cw.status == http.StatusOK || cw.status == http.StatusPartialContent) {
+		status := cw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.E.RecordDownload(r.Context(), t.ID, r.PathValue("name"), status, cw.n)
+	}
+}
+
+// countingWriter records the status and body bytes of a response.
+type countingWriter struct {
+	http.ResponseWriter
+	status int
+	n      int64
+}
+
+func (c *countingWriter) WriteHeader(code int) {
+	if c.status == 0 {
+		c.status = code
+	}
+	c.ResponseWriter.WriteHeader(code)
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	n, err := c.ResponseWriter.Write(b)
+	c.n += int64(n)
+	return n, err
 }
 
 func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
@@ -457,7 +514,7 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.MaxUploadBytes)
-	if err := s.E.Blobs().Put(r.Context(), engine.UploadKey(key), r.Body, r.ContentLength); err != nil {
+	if err := s.E.PutBlob(r.Context(), caller(r), key, r.Body, r.ContentLength); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -470,7 +527,7 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	rc, err := s.E.Blobs().Get(r.Context(), engine.UploadKey(key))
+	rc, err := s.E.OpenBlob(r.Context(), caller(r), key)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -484,6 +541,20 @@ func (s *Server) listMacs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	id := who(r)
+	for i := range macs {
+		rs := macs[i].Reservation
+		if rs == nil {
+			continue
+		}
+		for _, o := range rs.Owners {
+			rs.Mine = rs.Mine || o == id.Subject
+		}
+		// Apps only learn whether a reserved Mac is theirs, not who else's.
+		if !roleRead(id.Role) {
+			rs.Owners, rs.OwnerNames, rs.By = nil, nil, ""
+		}
+	}
 	writeJSON(w, http.StatusOK, macs)
 }
 
@@ -492,11 +563,76 @@ func (s *Server) patchMac(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &p, 4096) {
 		return
 	}
-	if err := s.E.PatchMac(r.Context(), r.PathValue("id"), p); err != nil {
+	if err := s.E.PatchMacBy(r.Context(), r.PathValue("id"), p, actor(r)); err != nil {
 		s.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putMacLabels(w http.ResponseWriter, r *http.Request) {
+	var req api.MacLabels
+	if !readJSON(w, r, &req, 64<<10) {
+		return
+	}
+	if err := s.E.SetMacLabels(r.Context(), r.PathValue("id"), req.Labels, actor(r)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putMacReservation(w http.ResponseWriter, r *http.Request) {
+	var req api.MacReservationRequest
+	if !readJSON(w, r, &req, 64<<10) {
+		return
+	}
+	if err := s.E.SetMacReservation(r.Context(), r.PathValue("id"), req, actor(r)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteMacReservation(w http.ResponseWriter, r *http.Request) {
+	if err := s.E.ClearMacReservation(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	fs, err := s.E.Files(r.Context(), caller(r), engine.FileFilter{Owner: q.Get("owner"), Kind: q.Get("kind"),
+		JobID: q.Get("job"), Prefix: q.Get("prefix"), Limit: limit})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, fs)
+}
+
+func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
+	if err := s.E.DeleteFile(r.Context(), caller(r), r.PathValue("key")); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteFiles(w http.ResponseWriter, r *http.Request) {
+	var req api.DeleteFilesRequest
+	if !readJSON(w, r, &req, 4<<20) {
+		return
+	}
+	res, err := s.E.DeleteFiles(r.Context(), caller(r), req)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) deleteMac(w http.ResponseWriter, r *http.Request) {
@@ -680,7 +816,7 @@ func (s *Server) signedBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		if !signedPartAllowed(l, key) {
+		if !signedPartAllowed(l, key) || !s.E.OutputKeyLive(r.Context(), key) {
 			writeErr(w, http.StatusNotFound, "upload not found (finished, aborted or expired)")
 			return
 		}

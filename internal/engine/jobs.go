@@ -43,6 +43,25 @@ func ValidateJob(spec *api.JobSpec) error {
 	if len(spec.Tasks) == 0 || len(spec.Tasks) > MaxTasksPerJob {
 		return vErr("a job needs 1..%d tasks", MaxTasksPerJob)
 	}
+	if err := validateCleanup(spec.Cleanup); err != nil {
+		return err
+	}
+	if err := validateSelectors("job", spec.Macs, spec.Prefer); err != nil {
+		return err
+	}
+	for i := range spec.Tasks {
+		t := &spec.Tasks[i]
+		if len(t.Macs) == 0 && len(spec.Macs) > 0 {
+			t.Macs = append([]string(nil), spec.Macs...)
+		}
+		if t.Prefer == nil && spec.Prefer != nil {
+			p := *spec.Prefer
+			t.Prefer = &p
+		}
+		if err := validateSelectors("task "+t.Key, t.Macs, t.Prefer); err != nil {
+			return err
+		}
+	}
 	byKey := map[string]*api.TaskSpec{}
 	for i := range spec.Tasks {
 		t := &spec.Tasks[i]
@@ -167,15 +186,79 @@ func ValidateJob(spec *api.JobSpec) error {
 	return nil
 }
 
-// SubmitJob validates and stores a job.
+// validateSelectors checks macs and prefer selectors.
+func validateSelectors(where string, macs []string, p *api.Prefer) error {
+	check := func(ms []string) error {
+		if len(ms) > 256 {
+			return vErr("%s: at most 256 macs", where)
+		}
+		for _, m := range ms {
+			if strings.TrimSpace(m) == "" || len(m) > 128 {
+				return vErr("%s: invalid Mac %q", where, m)
+			}
+		}
+		return nil
+	}
+	if err := check(macs); err != nil {
+		return err
+	}
+	if p == nil {
+		return nil
+	}
+	if err := check(p.Macs); err != nil {
+		return err
+	}
+	if len(p.Macs) == 0 && len(p.Labels) == 0 {
+		return vErr("%s: prefer needs labels or macs", where)
+	}
+	if p.Bonus < 0 || p.Bonus > 100 {
+		return vErr("%s: prefer.bonus must be between 0 and 100", where)
+	}
+	if len(p.Labels) > 64 {
+		return vErr("%s: prefer: at most 64 labels", where)
+	}
+	return nil
+}
+
+// SubmitJob validates and stores a job for owner (not an admin).
 func (e *Engine) SubmitJob(ctx context.Context, owner string, spec api.JobSpec) (*api.Job, error) {
+	return e.SubmitJobAs(ctx, Caller{Subject: owner}, spec)
+}
+
+// SubmitJobAs validates and stores a job. Blob inputs must be the caller's
+// own uploads (admins: any), and pinned Macs ones the caller may use.
+func (e *Engine) SubmitJobAs(ctx context.Context, c Caller, spec api.JobSpec) (*api.Job, error) {
+	owner := c.Subject
 	if err := ValidateJob(&spec); err != nil {
 		return nil, err
+	}
+	if err := e.checkInputOwnership(ctx, c, &spec); err != nil {
+		return nil, err
+	}
+	if err := e.checkMacSelectors(ctx, owner, &spec); err != nil {
+		return nil, err
+	}
+	if err := validateClientIDs(&spec); err != nil {
+		return nil, err
+	}
+	// Submits are serialised so two copies of one client ID cannot race.
+	e.submitMu.Lock()
+	defer e.submitMu.Unlock()
+	hash := specHash(&spec)
+	prev, existing, err := e.dedupe(ctx, owner, &spec, hash)
+	if err != nil || prev != nil {
+		return prev, err
 	}
 	now := e.now()
 	j := &store.Job{
 		ID: "job_" + auth.NewID(), Name: spec.Name, Owner: owner, Labels: jsonStr(nonNilMap(spec.Labels)),
-		State: JobQueued, CreatedAt: ms(now),
+		State: JobQueued, CreatedAt: ms(now), ClientID: spec.ClientID,
+	}
+	if spec.ClientID != "" {
+		j.ClientHash = hash
+	}
+	if spec.Cleanup != nil {
+		j.Cleanup = jsonStr(spec.Cleanup)
 	}
 	var rows []*store.Task
 	for i, ts := range spec.Tasks {
@@ -183,18 +266,27 @@ func (e *Engine) SubmitJob(ctx context.Context, owner string, spec api.JobSpec) 
 		if len(ts.DependsOn) > 0 {
 			st = api.StateBlocked
 		}
-		rows = append(rows, &store.Task{
+		row := &store.Task{
 			ID: "tsk_" + auth.NewID(), JobID: j.ID, Key: ts.Key, Spec: jsonStr(ts), State: st,
 			Excluded: "{}", Outputs: "[]", CreatedAt: ms(now) + int64(i), // keep submission order
-		})
+		}
+		if ts.ClientID != "" {
+			row.ClientKey = clientKey(owner, ts.ClientID)
+		}
+		rows = append(rows, row)
 	}
 	if err := e.st.CreateJob(ctx, j, rows); err != nil {
 		return nil, err
 	}
-	e.log.Info("job submitted", "job", j.ID, "name", j.Name, "tasks", len(rows), "owner", owner)
+	e.log.Info("job submitted", "job", j.ID, "name", j.Name, "tasks", len(rows), "owner", owner,
+		"existing_tasks", len(existing))
 	e.notify(j.ID)
 	e.Kick()
-	return e.Job(ctx, j.ID, false)
+	v, err := e.Job(ctx, j.ID, false)
+	if v != nil {
+		v.ExistingTasks = existing
+	}
+	return v, err
 }
 
 // CancelJob cancels every unfinished task; running ones are stopped by their
@@ -255,7 +347,26 @@ func (e *Engine) taskView(t *store.Task) api.Task {
 		v.Progress = e.progressOf(t.ID, t.Attempt)
 	}
 	v.Phase, v.Percent = phaseOf(t.State, v.Progress)
+	if t.State == api.StatePending {
+		v.Waiting = e.getWaiting(t.ID)
+	}
 	return v
+}
+
+func (e *Engine) setWaiting(taskID, why string) {
+	e.waitMu.Lock()
+	if why == "" {
+		delete(e.waiting, taskID)
+	} else {
+		e.waiting[taskID] = why
+	}
+	e.waitMu.Unlock()
+}
+
+func (e *Engine) getWaiting(taskID string) string {
+	e.waitMu.Lock()
+	defer e.waitMu.Unlock()
+	return e.waiting[taskID]
 }
 
 func taskView(t *store.Task) api.Task {
@@ -266,6 +377,9 @@ func taskView(t *store.Task) api.Task {
 	}
 	_ = json.Unmarshal([]byte(t.Spec), &v.Spec)
 	_ = json.Unmarshal([]byte(t.Outputs), &v.OutputsDone)
+	if t.OutputSHA256 != "" && t.OutputSHA256 != "{}" {
+		_ = json.Unmarshal([]byte(t.OutputSHA256), &v.OutputSHA256)
+	}
 	now := time.Now().UnixMilli()
 	for id, until := range excludedMap(t) {
 		if until > now {
@@ -284,6 +398,14 @@ func (e *Engine) Job(ctx context.Context, id string, withTasks bool) (*api.Job, 
 	v := &api.Job{ID: j.ID, Name: j.Name, Owner: j.Owner, State: j.State,
 		CreatedAt: time.UnixMilli(j.CreatedAt).UTC(), FinishedAt: tptr(j.FinishedAt)}
 	_ = json.Unmarshal([]byte(j.Labels), &v.Labels)
+	if j.Cleanup != "" {
+		var c api.Cleanup
+		if json.Unmarshal([]byte(j.Cleanup), &c) == nil {
+			v.Cleanup = &c
+		}
+	}
+	v.CleanedAt = tptr(j.CleanedAt)
+	v.ClientID = j.ClientID
 	if v.Counts, err = e.st.TaskCounts(ctx, id); err != nil {
 		return nil, err
 	}
@@ -403,6 +525,12 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		return nil, err
 	}
 	us := e.UpdateSettings()
+	keyNames := map[string]string{}
+	if ks, err := e.st.ListAPIKeys(ctx); err == nil {
+		for _, k := range ks {
+			keyNames["key:"+k.ID] = k.Name
+		}
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
@@ -431,7 +559,29 @@ func (e *Engine) Macs(ctx context.Context) ([]api.Mac, error) {
 		} else if r := rts[a.ID]; r != nil {
 			_ = json.Unmarshal([]byte(r.Unavailable), &m.UnavailableRuntimes)
 		}
-		_ = json.Unmarshal([]byte(a.Labels), &m.Labels)
+		_ = json.Unmarshal([]byte(a.Labels), &m.AgentLabels)
+		m.AdminLabels = parseLabels(a.AdminLabels)
+		m.Labels = mergeLabels(m.AgentLabels, m.AdminLabels)
+		if len(m.AdminLabels) == 0 {
+			m.AdminLabels = nil
+		}
+		if owners := reservedFor(a, now); len(owners) > 0 {
+			r := &api.MacReservation{Owners: owners, Until: tptr(a.ReservedUntil), Note: a.ReservedNote, By: a.ReservedBy,
+				OwnerNames: map[string]string{}}
+			for _, o := range owners {
+				if n, ok := keyNames[o]; ok {
+					r.OwnerNames[o] = n
+				}
+			}
+			m.Reservation = r
+		}
+		m.MaxTasksSet = a.MaxTasksSet
+		if l := e.live[a.ID]; l != nil {
+			m.AgentMaxTasks = l.hb.MaxTasksLimit
+			if l.hb.MaxTasks > 0 {
+				m.MaxTasks = effectiveMaxTasks(a.MaxTasksSet, l.hb.MaxTasks, l.hb.MaxTasksLimit)
+			}
+		}
 		if a.Telemetry != "" {
 			var t api.Telemetry
 			if json.Unmarshal([]byte(a.Telemetry), &t) == nil {
@@ -459,9 +609,19 @@ func ValidMacName(s string) (string, error) {
 // PatchMac drains / opts out / renames a Mac. Names need not be unique (Macs
 // are identified by ID), as at enrolment.
 func (e *Engine) PatchMac(ctx context.Context, id string, p api.MacPatch) error {
+	return e.PatchMacBy(ctx, id, p, "")
+}
+
+// PatchMacBy is PatchMac with the acting admin for the audit log.
+func (e *Engine) PatchMacBy(ctx context.Context, id string, p api.MacPatch, actor string) error {
 	a, err := e.st.GetAgent(ctx, id)
 	if err != nil {
 		return err
+	}
+	if p.MaxTasks != nil {
+		if err := e.setMaxTasks(ctx, a, *p.MaxTasks, actor); err != nil {
+			return err
+		}
 	}
 	if p.Name != nil {
 		name, err := ValidMacName(*p.Name)

@@ -165,6 +165,7 @@ func uploadCmd(ctx context.Context, c *client.Client, args []string) error {
 func downloadCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("download", flag.ExitOnError)
 	out := fs.String("o", "", "output file (default: OUTPUT name)")
+	noVerify := fs.Bool("no-verify", false, "skip the SHA-256 check against the Mac's checksum")
 	tf := addTransferFlags(fs)
 	pos := parseFlags(fs, args)
 	if len(pos) != 2 {
@@ -179,6 +180,16 @@ func downloadCmd(ctx context.Context, c *client.Client, args []string) error {
 	done()
 	if err != nil {
 		return err
+	}
+	if !*noVerify {
+		switch err := c.VerifyOutputFile(ctx, pos[0], pos[1], dst); {
+		case errors.Is(err, client.ErrNoChecksum):
+		case err != nil:
+			return err
+		default:
+			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes, SHA-256 verified)\n", dst, n)
+			return nil
+		}
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", dst, n)
 	return nil

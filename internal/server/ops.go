@@ -19,8 +19,8 @@ func (s *Server) opsRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/metrics/macs/{id}", s.need(roleRead, s.metricsMac))
 	mux.HandleFunc("GET /v1/macs/{id}/attempts", s.need(roleRead, s.macAttempts))
 	mux.HandleFunc("GET /v1/jobs/{id}/timeline", s.need(roleAny, s.jobTimeline))
-	mux.HandleFunc("DELETE /v1/jobs/{id}", s.need(roleAdmin, s.deleteJob))
-	mux.HandleFunc("POST /v1/jobs/purge", s.need(roleAdmin, s.purgeJobs))
+	mux.HandleFunc("DELETE /v1/jobs/{id}", s.need(roleSubmit, s.deleteJob))
+	mux.HandleFunc("POST /v1/jobs/purge", s.need(roleSubmit, s.purgeJobs))
 	mux.HandleFunc("POST /v1/api-keys/{id}/purge", s.need(roleAdmin, s.deleteKey))
 	mux.HandleFunc("POST /v1/api-keys/purge", s.need(roleAdmin, s.purgeKeys))
 	mux.HandleFunc("POST /v1/install-tokens/{id}/purge", s.need(roleAdmin, s.deleteInstallToken))
@@ -169,8 +169,11 @@ func (s *Server) jobTimeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tl)
 }
 
+// deleteJob deletes a job for its owner or an admin (cancelling it first if
+// it still runs). ?inputs=true also deletes the owner's input files.
 func (s *Server) deleteJob(w http.ResponseWriter, r *http.Request) {
-	if err := s.E.DeleteJob(r.Context(), r.PathValue("id"), actor(r)); err != nil {
+	inputs := r.URL.Query().Get("inputs") == "true" || r.URL.Query().Get("inputs") == "1"
+	if err := s.E.RemoveJob(r.Context(), caller(r), r.PathValue("id"), inputs); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -181,6 +184,13 @@ func (s *Server) purgeJobs(w http.ResponseWriter, r *http.Request) {
 	var req api.PurgeJobsRequest
 	if !readJSON(w, r, &req, 4096) {
 		return
+	}
+	if id := who(r); id.Role != api.RoleAdmin {
+		if req.Owner != "" && req.Owner != id.Subject {
+			writeErr(w, http.StatusForbidden, "apps can only purge their own jobs")
+			return
+		}
+		req.Owner = id.Subject
 	}
 	n, err := s.E.PurgeJobs(r.Context(), req, actor(r))
 	if err != nil {

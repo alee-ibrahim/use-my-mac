@@ -49,7 +49,12 @@ func DefaultLimits() Limits {
 
 // Candidate is everything the scorer knows about one Mac.
 type Candidate struct {
-	ID          string
+	ID string
+	// Name is the Mac's name (Need.Macs and Prefer.Macs match ID or name).
+	Name string
+	// ReservedFor, when not empty, lists the only owners whose tasks the
+	// Mac accepts (an active reservation).
+	ReservedFor []string
 	Online      bool
 	AgentState  string
 	Drain       bool
@@ -90,6 +95,50 @@ type Need struct {
 	Resources api.Resources
 	// DiskBytes is the task's work-space need (see DiskNeed).
 	DiskBytes uint64
+	// Owner is the job's owner (reservations); Macs pins the task to these
+	// Macs (IDs or names); Prefer gives matching Macs a score bonus.
+	Owner  string
+	Macs   []string
+	Prefer *api.Prefer
+}
+
+// Rejection reasons the router explains to users.
+const (
+	ReasonReserved  = "reserved for other owners"
+	ReasonNotPinned = "not one of the task's macs"
+)
+
+// DefaultPreferBonus is added to a preferred Mac's score.
+const DefaultPreferBonus = 25.0
+
+// MatchesMac reports whether a Mac (by ID or name) is in sel.
+func MatchesMac(id, name string, sel []string) bool {
+	for _, s := range sel {
+		if s == id || (s != "" && s == name) {
+			return true
+		}
+	}
+	return false
+}
+
+// Preferred reports whether a Mac matches a soft preference: it is listed in
+// p.Macs, or (with labels set) it has all p.Labels.
+func Preferred(c Candidate, p *api.Prefer) bool {
+	if p == nil {
+		return false
+	}
+	if MatchesMac(c.ID, c.Name, p.Macs) {
+		return true
+	}
+	if len(p.Labels) == 0 {
+		return false
+	}
+	for k, v := range p.Labels {
+		if c.Labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // DiskNeed is a task's work-space need: DiskEstimateMB when set, else twice
@@ -194,6 +243,12 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 		return r
 	}
 	t := c.Telemetry
+	if len(n.Macs) > 0 && !MatchesMac(c.ID, c.Name, n.Macs) {
+		return reject(ReasonNotPinned)
+	}
+	if len(c.ReservedFor) > 0 && !contains(c.ReservedFor, n.Owner) {
+		return reject(ReasonReserved)
+	}
 	switch {
 	case !c.Online:
 		return reject("offline")
@@ -342,6 +397,14 @@ func Score(c Candidate, n Need, w Weights, l Limits) Result {
 			f *= InstallPenalty
 		}
 		r.Score = math.Round(f*10000) / 100
+	}
+	if Preferred(c, n.Prefer) {
+		bonus := n.Prefer.Bonus
+		if bonus <= 0 {
+			bonus = DefaultPreferBonus
+		}
+		r.Score = math.Round((r.Score+bonus)*100) / 100
+		parts["prefer"] = 1
 	}
 	if len(install) > 0 {
 		r.Install = install
