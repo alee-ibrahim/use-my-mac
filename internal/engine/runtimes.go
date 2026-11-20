@@ -34,7 +34,8 @@ type runtimeFault struct {
 // macFault returns why an agent's failure report is the Mac's fault rather
 // than the task's ("" = it is the task's), and whether it is about the
 // task's runtime. Older agents only send the exit code, so a bare 127
-// ("command not found") counts too.
+// ("command not found") counts too, unless the agent says the code is the
+// task program's own.
 func macFault(u api.TaskUpdate) (why string, runtime bool) {
 	if u.Outcome != api.OutcomeFailed && u.Outcome != api.OutcomeTimeout {
 		return "", false
@@ -48,7 +49,7 @@ func macFault(u api.TaskUpdate) (why string, runtime bool) {
 	if u.Outcome != api.OutcomeFailed {
 		return "", false
 	}
-	if u.ExitCode != nil && *u.ExitCode == 127 {
+	if u.ExitCode != nil && *u.ExitCode == 127 && !u.ProgramExit {
 		return nz(u.Error, "exit status 127") + " (command not found)", true
 	}
 	return "", false
