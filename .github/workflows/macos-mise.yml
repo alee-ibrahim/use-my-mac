@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - internal/agent/**
+      - internal/hostprep/**
       - internal/engine/runtimes.go
       - internal/integration/**
       - pkg/api/**
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - internal/agent/**
+      - internal/hostprep/**
       - internal/engine/runtimes.go
       - internal/integration/**
       - pkg/api/**
@@ -109,6 +111,7 @@ jobs:
             "$CI_DIR/integration.test" -test.run '^TestMise' -test.v -test.count=1 -test.timeout 8m 2>&1 |
             grep -v ' level=' | tee "$RUNNER_TEMP/mise-tests.log"
           # Every mise test ran (none skipped) and passed.
-          for t in TestMiseToolchain TestMiseRealChecks TestMiseRealInstall; do
+          for t in TestMiseToolchain TestMiseReservedName TestMiseNetworkFailureIsMacFault TestMisePreflight \
+            TestMiseRealChecks TestMiseRealInstall; do
             grep -q -- "--- PASS: $t " "$RUNNER_TEMP/mise-tests.log" || { echo "$t did not pass"; exit 1; }
           done
