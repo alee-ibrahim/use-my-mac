@@ -131,7 +131,9 @@ mise:
   require_lockfile: true        # locked installs; only checksummed downloads are shared
   # cache_dir: /usr/local/var/umm/mise-cache
   max_cache: 2GiB
-  # For tools released from private GitHub repositories (at most one; the token
-  # reaches `mise install` only, but tasks run as _umm and could read the file):
+  # A GitHub token for the GitHub API (60 unauthenticated calls an hour per public
+  # IP, shared by Macs behind it; a token with no scopes is enough for public
+  # releases) and for private releases. At most one; the token reaches
+  # `mise install` only, but tasks run as _umm and could read the file:
   # github_token_file: /usr/local/etc/umm/github-token   # mode 0600, owned by _umm
   # github_token_command: ["/usr/local/bin/your-secrets-cli", "kv", "get", "-field=token", "secret/github-read"]

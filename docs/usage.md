@@ -574,7 +574,11 @@ What to know:
   next one. It is capped by `max_cache`; without a lockfile nothing is shared.
 - **Network.** Installs download from wherever the tools are published (e.g. `nodejs.org`, `github.com`
   and `release-assets.githubusercontent.com`). With `task_network: deny`, list those hosts in
-  `task_network_allow`, since the agent installs as `_umm`. A download in the shared cache is used without
+  `task_network_allow`, since the agent installs as `_umm`. mise's GitHub-based backends (`aqua:`,
+  `github:`, `ubi:`) also call `api.github.com`, even for a locked install. GitHub allows only 60
+  unauthenticated API calls an hour per public IP address, shared by every Mac behind it, so a fleet
+  behind one address should set `github_token_file` or `github_token_command`: for public releases a
+  token with no scopes (or a fine-grained token with no repository access) is enough. A download in the shared cache is used without
   fetching it again, though mise may still ask the host whether it changed.
 - **Timeout.** `timeout_seconds` covers installing and running.
 - **Errors.** A config the Mac refuses, a tool mise cannot install (a wrong checksum, a platform missing
@@ -582,8 +586,9 @@ What to know:
   provide and `MISE_*` or `GITHUB_TOKEN` variables in the task's `env` fail the task with the reason; mise's
   own output is in the task log. Running out of disk while installing is a Mac fault, as is a missing mise
   binary (the runtime is then unavailable on that Mac).
-- **Private tools.** `github_token_file` or `github_token_command` give mise a GitHub token for releases in
-  private repositories. The agent reads the file, or runs the command (30 s limit; its standard output is
+- **GitHub tokens.** `github_token_file` or `github_token_command` give mise a GitHub token, for the API
+  rate limit above and for releases in private repositories. An invalid or expired token fails installs
+  that call the GitHub API ("Bad credentials" in the task log). The agent reads the file, or runs the command (30 s limit; its standard output is
   the token, its standard error is discarded), before each install, and passes the token to `mise install`
   only, as `MISE_GITHUB_TOKEN`: never to the task's program and never to the log. Tasks run as the same
   user as the agent, though, so a task could read the token file or run the command itself: use a
