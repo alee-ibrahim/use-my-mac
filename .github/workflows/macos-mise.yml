@@ -2,7 +2,8 @@ name: macos-mise
 
 # Smoke test of mise toolchains on a real Apple Silicon Mac: the agent's
 # mise tests run as a hidden non-admin user, like _umm on an enrolled Mac,
-# with a pinned, checksum-verified mise. Needs no secrets.
+# with a pinned, checksum-verified mise. Needs no secrets beyond the job's
+# own read-only GITHUB_TOKEN.
 
 on:
   workflow_dispatch:
@@ -87,11 +88,23 @@ jobs:
             echo "$TASK_USER must not be an admin"; exit 1
           fi
 
+      # mise's aqua backend calls api.github.com even for a locked install, and
+      # unauthenticated calls are limited per IP (shared by every job on the
+      # runner's address). The job's own read-only token goes in through the
+      # feature itself, as the Mac's mise.github_token_file.
+      - name: Give the task user a GitHub token file
+        env:
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$JOB_TOKEN" | sudo -u "$TASK_USER" sh -c 'umask 077; cat > "$1"' sh "$CI_DIR/github-token"
+
       - name: mise tests as the task user (real locked install from github.com)
         run: |
           set -euo pipefail
           cd / # the task user cannot read the runner's workspace
           sudo -u "$TASK_USER" env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$CI_DIR" TMPDIR="$CI_DIR/tmp" \
+            GITHUB_ACTIONS=true UMM_TEST_MISE_GITHUB_TOKEN_FILE="$CI_DIR/github-token" \
             UMM_TEST_MISE=1 UMM_TEST_MISE_BIN=/usr/local/bin/mise \
             "$CI_DIR/integration.test" -test.run '^TestMise' -test.v -test.count=1 -test.timeout 8m 2>&1 |
             grep -v ' level=' | tee "$RUNNER_TEMP/mise-tests.log"

@@ -288,11 +288,19 @@ func TestMiseRealChecks(t *testing.T) {
 }
 
 // With UMM_TEST_MISE=1 the agent runs a real locked install of jq
-// (downloaded from GitHub; needs network access to github.com) and
+// (downloaded from GitHub; needs network access to github.com and
+// api.github.com, which mise's aqua backend queries even when locked) and
 // `mise exec`. A second task gets the download from the shared cache; one
 // a task tampered with is fetched again; a lockfile with the wrong
 // checksum fails; a program from outside the tools never runs. The macOS
 // CI job runs these as a non-admin user, like _umm on a Mac.
+//
+// UMM_TEST_MISE_GITHUB_TOKEN_FILE names a token file used as the Mac's
+// mise.github_token_file: the install is authenticated, and the token must
+// not reach the task's program or the logs. Without one, unauthenticated
+// GitHub API calls are limited per IP (60 an hour), so the test skips if it
+// hits that limit, except in GitHub Actions, where a token is required.
+
 func TestMiseRealInstall(t *testing.T) {
 	if os.Getenv("UMM_TEST_MISE") == "" {
 		t.Skip("set UMM_TEST_MISE=1 to run a real mise install (downloads jq from github.com)")
@@ -302,19 +310,50 @@ func TestMiseRealInstall(t *testing.T) {
 	if plat == "" {
 		t.Skipf("no jq checksum in the test lockfile for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+	tokenFile, token := os.Getenv("UMM_TEST_MISE_GITHUB_TOKEN_FILE"), ""
+	if tokenFile != "" {
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		token = strings.TrimSpace(string(b))
+	} else if os.Getenv("GITHUB_ACTIONS") == "true" {
+		t.Fatal("set UMM_TEST_MISE_GITHUB_TOKEN_FILE: unauthenticated GitHub API calls from shared runners hit the rate limit")
+	}
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
-	_, cache := e.miseMac("real-mise", bin, func(c *agent.Config) { c.Mise.Commands = []string{"jq", "sh"} })
+	_, cache := e.miseMac("real-mise", bin, func(c *agent.Config) {
+		c.Mise.Commands = []string{"jq", "sh"}
+		c.Mise.GitHubTokenFile = tokenFile
+	})
+	var allLogs strings.Builder
+	// logs returns a task's log, skipping the test when an install without
+	// a token ran into GitHub's per-IP rate limit.
+	logs := func(task api.Task) string {
+		l := e.logs(task.ID)
+		allLogs.WriteString(l)
+		if task.State != api.StateSucceeded && token == "" && strings.Contains(l, "rate limit exceeded") {
+			t.Skip("GitHub's unauthenticated API rate limit was hit; set UMM_TEST_MISE_GITHUB_TOKEN_FILE")
+		}
+		return l
+	}
 	jq := "[tools]\n\"aqua:jqlang/jq\" = \"1.7.1\"\n"
 	in := e.miseInputs("jq", jq, realJQLock)
 	ts := api.TaskSpec{Args: []string{"jq", "-n", "-c", `{"tool": "jq", "args": $ARGS.positional}`, "--args", "pinned"},
 		Inputs: in, TimeoutSeconds: 300}
 	for i := 0; i < 2; i++ {
 		task := e.runOne(ts)
-		logs := e.logs(task.ID)
-		if task.State != api.StateSucceeded || !strings.Contains(logs, `{"tool":"jq","args":["pinned"]}`) {
-			t.Fatalf("run %d: %s %s\n%s", i, task.State, e.taskError(task.ID), logs)
+		l := logs(task)
+		if task.State != api.StateSucceeded || !strings.Contains(l, `{"tool":"jq","args":["pinned"]}`) {
+			t.Fatalf("run %d: %s %s\n%s", i, task.State, e.taskError(task.ID), l)
 		}
-		t.Logf("run %d log:\n%s", i, logs)
+		t.Logf("run %d log:\n%s", i, l)
+	}
+	// The task's program does not see the token (jq can print its env).
+	task := e.runOne(api.TaskSpec{Args: []string{"jq", "-n", "-r",
+		`"token in task env: " + (env.MISE_GITHUB_TOKEN // env.GITHUB_TOKEN // env.GITHUB_API_TOKEN // "none")`},
+		Inputs: in, TimeoutSeconds: 300})
+	if l := logs(task); task.State != api.StateSucceeded || !strings.Contains(l, "token in task env: none\n") {
+		t.Fatalf("env: %s %s\n%s", task.State, e.taskError(task.ID), l)
 	}
 	// The cache is shared by tasks running as the same user, so a task can
 	// overwrite a download in it. mise re-checks each one against the
@@ -328,13 +367,14 @@ func TestMiseRealInstall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	task := e.runOne(ts)
-	if logs := e.logs(task.ID); task.State != api.StateSucceeded || strings.Contains(logs, "tampered") ||
-		!strings.Contains(logs, `{"tool":"jq","args":["pinned"]}`) {
-		t.Fatalf("tampered cache: %s %s\n%s", task.State, e.taskError(task.ID), logs)
+	task = e.runOne(ts)
+	if l := logs(task); task.State != api.StateSucceeded || strings.Contains(l, "tampered") ||
+		!strings.Contains(l, `{"tool":"jq","args":["pinned"]}`) {
+		t.Fatalf("tampered cache: %s %s\n%s", task.State, e.taskError(task.ID), l)
 	}
 
 	task = e.runOne(api.TaskSpec{Args: []string{"sh", "-c", "id"}, Inputs: in, TimeoutSeconds: 300})
+	logs(task)
 	if msg := e.taskError(task.ID); task.State != api.StateFailed || !strings.Contains(msg, "no installed tool provides sh") {
 		t.Errorf("sh: %s %q", task.State, msg)
 	}
@@ -347,8 +387,11 @@ func TestMiseRealInstall(t *testing.T) {
 	}
 	ts.Inputs = e.miseInputs("jq-bad", jq, bad)
 	task = e.runOne(ts)
-	if logs := e.logs(task.ID); task.State != api.StateFailed || !strings.Contains(logs, "Checksum mismatch") {
-		t.Fatalf("bad checksum: %s %s\n%s", task.State, e.taskError(task.ID), logs)
+	if l := logs(task); task.State != api.StateFailed || !strings.Contains(l, "Checksum mismatch") {
+		t.Fatalf("bad checksum: %s %s\n%s", task.State, e.taskError(task.ID), l)
+	}
+	if token != "" && strings.Contains(allLogs.String(), token) {
+		t.Error("the GitHub token is in a task log")
 	}
 }
 
