@@ -83,6 +83,8 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 		return fail(err.Error())
 	}
 	menvList := withEnv(base, menv)
+	// The only mise call that may use the network.
+	installEnv := withEnv(menvList, map[string]string{"MISE_OFFLINE": "0"})
 	query := func(arg ...string) ([]byte, error) {
 		return miseOutput(ctx, mise, workdir, menvList, logs, arg...)
 	}
@@ -202,13 +204,13 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 		return nil
 	}
 	if len(plain) > 0 {
-		if u := install(plain, menvList); u != nil {
+		if u := install(plain, installEnv); u != nil {
 			return nil, u
 		}
 	}
 	if len(withToken) > 0 {
 		// Never the task's program, never logged.
-		if u := install(withToken, withEnv(menvList, map[string]string{"MISE_GITHUB_TOKEN": tok})); u != nil {
+		if u := install(withToken, withEnv(installEnv, map[string]string{"MISE_GITHUB_TOKEN": tok})); u != nil {
 			return nil, u
 		}
 	}

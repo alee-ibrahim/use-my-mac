@@ -119,7 +119,7 @@ func TestMiseEnv(t *testing.T) {
 	for k, want := range map[string]string{
 		"MISE_DATA_DIR": filepath.Join(wd, ".umm-mise", "data"), "MISE_CACHE_DIR": filepath.Join(wd, ".umm-mise", "cache"),
 		"MISE_CEILING_PATHS": "/w", "MISE_SAFE": "1", "MISE_LOCKED": "1", "MISE_DOWNLOAD_CACHE": "1",
-		"MISE_EXEC_AUTO_INSTALL": "0", "MISE_AUTO_INSTALL": "0", "MISE_NOT_FOUND_AUTO_INSTALL": "0",
+		"MISE_EXEC_AUTO_INSTALL": "0", "MISE_AUTO_INSTALL": "0", "MISE_OFFLINE": "1", "MISE_NOT_FOUND_AUTO_INSTALL": "0",
 		"MISE_SYSTEM_PACKAGES_SUDO": "0", "MISE_USE_VERSIONS_HOST": "0", "MISE_DOWNLOAD_CACHE_MAX_SIZE": "2048MiB",
 		// Only a file named mise.toml is project config: no .tool-versions,
 		// mise.local.toml, .mise.toml or mise.<env>.toml.

@@ -30,6 +30,7 @@ import (
 // each install and whether it got a GitHub token), `which` and `exec`.
 // The programs say whether they can see a token.
 const fakeMise = `#!/bin/sh
+[ -n "$FAKE_MISE_RECORD" ] && echo "$1 offline=${MISE_OFFLINE:-0}" >> "$FAKE_MISE_RECORD/calls"
 tools() { sed -n '/^\[tools\]/,/^\[[a-z]/p' mise.toml | sed -n 's/^"\{0,1\}\([A-Za-z0-9:\/._-]*\)"\{0,1\} *=.*/\1/p'; }
 case "$1" in
 --version) echo "2026.11.9 linux-x64 (2026-11-16)" ;;
@@ -210,6 +211,15 @@ func TestMiseToolchain(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cache, "downloads-cas")); err != nil {
 		t.Errorf("shared download cache: %v", err)
 	}
+	// Only installs may use the network: every query runs offline, so none
+	// spends the Mac's unauthenticated GitHub API budget.
+	calls, _ := os.ReadFile(filepath.Join(record, "calls"))
+	for _, c := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+		cmd, offline, _ := strings.Cut(c, " ")
+		if (cmd == "install") == (offline == "offline=1") {
+			t.Errorf("mise %s ran with %s", cmd, offline)
+		}
+	}
 
 	fails := []struct {
 		name, toml string
@@ -319,6 +329,31 @@ func TestMiseRealChecks(t *testing.T) {
 	// Task errors on purpose, many in a row on one Mac (see TestMiseToolchain).
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
 	e.miseMac("real-mise", bin, nil)
+	defer func() {
+		// The queries before an install never touch the network (mise's
+		// aqua backend would otherwise ask api.github.com about the tool,
+		// unauthenticated): on a Mac with no network they pass, and only
+		// the install fails, as a Mac fault.
+		off, _ := e.miseMac("no-network", bin, func(c *agent.Config) {
+			c.TaskEnv["HTTPS_PROXY"], c.TaskEnv["HTTP_PROXY"] = "http://127.0.0.1:1", "http://127.0.0.1:1"
+		})
+		e.admin.PatchMac(e.ctx, macByName(e, "real-mise").ID, api.MacPatch{Drain: ptr(true)})
+		zero := 0
+		job, err := e.app.SubmitJob(e.ctx, api.JobSpec{Name: "mise", Tasks: []api.TaskSpec{{Key: "t", MaxRetries: &zero,
+			Runtime: agent.MiseRuntime, Args: []string{"jq", "-n", "1"},
+			Inputs: e.miseInputs("offline", "[tools]\n\"aqua:jqlang/jq\" = \"1.7.1\"\n", realJQLock)}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		j, _ := e.app.Job(e.ctx, job.ID)
+		a, _ := e.endedAttempt(j.Tasks[0].ID, 1)
+		logs := e.logs(j.Tasks[0].ID)
+		before, _, _ := strings.Cut(logs, "[agent] mise: installing")
+		if a.AgentID != off.id || a.Outcome != api.OutcomeUnavailable || strings.Contains(before, "api.github.com") ||
+			!strings.Contains(logs, "[agent] mise: installing") {
+			t.Errorf("offline queries: %+v\n%s", a, logs)
+		}
+	}()
 	jq := "[tools]\n\"aqua:jqlang/jq\" = \"1.7.1\"\n"
 	for _, c := range []struct{ name, toml, lock, want string }{
 		{"env", "[env]\nX = \"{{ exec(command='id') }}\"\n" + jq, realJQLock, "env is not allowed"},
@@ -682,4 +717,19 @@ func (e *env) endedAttempt(taskID string, n int) (api.Attempt, *client.TaskDetai
 		return a.Outcome != "" && a.Outcome != api.OutcomeRunning
 	})
 	return a, d
+}
+
+func macByName(e *env, name string) api.Mac {
+	e.t.Helper()
+	ms, err := e.admin.Macs(e.ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.Name == name {
+			return m
+		}
+	}
+	e.t.Fatalf("mac %s not found", name)
+	return api.Mac{}
 }
