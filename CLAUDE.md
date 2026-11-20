@@ -31,7 +31,7 @@ failure handling.
 ```sh
 go test ./...                          # all tests (integration ~8 s)
 GOOS=darwin GOARCH=arm64 go vet ./...  # macOS build check
-cd dashboard && npm run lint && npm run build
+cd dashboard && pnpm lint && pnpm build
 ```
 
 ## Rules

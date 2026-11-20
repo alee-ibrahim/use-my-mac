@@ -39,9 +39,9 @@ The `macos-mise` workflow runs them on an Apple Silicon runner as a hidden non-a
 - **No secrets in argv, config files, logs or commits.** Read them from the environment or a 0600 file.
 - **macOS code paths:** keep parsing in pure functions with fixture tests; only wiring may be build-tagged.
   If you have tested on real hardware, say which Mac and macOS version in the PR.
-- **Dashboard:** use official shadcn/ui components only (`npx shadcn@latest add <component>`). Don't hand-roll
+- **Dashboard:** use official shadcn/ui components only (`pnpm dlx shadcn@latest add <component>`). Don't hand-roll
   UI primitives, and don't edit files in `src/components/ui` except by re-adding them from the registry.
-- Run `gofmt`, `go vet` and `npm run lint` before pushing. CI runs them too.
+- Run `gofmt`, `go vet` and `pnpm lint` before pushing. CI runs them too.
 - Small, focused PRs with a clear description of behaviour changes.
 
 ## Commit messages
