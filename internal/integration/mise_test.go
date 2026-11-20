@@ -471,6 +471,25 @@ func TestMiseRealInstall(t *testing.T) {
 		}
 		t.Logf("run %d log:\n%s", i, l)
 	}
+	// The lockfile cannot point an allowed tool elsewhere: for aqua: (and
+	// core:) tools mise downloads from the registry's own URL whatever the
+	// lockfile says, so another release's URL and checksum fail the
+	// checksum check; and an entry whose backend is not the tool's (yq for
+	// jq) does not count as the tool's entry at all.
+	for _, c := range []struct{ name, lock, want string }{
+		{"foreign url", strings.ReplaceAll(strings.ReplaceAll(otherYQLock, `"aqua:mikefarah/yq"]]`, `"aqua:jqlang/jq"]]`),
+			`backend = "aqua:mikefarah/yq"`, `backend = "aqua:jqlang/jq"`), "Checksum mismatch"},
+		{"foreign backend", strings.ReplaceAll(otherYQLock, `[[tools."aqua:mikefarah/yq"]]`, `[[tools."aqua:jqlang/jq"]]`),
+			"cannot resolve aqua:jqlang/jq"},
+	} {
+		lock := strings.NewReplacer(`tools."aqua:mikefarah/yq".`, `tools."aqua:jqlang/jq".`, `"4.44.3"`, `"1.7.1"`).Replace(c.lock)
+		task := run(api.TaskSpec{Args: ts.Args, Inputs: e.miseInputs("jq-"+strings.ReplaceAll(c.name, " ", "-"), jq, lock),
+			TimeoutSeconds: 300})
+		if l := logs(task); task.State != api.StateFailed || !strings.Contains(l+e.taskError(task.ID), c.want) {
+			t.Errorf("%s: %s %s\n%s", c.name, task.State, e.taskError(task.ID), l)
+		}
+	}
+
 	// The task's program does not see the token (jq can print its env), nor
 	// anything from the planted config.
 	task := run(api.TaskSpec{Args: []string{"jq", "-n", "-r",
@@ -701,6 +720,28 @@ func TestMisePreflight(t *testing.T) {
 		return slices.Contains(macByID(e, ok.id).Runtimes, agent.MiseRuntime)
 	})
 }
+
+// otherYQLock is `mise lock` for another tool (aqua:mikefarah/yq 4.44.3),
+// to build lockfiles that try to pass it off as jq.
+const otherYQLock = `lockfile_version = 4
+
+[[tools."aqua:mikefarah/yq"]]
+version = "4.44.3"
+backend = "aqua:mikefarah/yq"
+specifiers = ["4.44.3"]
+
+[tools."aqua:mikefarah/yq"."platforms.linux-arm64"]
+checksum = "sha512:ffcfe014bd955b52a2b6c7dcb7eecf1d8e397002816a9520ba1db3208e25824eee9880758a6486c61ba30e0ccd72328d4a0bd557cb2575426a2967357f3bd86f"
+url = "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_arm64"
+
+[tools."aqua:mikefarah/yq"."platforms.linux-x64"]
+checksum = "sha512:cdec61ee0ce1cbdaa11088fd02da7da64afe2bc096410910f7382edb9f2cd4ed8541a30e885e555c7cea58fd925b5d5558e8ef70594832d3433f4ebbfb120d4f"
+url = "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64"
+
+[tools."aqua:mikefarah/yq"."platforms.macos-arm64"]
+checksum = "sha512:7398e8b1c2fd84c2b95e7200de39d97cf12c395a6a3e24bac6f571578d74e0ac5764c04c973ac1e5ee8607452928972b5540b14467979291d1c59913858d6f70"
+url = "https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_darwin_arm64"
+`
 
 // endedAttempt waits until attempt n of a task has its final outcome (not
 // running) and returns it with the task.

@@ -597,6 +597,13 @@ What to know:
   add them deliberately, e.g. `"github:astral-sh/*"`. Registry names can resolve to those too: `ffmpeg`
   resolves to `conda:ffmpeg` in mise 2026.11.9, so it needs `"conda:ffmpeg"`. Tools installed through
   `pipx:` need `uv` (or `pipx`) as a pinned tool in the same `mise.toml`.
+- **Where the bytes come from.** `allow_tools` decides how a tool installs, and with the default backends
+  also where it downloads from: for `core:` and `aqua:` tools mise builds the download URL from its own
+  registry and the tool's upstream, not from the lockfile. A `mise.lock` that points an allowed tool at
+  another release (its URL and checksum) fails the checksum check, and an entry whose `backend` is not the
+  tool's own does not count (both tested with mise 2026.11.9). Backends you add may take more from the
+  task: `github:` and `ubi:` fetch from whatever repository the task names, `http:` from any URL.
+  `commands` only picks a program by name among the installed tools; it is not a boundary on its own.
 - **The work dir holds everything.** Tools are installed per task and deleted with the work dir, so count
   them in `resources.disk_estimate_mb` (Node.js is about 200 MB unpacked). Downloads a tool makes by itself
   later (uv's own Pythons, a browser a test framework fetches) go under the task's `HOME`, which is its work
