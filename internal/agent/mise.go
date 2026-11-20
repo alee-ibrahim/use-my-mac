@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -50,6 +51,10 @@ type MiseConfig struct {
 	// for every backend. Default ["core:*", "aqua:*"]: mise's own core
 	// tools and aqua packages, which is what most registry names resolve to.
 	AllowTools []string `yaml:"allow_tools"`
+	// Versions are the mise versions this Mac accepts (`mise --version`).
+	// The agent reads mise's JSON output, so the default is the version it
+	// was tested with; an admin who has checked a newer mise adds it.
+	Versions []string `yaml:"versions"`
 	// Commands optionally narrows which programs tasks may run (bare
 	// names such as "node" or "ffmpeg"). Empty: any program an installed
 	// tool provides. Programs outside the tools never run either way.
@@ -113,6 +118,14 @@ func (m *MiseConfig) normalize(workDir string) error {
 	for _, p := range m.AllowTools {
 		if !misePatternRe.MatchString(p) || strings.HasSuffix(p, ":") {
 			return fmt.Errorf("mise.allow_tools: %q is not backend:name (e.g. core:node, aqua:*, or *)", p)
+		}
+	}
+	if len(m.Versions) == 0 {
+		m.Versions = []string{TestedMiseVersion}
+	}
+	for _, v := range m.Versions {
+		if !miseVersionRe.MatchString(v) {
+			return fmt.Errorf("mise.versions: %q is not a mise version such as %s", v, TestedMiseVersion)
 		}
 	}
 	for _, c := range m.Commands {
@@ -464,4 +477,32 @@ var miseMacFaults = []struct{ text, why string }{
 	{"(502 bad gateway)", "a download host failed"},
 	{"(503 service unavailable)", "a download host failed"},
 	{"(504 gateway timeout)", "a download host failed"},
+}
+
+// TestedMiseVersion is the mise version the agent was tested with.
+const TestedMiseVersion = "2026.11.9"
+
+var miseVersionRe = regexp.MustCompile(`^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$`)
+
+// ParseMiseVersion reads `mise --version` ("2026.11.9 macos-arm64 (...)").
+func ParseMiseVersion(out []byte) (string, error) {
+	f := strings.Fields(string(out))
+	if len(f) == 0 || !miseVersionRe.MatchString(f[0]) {
+		return "", fmt.Errorf("unexpected `mise --version` output %q", strings.TrimSpace(string(out)))
+	}
+	return f[0], nil
+}
+
+// miseBinaryWritable says why the agent's user could change the mise
+// binary (the file or its directory is writable by it), or "".
+func miseBinaryWritable(path string) string {
+	if os.Geteuid() == 0 {
+		return "" // root can write anything; the agent never runs as root
+	}
+	for _, p := range []string{path, filepath.Dir(path)} {
+		if canAccess(p, 2) {
+			return "mise binary " + path + " is writable by the agent's user (" + p + "): install it root-owned"
+		}
+	}
+	return ""
 }

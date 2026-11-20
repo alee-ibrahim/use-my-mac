@@ -73,6 +73,7 @@ type Agent struct {
 	faults        map[string]execFault
 	preflightID   int64
 	lastPreflight time.Time
+	miseChecked   miseCheck
 
 	// Mac health (see health.go).
 	health    healthState

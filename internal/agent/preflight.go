@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/runtimes"
@@ -125,6 +129,9 @@ func (a *Agent) preflightLocked(now time.Time) {
 			case ms.Unavailable[n] != "":
 				prog, why, source = "", ms.Unavailable[n], api.RuntimeSourceInstall
 			}
+		}
+		if why == "" && n == MiseRuntime && prog != "" {
+			why = a.miseCheckLocked(prog)
 		}
 		if why != "" {
 			delete(a.faults, n) // the preflight reason supersedes it
@@ -299,4 +306,42 @@ func execFailureReason(prog string, startErr error, exitCode int) string {
 		}
 	}
 	return ""
+}
+
+// miseCheck caches the mise binary's version check by its file stamp.
+type miseCheck struct {
+	stamp, why string
+}
+
+// miseCheckLocked says why the mise binary prog cannot be used ("" = it
+// can): mise.binary must not be writable by the agent's user (a managed
+// runtime is checked by its own machinery), and its version must be one
+// in mise.versions. `mise --version` runs only when the file changed.
+// Caller holds a.mu.
+func (a *Agent) miseCheckLocked(prog string) string {
+	if prog == a.cfg.Mise.Binary {
+		if why := miseBinaryWritable(prog); why != "" {
+			return why
+		}
+	}
+	stamp := prog + "|" + progStamp(prog)
+	if a.miseChecked.stamp == stamp {
+		return a.miseChecked.why
+	}
+	why := ""
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	out, err := exec.CommandContext(ctx, prog, "--version").Output()
+	cancel()
+	v, perr := ParseMiseVersion(out)
+	switch {
+	case err != nil:
+		why = "mise --version: " + err.Error()
+	case perr != nil:
+		why = perr.Error()
+	case !slices.Contains(a.cfg.Mise.Versions, v):
+		why = "mise " + v + " is not a version this agent was tested with (mise.versions: " +
+			strings.Join(a.cfg.Mise.Versions, ", ") + ")"
+	}
+	a.miseChecked = miseCheck{stamp: stamp, why: why}
+	return why
 }

@@ -164,10 +164,7 @@ func TestMiseToolchain(t *testing.T) {
 	// would quarantine it (quarantine_after) like any failing tasks.
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "mise")
-	if err := os.WriteFile(bin, []byte(fakeMise), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := installFakeMise(t, fakeMise)
 	const token = "github_pat_test0000000000secret"
 	tokenFile := filepath.Join(dir, "github-token")
 	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
@@ -548,10 +545,7 @@ func miseHostChecksOff(c *agent.Config) {
 func TestMiseNetworkFailureIsMacFault(t *testing.T) {
 	skipNoShell(t)
 	e := newEnv(t)
-	bin := filepath.Join(t.TempDir(), "mise")
-	if err := os.WriteFile(bin, []byte(fakeMise), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bin := installFakeMise(t, fakeMise)
 	limited, _ := e.miseMac("limited-mac", bin, func(c *agent.Config) {
 		c.TaskEnv["FAKE_MISE_RECORD"] = t.TempDir()
 		c.TaskEnv["FAKE_MISE_FAIL"] = "Failed to install aqua:example/hello@1.0.0: HTTP status client error " +
@@ -580,4 +574,64 @@ func TestMiseNetworkFailureIsMacFault(t *testing.T) {
 	if err != nil || final.State != api.StateSucceeded || final.Tasks[0].AgentID != good.id {
 		t.Fatalf("job: %v %+v", err, final)
 	}
+}
+
+// installFakeMise installs a mise script the way an admin installs mise:
+// neither the file nor its directory writable by the agent's user (the
+// agent checks).
+func installFakeMise(t *testing.T, script string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "mise")
+	if err := os.WriteFile(bin, []byte(script), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(dir, 0o555)
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	return bin
+}
+
+// The Mac only offers mise when its binary is one the agent's user cannot
+// change and a version the agent was tested with (its JSON output is what
+// the agent reads).
+func TestMisePreflight(t *testing.T) {
+	skipNoShell(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anything")
+	}
+	e := newEnv(t)
+	writable := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(writable, []byte(fakeMise), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newer := installFakeMise(t, strings.Replace(fakeMise, "2026.11.9 linux-x64", "2027.1.0 linux-x64", 1))
+	for _, c := range []struct{ name, bin, want string }{
+		{"writable-mac", writable, "writable by the agent's user"},
+		{"newer-mac", newer, "not a version"},
+	} {
+		f := e.macCfg(c.name, 1, quietTel(), nil, func(cfg *agent.Config) {
+			cfg.Mise = agent.MiseConfig{Enabled: true, Binary: c.bin, CacheDir: filepath.Join(t.TempDir(), "cache")}
+			miseHostChecksOff(cfg)
+		})
+		waitFor(t, c.name+" to report mise unavailable", 5*time.Second, func() bool {
+			for _, u := range macByID(e, f.id).UnavailableRuntimes {
+				if u.Name == agent.MiseRuntime && strings.Contains(u.Reason, c.want) {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	// An admin who checked a newer mise lists it.
+	ok := e.macCfg("listed-mac", 1, quietTel(), nil, func(cfg *agent.Config) {
+		cfg.Mise = agent.MiseConfig{Enabled: true, Binary: newer, CacheDir: filepath.Join(t.TempDir(), "cache"),
+			Versions: []string{"2026.11.9", "2027.1.0"}}
+		miseHostChecksOff(cfg)
+	})
+	waitFor(t, "listed-mac to offer mise", 5*time.Second, func() bool {
+		return slices.Contains(macByID(e, ok.id).Runtimes, agent.MiseRuntime)
+	})
 }

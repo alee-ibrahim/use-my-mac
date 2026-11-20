@@ -191,7 +191,7 @@ func TestMiseConfigNormalize(t *testing.T) {
 		t.Errorf("runtime mise = %v", got)
 	}
 	if c.Mise.CacheDir != "/usr/local/var/umm/work/.mise-cache" || c.Mise.MaxCacheBytes != 2<<30 || !c.Mise.Locked() ||
-		strings.Join(c.Mise.AllowTools, ",") != "core:*,aqua:*" {
+		strings.Join(c.Mise.AllowTools, ",") != "core:*,aqua:*" || strings.Join(c.Mise.Versions, ",") != TestedMiseVersion {
 		t.Errorf("defaults: %+v", c.Mise)
 	}
 	if err := c.Normalize(); err != nil { // idempotent
@@ -219,6 +219,7 @@ func TestMiseConfigNormalize(t *testing.T) {
 		{"short name in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"node"}} }, "backend:name"},
 		{"bare backend in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"aqua:"}} }, "backend:name"},
 		{"bad prefix in allow_tools", func(c *Config) { c.Mise = MiseConfig{Enabled: true, AllowTools: []string{"no*"}} }, "backend:name"},
+		{"bad version", func(c *Config) { c.Mise = MiseConfig{Enabled: true, Versions: []string{"latest"}} }, "mise.versions"},
 		{"relative token file", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, GitHubTokenFile: "token"}
 		}, "github_token_file must be an absolute path"},
@@ -446,5 +447,45 @@ func TestMiseCacheOnWorkVolume(t *testing.T) {
 	}
 	if _, err := os.Stat(task); !os.IsNotExist(err) {
 		t.Errorf("stale task dir kept: %v", err)
+	}
+}
+
+func TestParseMiseVersion(t *testing.T) {
+	for out, want := range map[string]string{
+		"2026.11.9 linux-x64 (2026-11-16)\n":   "2026.11.9",
+		"2026.11.9 macos-arm64 (2026-11-16)\n": "2026.11.9",
+		"2027.1.0\n":                           "2027.1.0",
+	} {
+		if got, err := ParseMiseVersion([]byte(out)); err != nil || got != want {
+			t.Errorf("%q: %q, %v", out, got, err)
+		}
+	}
+	for _, bad := range []string{"", "mise ERROR boom", "v2026.11.9", "2026.11"} {
+		if _, err := ParseMiseVersion([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestMiseBinaryWritable(t *testing.T) {
+	skipWindows(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anything")
+	}
+	dir := filepath.Join(t.TempDir(), "bin")
+	os.Mkdir(dir, 0o755)
+	bin := filepath.Join(dir, "mise")
+	os.WriteFile(bin, []byte("x"), 0o755)
+	if miseBinaryWritable(bin) == "" {
+		t.Error("a writable file passed")
+	}
+	os.Chmod(bin, 0o555)
+	if miseBinaryWritable(bin) == "" {
+		t.Error("a file in a writable directory passed")
+	}
+	os.Chmod(dir, 0o555)
+	defer os.Chmod(dir, 0o755)
+	if why := miseBinaryWritable(bin); why != "" {
+		t.Errorf("read-only file and dir: %s", why)
 	}
 }
