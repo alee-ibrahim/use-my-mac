@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fixtures are trimmed output of mise 2026.11.9 (`config explain
@@ -497,4 +501,41 @@ func TestMiseBinaryWritable(t *testing.T) {
 	if why := miseBinaryWritable(bin); why != "" {
 		t.Errorf("read-only file and dir: %s", why)
 	}
+}
+
+// `mise --version` runs outside a.mu: a slow mise must not stall the agent
+// (heartbeats, polls and task starts all take a.mu).
+func TestMiseVersionCheckOutsideLock(t *testing.T) {
+	skipWindows(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anything")
+	}
+	dir := filepath.Join(t.TempDir(), "bin")
+	os.Mkdir(dir, 0o755)
+	bin := filepath.Join(dir, "mise")
+	os.WriteFile(bin, []byte("#!/bin/sh\nsleep 2\necho '2026.11.9 test (x)'\n"), 0o555)
+	os.Chmod(dir, 0o555)
+	defer os.Chmod(dir, 0o755)
+	managed := false
+	cfg := &Config{Server: "http://127.0.0.1:1", WorkDir: t.TempDir(), Priority: "none",
+		Mise:            MiseConfig{Enabled: true, Binary: bin},
+		ManagedRuntimes: ManagedRuntimesConfig{Enabled: &managed}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	a := New(cfg, "cred", nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.RuntimeStatus() // takes a.mu
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("starting the agent took %s: mise --version ran under a.mu", d)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if avail, _ := a.RuntimeStatus(); slices.Contains(avail, MiseRuntime) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, unavail := a.RuntimeStatus()
+	t.Fatalf("mise never became available: %+v", unavail)
 }

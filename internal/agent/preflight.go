@@ -311,13 +311,15 @@ func execFailureReason(prog string, startErr error, exitCode int) string {
 // miseCheck caches the mise binary's version check by its file stamp.
 type miseCheck struct {
 	stamp, why string
+	running    bool // a `mise --version` is in flight
 }
 
 // miseCheckLocked says why the mise binary prog cannot be used ("" = it
 // can): mise.binary must not be writable by the agent's user (a managed
 // runtime is checked by its own machinery), and its version must be one
-// in mise.versions. `mise --version` runs only when the file changed.
-// Caller holds a.mu.
+// in mise.versions. `mise --version` runs only when the file changed, in
+// the background without a.mu; until it answers, mise is unavailable
+// ("checking"), and the answer triggers a new preflight. Caller holds a.mu.
 func (a *Agent) miseCheckLocked(prog string) string {
 	if prog == a.cfg.Mise.Binary {
 		if why := miseBinaryWritable(prog); why != "" {
@@ -325,23 +327,39 @@ func (a *Agent) miseCheckLocked(prog string) string {
 		}
 	}
 	stamp := prog + "|" + progStamp(prog)
-	if a.miseChecked.stamp == stamp {
+	if a.miseChecked.stamp == stamp && !a.miseChecked.running {
 		return a.miseChecked.why
 	}
-	why := ""
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	out, err := exec.CommandContext(ctx, prog, "--version").Output()
-	cancel()
-	v, perr := ParseMiseVersion(out)
-	switch {
-	case err != nil:
-		why = "mise --version: " + err.Error()
-	case perr != nil:
-		why = perr.Error()
-	case !slices.Contains(a.cfg.Mise.Versions, v):
-		why = "mise " + v + " is not a version this agent was tested with (mise.versions: " +
-			strings.Join(a.cfg.Mise.Versions, ", ") + ")"
+	if !a.miseChecked.running {
+		a.miseChecked = miseCheck{stamp: stamp, running: true}
+		versions := append([]string(nil), a.cfg.Mise.Versions...)
+		go func() {
+			why := miseVersionCheck(prog, versions)
+			a.mu.Lock()
+			a.miseChecked = miseCheck{stamp: stamp, why: why}
+			a.preflightLocked(time.Now())
+			a.mu.Unlock()
+		}()
 	}
-	a.miseChecked = miseCheck{stamp: stamp, why: why}
-	return why
+	return "checking the mise version"
+}
+
+// miseVersionCheck runs `prog --version` and says why that version is not
+// accepted ("" = it is).
+func miseVersionCheck(prog string, versions []string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, prog, "--version").Output()
+	if err != nil {
+		return "mise --version: " + err.Error()
+	}
+	v, err := ParseMiseVersion(out)
+	if err != nil {
+		return err.Error()
+	}
+	if !slices.Contains(versions, v) {
+		return "mise " + v + " is not a version this agent was tested with (mise.versions: " +
+			strings.Join(versions, ", ") + ")"
+	}
+	return ""
 }
