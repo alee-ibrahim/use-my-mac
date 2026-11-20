@@ -339,8 +339,10 @@ func dirBusy(dir string) (bool, error) {
 		return false, err
 	}
 	for _, e := range ents {
-		switch e.Name() {
-		case ".DS_Store", ".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems":
+		// Task dirs never start with a dot; dot-entries are file system
+		// litter (.DS_Store, .fseventsd, ...) or the agent's own (the mise
+		// download cache), which the mount may hide.
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		return true, nil

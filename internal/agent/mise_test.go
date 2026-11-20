@@ -190,7 +190,7 @@ func TestMiseConfigNormalize(t *testing.T) {
 	if got := c.Runtimes[MiseRuntime]; len(got) != 1 || got[0] != "/opt/homebrew/bin/mise" {
 		t.Errorf("runtime mise = %v", got)
 	}
-	if c.Mise.CacheDir != "/usr/local/var/umm/mise-cache" || c.Mise.MaxCacheBytes != 2<<30 || !c.Mise.Locked() ||
+	if c.Mise.CacheDir != "/usr/local/var/umm/work/.mise-cache" || c.Mise.MaxCacheBytes != 2<<30 || !c.Mise.Locked() ||
 		strings.Join(c.Mise.AllowTools, ",") != "core:*,aqua:*" {
 		t.Errorf("defaults: %+v", c.Mise)
 	}
@@ -231,9 +231,12 @@ func TestMiseConfigNormalize(t *testing.T) {
 		{"bad command", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, Commands: []string{"/bin/sh"}}
 		}, "bare program name"},
-		{"cache in work dir", func(c *Config) {
+		{"cache where a task dir could be", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, CacheDir: "/usr/local/var/umm/work/cache"}
-		}, "inside work_dir"},
+		}, "a dot-directory"},
+		{"cache is the work dir", func(c *Config) {
+			c.Mise = MiseConfig{Enabled: true, CacheDir: "/usr/local/var/umm/work"}
+		}, "a dot-directory"},
 		{"relative cache", func(c *Config) {
 			c.Mise = MiseConfig{Enabled: true, CacheDir: "cache"}
 		}, "absolute"},
@@ -417,5 +420,31 @@ func TestMiseInstallFault(t *testing.T) {
 		if why := MiseInstallFault(out); why != "" {
 			t.Errorf("Mac fault %q for: %s", why, out)
 		}
+	}
+}
+
+// The download cache lives on the work volume (inside its quota) in a
+// dot-directory: kept at startup and not counted as the tasks' own use.
+func TestMiseCacheOnWorkVolume(t *testing.T) {
+	work := t.TempDir()
+	cache := filepath.Join(work, ".mise-cache", "downloads-cas")
+	task := filepath.Join(work, "tsk_1-1")
+	for _, d := range []string{cache, task} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(cache, "blob"), make([]byte, 1000), 0o600)
+	os.WriteFile(filepath.Join(task, "out"), make([]byte, 10), 0o600)
+	a := &Agent{cfg: &Config{WorkDir: work}}
+	if got := a.workUsed(); got != 10 {
+		t.Errorf("workUsed = %d, want 10 (the cache is not a task's)", got)
+	}
+	a.cleanStaleWorkDirs()
+	if _, err := os.Stat(filepath.Join(cache, "blob")); err != nil {
+		t.Errorf("cache removed at startup: %v", err)
+	}
+	if _, err := os.Stat(task); !os.IsNotExist(err) {
+		t.Errorf("stale task dir kept: %v", err)
 	}
 }

@@ -60,8 +60,8 @@ type MiseConfig struct {
 	// shared between tasks.
 	RequireLockfile *bool `yaml:"require_lockfile"`
 	// CacheDir holds mise's download cache, shared by tasks (only with
-	// require_lockfile). Default: mise-cache next to work_dir, e.g.
-	// /usr/local/var/umm/mise-cache.
+	// require_lockfile). Default: .mise-cache in work_dir, on the work
+	// volume, so it counts against its quota and work space.
 	CacheDir string `yaml:"cache_dir"`
 	// MaxCache caps the download cache; mise drops the least recently
 	// used downloads first. Default 2GiB.
@@ -88,9 +88,8 @@ var (
 	miseCommandRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
 )
 
-// normalize validates the block and fills defaults. agentDir is the work
-// dir's parent.
-func (m *MiseConfig) normalize(agentDir string) error {
+// normalize validates the block and fills defaults.
+func (m *MiseConfig) normalize(workDir string) error {
 	if !m.Enabled {
 		return nil
 	}
@@ -122,7 +121,7 @@ func (m *MiseConfig) normalize(agentDir string) error {
 		}
 	}
 	if m.CacheDir == "" {
-		m.CacheDir = path.Join(agentDir, "mise-cache")
+		m.CacheDir = path.Join(workDir, ".mise-cache")
 	}
 	if !strings.HasPrefix(m.CacheDir, "/") && !filepath.IsAbs(m.CacheDir) {
 		return errors.New("mise.cache_dir must be absolute")

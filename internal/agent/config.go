@@ -275,7 +275,7 @@ func (c *Config) Normalize() error {
 		c.MaxTasksLimit = c.MaxTasks
 	}
 	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
-	if err := c.Mise.normalize(agentDir); err != nil {
+	if err := c.Mise.normalize(path.Clean(filepath.ToSlash(c.WorkDir))); err != nil {
 		return err
 	}
 	// The runtime name mise belongs to mise toolchains, which only run
@@ -285,9 +285,12 @@ func (c *Config) Normalize() error {
 			"(or publish mise as a managed runtime) instead of a runtimes entry")
 	}
 	if c.Mise.Enabled {
-		if d := path.Clean(filepath.ToSlash(c.Mise.CacheDir)); d == path.Clean(filepath.ToSlash(c.WorkDir)) ||
-			strings.HasPrefix(d, path.Clean(filepath.ToSlash(c.WorkDir))+"/") {
-			return errors.New("mise.cache_dir must not be inside work_dir (it is emptied at startup)")
+		// Inside work_dir only as a dot-directory directly in it: task dirs
+		// are the other entries, and startup empties those.
+		wd := path.Clean(filepath.ToSlash(c.WorkDir))
+		if d := path.Clean(filepath.ToSlash(c.Mise.CacheDir)); d == wd ||
+			(strings.HasPrefix(d, wd+"/") && !strings.HasPrefix(strings.TrimPrefix(d, wd+"/"), ".")) {
+			return errors.New("mise.cache_dir inside work_dir must be a dot-directory in it, e.g. " + wd + "/.mise-cache")
 		}
 		if c.Mise.Binary != "" {
 			if c.Runtimes == nil {

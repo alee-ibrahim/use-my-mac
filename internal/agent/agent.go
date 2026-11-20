@@ -376,7 +376,8 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) cleanStaleWorkDirs() {
 	entries, _ := os.ReadDir(a.cfg.WorkDir)
 	for _, e := range entries {
-		if e.IsDir() {
+		// Dot-directories are not task dirs (the mise download cache).
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
 			_ = os.RemoveAll(filepath.Join(a.cfg.WorkDir, e.Name()))
 		}
 	}
