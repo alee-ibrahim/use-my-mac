@@ -115,6 +115,10 @@ type Config struct {
 	// ManagedRuntimes lets the agent install signed runtime packages from
 	// the router's catalog by itself when a task needs one.
 	ManagedRuntimes ManagedRuntimesConfig `yaml:"managed_runtimes"`
+
+	// Mise lets tasks bring a pinned toolchain (runtime "mise"). Off by
+	// default; see mise.go.
+	Mise MiseConfig `yaml:"mise"`
 }
 
 // WorkVolumeConfig configures the dedicated work volume.
@@ -270,6 +274,31 @@ func (c *Config) Normalize() error {
 	if c.MaxTasksLimit < c.MaxTasks {
 		c.MaxTasksLimit = c.MaxTasks
 	}
+	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
+	if err := c.Mise.normalize(path.Clean(filepath.ToSlash(c.WorkDir))); err != nil {
+		return err
+	}
+	// The runtime name mise belongs to mise toolchains, which only run
+	// through the protected path (mise_run.go): never as a plain runtime.
+	if rt, ok := c.Runtimes[MiseRuntime]; ok && !(c.Mise.Enabled && len(rt) == 1 && rt[0] == c.Mise.Binary) {
+		return errors.New("the runtime name mise is reserved for mise toolchains: set mise.enabled and mise.binary " +
+			"(or publish mise as a managed runtime) instead of a runtimes entry")
+	}
+	if c.Mise.Enabled {
+		// Inside work_dir only as a dot-directory directly in it: task dirs
+		// are the other entries, and startup empties those.
+		wd := path.Clean(filepath.ToSlash(c.WorkDir))
+		if d := path.Clean(filepath.ToSlash(c.Mise.CacheDir)); d == wd ||
+			(strings.HasPrefix(d, wd+"/") && !strings.HasPrefix(strings.TrimPrefix(d, wd+"/"), ".")) {
+			return errors.New("mise.cache_dir inside work_dir must be a dot-directory in it, e.g. " + wd + "/.mise-cache")
+		}
+		if c.Mise.Binary != "" {
+			if c.Runtimes == nil {
+				c.Runtimes = map[string][]string{}
+			}
+			c.Runtimes[MiseRuntime] = []string{c.Mise.Binary}
+		}
+	}
 	if len(c.Runtimes) == 0 && !c.ManagedRuntimes.On() {
 		return errors.New("at least one runtime must be allowlisted (or managed_runtimes enabled)")
 	}
@@ -364,7 +393,6 @@ func (c *Config) Normalize() error {
 		c.Update.VerifyTimeout = 2 * time.Minute
 	}
 	mr := &c.ManagedRuntimes
-	agentDir := path.Dir(path.Clean(filepath.ToSlash(c.WorkDir)))
 	if mr.Dir == "" {
 		mr.Dir = path.Join(path.Dir(agentDir), "umm-runtimes")
 	}
@@ -474,6 +502,7 @@ func (c *Config) HostPrep(stateDir string) (hostprep.Config, error) {
 			Reserve: c.Reserve()},
 		Network:    hostprep.NetworkConfig{Mode: c.TaskNetwork, Allow: allow},
 		StatusFile: c.HostStatusFile, StateDir: stateDir,
+		Keep: nonEmpty(c.miseCacheEntry()),
 	}, nil
 }
 
@@ -517,4 +546,27 @@ func (c *Config) LoadCredential() (string, error) {
 		return "", fmt.Errorf("read credential: %w (run `umm-agent enrol` first)", err)
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// miseCacheEntry is the name of the mise download cache's directory when
+// it lives directly in the work dir ("" otherwise): the one entry there
+// that is not a task's and stays between tasks.
+func (c *Config) miseCacheEntry() string {
+	if !c.Mise.Enabled || c.Mise.CacheDir == "" {
+		return ""
+	}
+	if filepath.Dir(filepath.Clean(c.Mise.CacheDir)) != filepath.Clean(c.WorkDir) {
+		return ""
+	}
+	return filepath.Base(c.Mise.CacheDir)
+}
+
+func nonEmpty(s ...string) []string {
+	var out []string
+	for _, v := range s {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

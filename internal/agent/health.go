@@ -146,10 +146,14 @@ func systemVolume() string {
 	return "/"
 }
 
-// workUsed sums the sizes of files under the running tasks' work dirs.
+// workUsed sums the sizes of files under the running tasks' work dirs. The
+// mise download cache stays when tasks end, so it is not counted.
 func (a *Agent) workUsed() uint64 {
 	var n uint64
-	_ = filepath.WalkDir(a.cfg.WorkDir, func(_ string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(a.cfg.WorkDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && filepath.Dir(p) == filepath.Clean(a.cfg.WorkDir) && d.Name() == a.cfg.miseCacheEntry() {
+			return filepath.SkipDir
+		}
 		if err == nil && d.Type().IsRegular() {
 			if fi, err := d.Info(); err == nil {
 				n += uint64(fi.Size())

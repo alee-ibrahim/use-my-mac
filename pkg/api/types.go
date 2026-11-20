@@ -740,6 +740,10 @@ type TaskUpdate struct {
 	// router treats it like RuntimeUnavailable (attempt "unavailable", no
 	// failure counted) without marking a runtime unavailable.
 	MacFault string `json:"mac_fault,omitempty"`
+	// ProgramExit: ExitCode is the task program's own, checked before it
+	// ran (a mise toolchain's program), not a launcher's, so a 127 is the
+	// task's and not a runtime fault.
+	ProgramExit bool `json:"program_exit,omitempty"`
 }
 
 // LogChunk is a piece of a task's stdout/stderr.

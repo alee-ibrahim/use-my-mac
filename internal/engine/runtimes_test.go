@@ -204,6 +204,8 @@ func TestMacFaultClassification(t *testing.T) {
 		runtime bool
 	}{
 		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(127)}, true, true},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(127), ProgramExit: true}, false, false},
+		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(127), ProgramExit: true, RuntimeUnavailable: "gone"}, true, true},
 		{api.TaskUpdate{Outcome: api.OutcomeFailed, RuntimeUnavailable: "program not found: /x"}, true, true},
 		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(1)}, false, false},
 		{api.TaskUpdate{Outcome: api.OutcomeFailed, ExitCode: ip(126)}, false, false},

@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/alee-ibrahim/use-my-mac/internal/runtimes"
@@ -100,6 +104,14 @@ func (a *Agent) preflightLocked(now time.Time) {
 	}
 	ready := map[string][]string{}
 	for _, n := range names {
+		if n == MiseRuntime && !a.cfg.Mise.Enabled {
+			// A managed package may provide a mise command, but the name is
+			// reserved for mise toolchains, which are off here.
+			delete(a.faults, n)
+			unavail = append(unavail, api.UnavailableRuntime{Name: n, Reason: miseOffReason,
+				Source: api.RuntimeSourcePreflight, Since: &now})
+			continue
+		}
 		var prog, why, source string
 		if argv, ok := a.runtimes[n]; ok {
 			prog = argv[0]
@@ -117,6 +129,9 @@ func (a *Agent) preflightLocked(now time.Time) {
 			case ms.Unavailable[n] != "":
 				prog, why, source = "", ms.Unavailable[n], api.RuntimeSourceInstall
 			}
+		}
+		if why == "" && n == MiseRuntime && prog != "" {
+			why = a.miseCheckLocked(prog)
 		}
 		if why != "" {
 			delete(a.faults, n) // the preflight reason supersedes it
@@ -235,6 +250,9 @@ func (a *Agent) markExecFault(name, reason string) {
 func (a *Agent) runtimeFor(name string) (argv []string, install string, why string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if name == MiseRuntime && !a.cfg.Mise.Enabled {
+		return nil, "", "runtime mise unavailable on this Mac: " + miseOffReason
+	}
 	if u, bad := a.unavail[name]; bad {
 		return nil, "", "runtime " + name + " unavailable on this Mac: " + u.Reason
 	}
@@ -286,6 +304,62 @@ func execFailureReason(prog string, startErr error, exitCode int) string {
 		if why := CheckProgram(prog); why != "" {
 			return why
 		}
+	}
+	return ""
+}
+
+// miseCheck caches the mise binary's version check by its file stamp.
+type miseCheck struct {
+	stamp, why string
+	running    bool // a `mise --version` is in flight
+}
+
+// miseCheckLocked says why the mise binary prog cannot be used ("" = it
+// can): mise.binary must not be writable by the agent's user (a managed
+// runtime is checked by its own machinery), and its version must be one
+// in mise.versions. `mise --version` runs only when the file changed, in
+// the background without a.mu; until it answers, mise is unavailable
+// ("checking"), and the answer triggers a new preflight. Caller holds a.mu.
+func (a *Agent) miseCheckLocked(prog string) string {
+	if prog == a.cfg.Mise.Binary {
+		if why := miseBinaryWritable(prog); why != "" {
+			return why
+		}
+	}
+	stamp := prog + "|" + progStamp(prog)
+	if a.miseChecked.stamp == stamp && !a.miseChecked.running {
+		return a.miseChecked.why
+	}
+	if !a.miseChecked.running {
+		a.miseChecked = miseCheck{stamp: stamp, running: true}
+		versions := append([]string(nil), a.cfg.Mise.Versions...)
+		go func() {
+			why := miseVersionCheck(prog, versions)
+			a.mu.Lock()
+			a.miseChecked = miseCheck{stamp: stamp, why: why}
+			a.preflightLocked(time.Now())
+			a.mu.Unlock()
+		}()
+	}
+	return "checking the mise version"
+}
+
+// miseVersionCheck runs `prog --version` and says why that version is not
+// accepted ("" = it is).
+func miseVersionCheck(prog string, versions []string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, prog, "--version").Output()
+	if err != nil {
+		return "mise --version: " + err.Error()
+	}
+	v, err := ParseMiseVersion(out)
+	if err != nil {
+		return err.Error()
+	}
+	if !slices.Contains(versions, v) {
+		return "mise " + v + " is not a version this agent was tested with (mise.versions: " +
+			strings.Join(versions, ", ") + ")"
 	}
 	return ""
 }

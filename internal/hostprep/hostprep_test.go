@@ -255,8 +255,19 @@ func TestVolumeFallbacks(t *testing.T) {
 	if st.WorkVolume.State != VolumeSystem || !strings.Contains(st.WorkVolume.Reason, "in use") || f.called("diskutil mount") != 0 {
 		t.Fatalf("busy work dir must not be mounted over: %+v %v", st.WorkVolume, f.calls)
 	}
-	// Auto-mounted elsewhere: moved to the work dir once it is idle.
+	// Any other entry, even a dot-directory a task left, blocks the mount.
 	os.Remove(filepath.Join(cfg.WorkDir, "task-1"))
+	os.Mkdir(filepath.Join(cfg.WorkDir, ".left-by-a-task"), 0o700)
+	if st = Prepare(context.Background(), cfg, h); f.called("diskutil mount") != 0 {
+		t.Fatalf("a dot-dir must block the mount: %+v", st.WorkVolume)
+	}
+	os.Remove(filepath.Join(cfg.WorkDir, ".left-by-a-task"))
+	// Auto-mounted elsewhere: moved to the work dir once it is idle. The
+	// agent's own entry there (its mise download cache, in Keep) and file
+	// system litter do not block the mount.
+	cfg.Keep = []string{".mise-cache"}
+	os.MkdirAll(filepath.Join(cfg.WorkDir, ".mise-cache", "downloads-cas"), 0o700)
+	os.WriteFile(filepath.Join(cfg.WorkDir, ".DS_Store"), nil, 0o600)
 	f.mountedAt = "/Volumes/umm-work"
 	st = Prepare(context.Background(), cfg, h)
 	if st.WorkVolume.State != VolumeDedicated || f.called("diskutil unmount disk3s7") != 1 || f.mountedAt != cfg.WorkDir ||

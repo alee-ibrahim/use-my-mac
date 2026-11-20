@@ -127,9 +127,10 @@ type env struct {
 }
 
 type fakeMac struct {
-	name string
-	tel  atomic.Pointer[api.Telemetry]
-	id   string
+	name    string
+	workDir string // the agent's work_dir
+	tel     atomic.Pointer[api.Telemetry]
+	id      string
 }
 
 func (f *fakeMac) set(mut func(*api.Telemetry)) {
@@ -151,12 +152,22 @@ func activeTel() api.Telemetry {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	return newEnvWith(t, nil)
+	return newEnvFull(t, nil, nil)
 }
 
 // newEnvWith uses the blob backend mk returns (nil: local storage served by
 // the router at routerURL).
 func newEnvWith(t *testing.T, mk func(routerURL string) storage.Backend) *env {
+	return newEnvFull(t, mk, nil)
+}
+
+// newEnvCfg is newEnv with a hook to adjust the router's config.
+func newEnvCfg(t *testing.T, mut func(*engine.Config)) *env {
+	return newEnvFull(t, nil, mut)
+}
+
+// newEnvFull takes both: a blob backend (nil: local storage) and a config hook (nil: defaults).
+func newEnvFull(t *testing.T, mk func(routerURL string) storage.Backend, mut func(*engine.Config)) *env {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	st, err := store.Open(ctx, "sqlite://"+t.TempDir()+"/umm.db")
@@ -176,6 +187,9 @@ func newEnvWith(t *testing.T, mk func(routerURL string) storage.Backend) *env {
 	cfg.HeartbeatTimeout = 2 * time.Second
 	cfg.AssignTimeout = 5 * time.Second
 	cfg.BackoffBase = 100 * time.Millisecond
+	if mut != nil {
+		mut(&cfg)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	m := metrics.New()
 	eng, err := engine.New(ctx, engine.Options{Store: st, Blobs: blobs, Config: cfg, Metrics: m, Logger: logger.With("c", "router")})
@@ -248,6 +262,7 @@ func (e *env) macCfg(name string, maxTasks int, tel api.Telemetry, extra map[str
 	if err := cfg.Normalize(); err != nil {
 		e.t.Fatal(err)
 	}
+	f.workDir = cfg.WorkDir
 	tok, err := e.admin.CreateEnrolmentToken(e.ctx, 1)
 	if err != nil {
 		e.t.Fatal(err)

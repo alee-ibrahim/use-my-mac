@@ -73,6 +73,7 @@ type Agent struct {
 	faults        map[string]execFault
 	preflightID   int64
 	lastPreflight time.Time
+	miseChecked   miseCheck
 
 	// Mac health (see health.go).
 	health    healthState
@@ -376,7 +377,8 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) cleanStaleWorkDirs() {
 	entries, _ := os.ReadDir(a.cfg.WorkDir)
 	for _, e := range entries {
-		if e.IsDir() {
+		// The mise download cache is the only thing kept between tasks.
+		if e.IsDir() && e.Name() != a.cfg.miseCacheEntry() {
 			_ = os.RemoveAll(filepath.Join(a.cfg.WorkDir, e.Name()))
 		}
 	}
@@ -734,6 +736,8 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		upd.Outcome, upd.Error, upd.RuntimeUnavailable = api.OutcomeFailed, why, why
 		return upd
 	}
+	// A mise task brings its own toolchain (see mise.go).
+	useMise := as.Runtime == MiseRuntime // runtimeFor refused it unless mise.enabled
 	workdir := filepath.Join(a.cfg.WorkDir, fmt.Sprintf("%s-%d", as.TaskID, as.Attempt))
 	defer os.RemoveAll(workdir)
 	for _, d := range []string{"in", "out", "tmp"} {
@@ -755,6 +759,9 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		return upd
 	}
 	env, err := TaskEnv(workdir, as.TaskID, as.Attempt, a.cfg.TaskEnv, as.Env)
+	if err == nil && useMise {
+		err = CheckMiseTaskEnv(as.Env)
+	}
 	if err != nil {
 		upd.Outcome, upd.Error = api.OutcomeFailed, err.Error()
 		return upd
@@ -819,22 +826,33 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 		stop()
 		prog.flush(true)
 	}
-	prog.phase(api.PhaseRunning)
-	prog.flush(true)
 
-	// Run.
+	// The attempt's timeout covers installing a mise toolchain too.
 	timeout := time.Duration(as.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = time.Hour
 	}
-	runCtx, cancelRun := context.WithTimeout(ctx, timeout)
+	deadline := time.Now().Add(timeout)
+	parserArgv := prefix
+	if useMise {
+		mr, fail := a.prepareMise(ctx, r, deadline, workdir, prefix, args, env, logs, upd)
+		if fail != nil {
+			return *fail
+		}
+		prefix, args, env, parserArgv = mr.prefix, mr.args, mr.env, []string{mr.prog}
+	}
+	prog.phase(api.PhaseRunning)
+	prog.flush(true)
+
+	// Run.
+	runCtx, cancelRun := context.WithDeadline(ctx, deadline)
 	defer cancelRun()
 	qos := a.currentQoS()
 	argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, qos), prefix, args)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = workdir
 	cmd.Env = env
-	tap := &progressTap{p: a.cfg.parserFor(as.Runtime, prefix), report: prog.percent}
+	tap := &progressTap{p: a.cfg.parserFor(as.Runtime, parserArgv), report: prog.percent}
 	full := &diskFullTap{}
 	out := io.MultiWriter(logs, tap, full)
 	cmd.Stdout, cmd.Stderr = out, out
@@ -874,7 +892,15 @@ func (a *Agent) execute(ctx context.Context, r *run) api.TaskUpdate {
 			// fault, it may fit elsewhere.
 			upd.MacFault = "task ran out of disk space on this Mac (" + werr.Error() + ")"
 		}
-		if upd.ExitCode != nil {
+		if upd.ExitCode != nil && useMise {
+			// mise ran the task's own program, which the agent resolved
+			// before: exit 127 is the task's, unless mise itself is gone.
+			upd.ProgramExit = true
+			if why := CheckProgram(prefix[0]); why != "" {
+				upd.RuntimeUnavailable = why
+				a.markExecFault(as.Runtime, why)
+			}
+		} else if upd.ExitCode != nil {
 			if why := execFailureReason(prefix[0], nil, *upd.ExitCode); why != "" {
 				upd.RuntimeUnavailable = why
 				a.markExecFault(as.Runtime, why)

@@ -21,6 +21,16 @@ docker run -d --rm -p 5432:5432 -e POSTGRES_PASSWORD=dev postgres:17-alpine
 UMM_TEST_POSTGRES_URL='postgres://postgres:dev@localhost:5432/postgres?sslmode=disable' go test ./internal/store/
 ```
 
+The mise toolchain tests use the real mise when it is installed (`UMM_TEST_MISE_BIN` or `mise` on
+`PATH`); `UMM_TEST_MISE=1` adds a real locked install, which downloads a small tool from github.com:
+
+```sh
+UMM_TEST_MISE=1 go test -run TestMise ./internal/integration/
+```
+
+The `macos-mise` workflow runs them on an Apple Silicon runner as a hidden non-admin user, like `_umm`
+(on changes to the agent, or by hand from the Actions tab).
+
 ## Ground rules
 
 - **Keep the core generic.** No workload-specific code in `internal/`. Put workload helpers in `examples/`.
