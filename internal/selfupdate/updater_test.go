@@ -87,6 +87,21 @@ type fakeService struct {
 	r        *fakeRouter
 	bin      string
 	restarts int
+	// jobs is what Jobs returns; reloads records Reregister calls.
+	jobs    []Job
+	reloads []string
+}
+
+func (s *fakeService) Jobs(context.Context) ([]Job, error) { return append([]Job(nil), s.jobs...), nil }
+
+func (s *fakeService) Reregister(_ context.Context, j Job) error {
+	s.reloads = append(s.reloads, j.Role)
+	for i := range s.jobs {
+		if s.jobs[i].Label == j.Label {
+			s.jobs[i].Stale, s.jobs[i].Why = false, ""
+		}
+	}
+	return nil
 }
 
 func (s *fakeService) Restart(context.Context) error {
@@ -400,4 +415,101 @@ func TestUpdaterPausedAndRouterDown(t *testing.T) {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+func healthyJobs() []Job {
+	return []Job{
+		{Role: JobAgent, Label: "l", Loaded: true, Running: true, State: "running"},
+		{Role: JobUpdater, Label: "l.updater", Loaded: true, Running: true, State: "running"},
+		{Role: JobRuntimes, Label: "l.runtimes", Loaded: true, State: "not running"},
+	}
+}
+
+func TestUpdaterReregistersJobsAfterSwap(t *testing.T) {
+	h := newHarness(t, "v0.1.0")
+	h.target("v0.2.0", false)
+	h.svc.jobs = healthyJobs()
+	if res := h.run(); res.Action != "installed" {
+		t.Fatalf("%+v", res)
+	}
+	// The agent through Restart; the helper at once; the updater's own job
+	// last, handed to a detached process when the run ends.
+	if got := strings.Join(h.svc.reloads, ","); got != "runtimes,updater" {
+		t.Fatalf("reloads %s", got)
+	}
+	if h.svc.restarts != 1 {
+		t.Fatalf("restarts %d", h.svc.restarts)
+	}
+	// A busy runtimes helper is left for the next cycle.
+	h = newHarness(t, "v0.1.0")
+	h.target("v0.2.0", false)
+	h.svc.jobs = healthyJobs()
+	h.svc.jobs[2].Running = true
+	h.run()
+	if got := strings.Join(h.svc.reloads, ","); got != "updater" {
+		t.Fatalf("reloads %s", got)
+	}
+	// Next cycle (the reloaded updater, RunAtLoad): nothing stale, nothing done.
+	h.svc.reloads = nil
+	if res := h.run(); res.Action != "nothing" || len(h.svc.reloads) != 0 {
+		t.Fatalf("%+v reloads %v", res, h.svc.reloads)
+	}
+}
+
+func TestUpdaterHealsStaleJobs(t *testing.T) {
+	h := newHarness(t, "v0.2.0")
+	h.target("v0.2.0", false)
+	h.svc.jobs = healthyJobs()
+	// The state seen in the field: the updater's job pinned to the old
+	// cdhash (here it runs, e.g. after a reboot), the helper too.
+	h.svc.jobs[1].Stale, h.svc.jobs[1].Why = true, "launchd: needs LWCR update"
+	h.svc.jobs[2].Stale, h.svc.jobs[2].Why = true, "launch constraint pins another cdhash"
+	// The agent's job too, but it is running tasks: left alone for now.
+	h.svc.jobs[0].Stale, h.svc.jobs[0].Why = true, "launchd: needs LWCR update"
+	h.r.agent.Running, h.r.runningFor = 1, -1
+	if res := h.run(); res.Action != "nothing" {
+		t.Fatalf("%+v", res)
+	}
+	if got := strings.Join(h.svc.reloads, ","); got != "runtimes,updater" {
+		t.Fatalf("reloads %s", got)
+	}
+	st := h.r.states()
+	if len(st) == 0 || st[0] != api.UpdateRepaired || !strings.Contains(h.r.reports[0].Message, "l.updater") {
+		t.Fatalf("reports %v %+v", st, h.r.reports)
+	}
+	// Tasks done: the agent's job is reloaded on the next cycle.
+	h.r.agent.Running = 0
+	h.svc.reloads = nil
+	h.run()
+	if got := strings.Join(h.svc.reloads, ","); got != "agent" {
+		t.Fatalf("reloads %s", got)
+	}
+	// A job that stays stale is not reloaded again within the hour.
+	h.svc.jobs[1].Stale = true
+	h.svc.reloads = nil
+	h.run()
+	if len(h.svc.reloads) != 0 {
+		t.Fatalf("reloaded again at once: %v", h.svc.reloads)
+	}
+	h.clock = h.clock.Add(2 * time.Hour)
+	h.run()
+	if got := strings.Join(h.svc.reloads, ","); got != "updater" {
+		t.Fatalf("reloads after an hour %s", got)
+	}
+	// An agent job that is not loaded (failed bootstrap) is loaded again.
+	h.svc.jobs[0] = Job{Role: JobAgent, Label: "l", Stale: true, Why: "not loaded"}
+	h.svc.reloads = nil
+	h.run()
+	if got := strings.Join(h.svc.reloads, ","); got != "agent" {
+		t.Fatalf("reloads %s", got)
+	}
+	// Dry runs change nothing.
+	h.svc.jobs[2].Stale = true
+	h.clock = h.clock.Add(2 * time.Hour)
+	h.svc.reloads = nil
+	h.u.DryRun = true
+	h.run()
+	if len(h.svc.reloads) != 0 {
+		t.Fatalf("dry run reloaded %v", h.svc.reloads)
+	}
 }

@@ -957,6 +957,9 @@ const (
 	UpdateRolledBack  = "rolled_back"
 	UpdateFailed      = "failed"
 	UpdateRefused     = "refused"
+	// UpdateRepaired: the updater re-registered launchd jobs whose launch
+	// constraint had gone stale (the message names them).
+	UpdateRepaired = "repaired"
 )
 
 // UpdateReport is sent by the updater on every state change.
@@ -977,6 +980,10 @@ type MacUpdate struct {
 	CheckedAt   *time.Time `json:"checked_at,omitempty"`
 	// Desired is the version the router currently wants on this Mac.
 	Desired string `json:"desired,omitempty"`
+	// Warning is set by the router when something is wrong with the
+	// updater itself, e.g. "updater not running": the Mac heartbeats but its
+	// updater has not checked in for more than 3 check intervals.
+	Warning string `json:"warning,omitempty"`
 }
 
 // UpdateEvent is one entry of a Mac's update history.

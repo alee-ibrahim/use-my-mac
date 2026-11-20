@@ -247,6 +247,9 @@ export function MacDetailPage({ id, admin }: { id: string; admin: boolean }) {
                 ? `Updater checked ${since(m.update.checked_at)}`
                 : "Updater has not checked in"}
             </span>
+            {m?.update?.warning && (
+              <span className="text-destructive">{m.update.warning}</span>
+            )}
             <span className="flex flex-wrap items-center gap-1">
               Runtimes: {m ? <RuntimeBadges m={m} /> : "–"}
             </span>
