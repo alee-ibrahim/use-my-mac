@@ -15,3 +15,5 @@ func Lock(dir string) (func(), error) {
 	}
 	return func() {}, nil
 }
+
+func detachShell(string) error { return errNoDetach }

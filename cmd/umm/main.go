@@ -392,7 +392,7 @@ func listMacs(ctx context.Context, c *client.Client) error {
 	}
 	w := tw()
 	fmt.Fprintln(w, "MAC\tNAME\tSTATE\tUSER\tIDLE\tUSER CPU\tOUR CPU\tGPU\tMEM FREE\tPOWER\tTHERMAL\tRUNNING\tRUNTIMES\tUNAVAILABLE\tFLAGS")
-	var missing []string
+	var missing, warns []string
 	for _, m := range ms {
 		t := m.Telemetry
 		if t == nil {
@@ -420,6 +420,14 @@ func listMacs(ctx context.Context, c *client.Client) error {
 		if m.Quarantined != nil {
 			flags = append(flags, "quarantined")
 		}
+		if m.Update != nil && m.Update.Warning != "" {
+			flags = append(flags, "updater-not-running")
+			warns = append(warns, fmt.Sprintf("  %s\t%s", m.Name, m.Update.Warning))
+		}
+		if m.Update != nil && m.Update.Warning != "" {
+			flags = append(flags, "updater-not-running")
+			missing = append(missing, fmt.Sprintf("  %s	-	%s", m.Name, m.Update.Warning))
+		}
 		if r := m.Reservation; r != nil {
 			who := "others"
 			if r.Mine {
@@ -443,6 +451,16 @@ func listMacs(ctx context.Context, c *client.Client) error {
 	}
 	if err := w.Flush(); err != nil {
 		return err
+	}
+	if len(warns) > 0 {
+		fmt.Println("\nUpdater warnings:")
+		w = tw()
+		for _, l := range warns {
+			fmt.Fprintln(w, l)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
 	}
 	if len(missing) == 0 {
 		return nil

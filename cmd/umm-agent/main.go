@@ -322,7 +322,7 @@ func update(path, label, bin, stateDir string, jitter time.Duration, dryRun, ver
 	}
 	u := &selfupdate.Updater{
 		Router: router, Sources: sources, PublicKey: pub,
-		Service: selfupdate.Launchctl{Label: label, Plist: "/Library/LaunchDaemons/" + label + ".plist"},
+		Service: selfupdate.Launchctl{Label: label, Plist: "/Library/LaunchDaemons/" + label + ".plist", Bin: bin},
 		BinPath: bin, StateDir: stateDir, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
 		VerifyTimeout: cfg.Update.VerifyTimeout, DryRun: dryRun, Log: log,
 	}

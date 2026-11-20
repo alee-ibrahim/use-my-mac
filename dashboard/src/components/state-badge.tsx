@@ -29,6 +29,7 @@ const variants: Record<
   applying: "secondary",
   rolled_back: "destructive",
   refused: "destructive",
+  repaired: "secondary",
   // install links
   active: "default",
   used: "secondary",

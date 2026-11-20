@@ -124,6 +124,14 @@ export function VersionLine({ m }: { m: Mac }) {
       {u?.state && !["up_to_date", "succeeded"].includes(u.state) && (
         <StateBadge state={u.state} />
       )}
+      {u?.warning && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="destructive">updater not running</Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-80">{u.warning}</TooltipContent>
+        </Tooltip>
+      )}
     </span>
   )
 }

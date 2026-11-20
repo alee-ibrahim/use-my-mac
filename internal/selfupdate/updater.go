@@ -32,11 +32,6 @@ type Source struct {
 	RelayOnly bool
 }
 
-// Service restarts the agent's LaunchDaemon.
-type Service interface {
-	Restart(ctx context.Context) error
-}
-
 // Updater performs one update cycle. It runs as root.
 type Updater struct {
 	Router    RouterClient
@@ -63,6 +58,10 @@ type Updater struct {
 	// DryRun downloads and verifies but does not install.
 	DryRun bool
 	Log    *slog.Logger
+
+	// selfJob is set when this run should reload the updater's own job
+	// once it exits (see Service.Reregister).
+	selfJob *Job
 }
 
 // Result summarises a cycle (for logs and tests).
@@ -90,7 +89,13 @@ type updaterState struct {
 	Pending    *pendingUpdate     `json:"pending,omitempty"`
 	Failed     map[string]failure `json:"failed,omitempty"`
 	LastReport string             `json:"last_report,omitempty"`
+	// Reloaded: when the updater last re-registered each launchd job, so
+	// a job whose constraint stays stale is not reloaded every cycle.
+	Reloaded map[string]time.Time `json:"reloaded,omitempty"`
 }
+
+// reloadEvery limits how often one job is re-registered by the self-heal.
+const reloadEvery = time.Hour
 
 func (u *Updater) defaults() {
 	if u.Now == nil {
@@ -147,6 +152,9 @@ func (u *Updater) load() updaterState {
 	if st.Failed == nil {
 		st.Failed = map[string]failure{}
 	}
+	if st.Reloaded == nil {
+		st.Reloaded = map[string]time.Time{}
+	}
 	return st
 }
 
@@ -189,7 +197,9 @@ func (u *Updater) RunOnce(ctx context.Context) (Result, error) {
 		return Result{Action: "failed"}, err
 	}
 	st := u.load()
+	u.selfJob = nil
 	defer func() {
+		u.reloadSelf(ctx)
 		if err := u.save(st); err != nil {
 			u.Log.Warn("save updater state", "err", err)
 		}
@@ -206,6 +216,9 @@ func (u *Updater) RunOnce(ctx context.Context) (Result, error) {
 	check, err := u.Router.Check(ctx)
 	if err != nil {
 		return Result{Action: "failed"}, fmt.Errorf("router check: %w", err)
+	}
+	if !u.DryRun {
+		u.heal(ctx, &st, check)
 	}
 	if _, err := os.Stat(u.BinPath); err != nil {
 		return Result{Action: "failed"}, fmt.Errorf("agent binary: %w", err)
@@ -391,10 +404,11 @@ func (u *Updater) apply(ctx context.Context, st *updaterState, current, target s
 		st.Pending = nil
 		return fail("install binary: "+err.Error(), err)
 	}
-	u.Log.Info("installed new agent binary; restarting", "version", target)
+	u.Log.Info("installed new agent binary; re-registering its launchd jobs", "version", target)
 	if err := u.Service.Restart(ctx); err != nil {
 		u.Log.Warn("restart failed", "err", err)
 	}
+	u.refreshJobs(ctx, st)
 	if u.waitFor(ctx, target, routerNow) {
 		st.Pending = nil
 		delete(st.Failed, target)
@@ -451,6 +465,7 @@ func (u *Updater) rollback(ctx context.Context, st *updaterState, from, to strin
 	if err := u.Service.Restart(ctx); err != nil {
 		u.Log.Warn("restart after rollback failed", "err", err)
 	}
+	u.refreshJobs(ctx, st)
 	back := u.waitFor(ctx, from, routerNow)
 	msg := fmt.Sprintf("%s did not heartbeat within %s; restored %s", to, u.VerifyTimeout, from)
 	if !back {
@@ -482,6 +497,102 @@ func (u *Updater) resume(ctx context.Context, st *updaterState) (Result, bool) {
 	}
 	res, _ := u.rollback(ctx, st, p.From, p.To, nil)
 	return res, true
+}
+
+// ---------------------------------------------------------------------------
+// launchd jobs
+// ---------------------------------------------------------------------------
+
+// refreshJobs runs after the binary was replaced (the agent's job is
+// re-registered by Restart): it re-registers the runtimes helper (unless a
+// pass is running; the next cycle's heal catches it) and schedules the
+// reload of the updater's own job for when this run exits. Otherwise
+// launchd may keep a launch constraint pinned to the old binary's cdhash
+// and refuse to start the updater again.
+func (u *Updater) refreshJobs(ctx context.Context, st *updaterState) {
+	jobs, err := u.Service.Jobs(ctx)
+	if err != nil {
+		u.Log.Warn("inspect launchd jobs", "err", err)
+		return
+	}
+	for _, j := range jobs {
+		switch {
+		case j.Role == JobUpdater && j.Loaded:
+			u.selfJob = &j
+			st.Reloaded[j.Label] = u.Now()
+		case j.Role == JobRuntimes && j.Loaded && !j.Running:
+			if err := u.Service.Reregister(ctx, j); err != nil {
+				u.Log.Warn("re-register launchd job", "label", j.Label, "err", err)
+				continue
+			}
+			st.Reloaded[j.Label] = u.Now()
+		}
+	}
+}
+
+// heal re-registers jobs whose launch constraint went stale, e.g. after an
+// update by a version without refreshJobs, or a binary replaced by hand.
+// A job is reloaded at most once an hour; the agent's job is left alone
+// while it runs tasks.
+func (u *Updater) heal(ctx context.Context, st *updaterState, c api.UpdateCheck) {
+	jobs, err := u.Service.Jobs(ctx)
+	if err != nil {
+		u.Log.Warn("inspect launchd jobs", "err", err)
+		return
+	}
+	var fixed []string
+	for _, j := range jobs {
+		if !j.Stale {
+			continue
+		}
+		if at, ok := st.Reloaded[j.Label]; ok && u.Now().Sub(at) < reloadEvery {
+			u.Log.Warn("launchd job still stale after a recent reload", "label", j.Label, "why", j.Why)
+			continue
+		}
+		switch j.Role {
+		case JobAgent:
+			if j.Running && c.Agent.Online && c.Agent.Running > 0 {
+				u.Log.Info("agent job has a stale launch constraint; reloading it once its tasks finish", "why", j.Why)
+				continue
+			}
+		case JobRuntimes:
+			if j.Running {
+				continue
+			}
+		case JobUpdater:
+			u.selfJob = &j
+			st.Reloaded[j.Label] = u.Now()
+			fixed = append(fixed, j.Label+" (after this run; "+j.Why+")")
+			continue
+		}
+		if err := u.Service.Reregister(ctx, j); err != nil {
+			u.Log.Warn("re-register launchd job", "label", j.Label, "err", err)
+			continue
+		}
+		st.Reloaded[j.Label] = u.Now()
+		fixed = append(fixed, j.Label+" ("+j.Why+")")
+	}
+	if len(fixed) == 0 {
+		return
+	}
+	msg := "re-registered launchd job(s): " + strings.Join(fixed, "; ")
+	u.Log.Info(msg)
+	u.report(ctx, st, api.UpdateReport{State: api.UpdateRepaired, FromVersion: c.Agent.Version, Message: msg})
+}
+
+// reloadSelf hands the reload of the updater's own job to a detached
+// process (it can only happen once this one has exited).
+func (u *Updater) reloadSelf(ctx context.Context) {
+	if u.selfJob == nil {
+		return
+	}
+	j := *u.selfJob
+	u.selfJob = nil
+	if err := u.Service.Reregister(ctx, j); err != nil {
+		u.Log.Warn("schedule reload of the updater job", "label", j.Label, "err", err)
+		return
+	}
+	u.Log.Info("the updater's launchd job is reloaded after this run (refreshes its launch constraint)", "label", j.Label)
 }
 
 // ---------------------------------------------------------------------------

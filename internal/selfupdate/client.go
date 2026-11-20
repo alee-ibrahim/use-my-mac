@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -125,32 +124,4 @@ func FetchURL(ctx context.Context, hc *http.Client, u string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: %s", u, resp.Status)
 	}
 	return readAllLimit(resp.Body)
-}
-
-// Launchctl restarts the agent's LaunchDaemon.
-type Launchctl struct {
-	Path  string // default /bin/launchctl
-	Label string
-	Plist string // used to load the job if it is not loaded
-}
-
-// Restart kickstarts the job (killing the running agent), loading it first
-// if needed.
-func (l Launchctl) Restart(ctx context.Context) error {
-	bin := l.Path
-	if bin == "" {
-		bin = "/bin/launchctl"
-	}
-	out, err := exec.CommandContext(ctx, bin, "kickstart", "-k", "system/"+l.Label).CombinedOutput()
-	if err == nil {
-		return nil
-	}
-	if l.Plist == "" {
-		return fmt.Errorf("launchctl kickstart: %v: %s", err, bytes.TrimSpace(out))
-	}
-	out2, err2 := exec.CommandContext(ctx, bin, "bootstrap", "system", l.Plist).CombinedOutput()
-	if err2 != nil {
-		return fmt.Errorf("launchctl kickstart: %v: %s; bootstrap: %v: %s", err, bytes.TrimSpace(out), err2, bytes.TrimSpace(out2))
-	}
-	return nil
 }
