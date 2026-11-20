@@ -63,7 +63,7 @@ func addTransferFlags(fs *flag.FlagSet) *transferFlags {
 	t := &transferFlags{partSize: api.DefaultPartSize}
 	fs.Var(&t.partSize, "part-size", "multipart part size (min 5MiB)")
 	fs.IntVar(&t.concurrency, "concurrency", 4, "parts transferred in parallel")
-	fs.BoolVar(&t.direct, "direct", false, "upload parts straight to S3 (presigned) when the router uses S3")
+	fs.BoolVar(&t.direct, "direct", false, "transfer straight to/from S3 with presigned URLs when the router uses S3 (default for downloads)")
 	return t
 }
 
@@ -161,37 +161,70 @@ func uploadCmd(ctx context.Context, c *client.Client, args []string) error {
 	return nil
 }
 
-// downloadCmd: umm download TASK OUTPUT [-o FILE] [-part-size 8MiB] [-concurrency 4]
+// downloadCmd: umm download TASK OUTPUT [-o FILE] [-direct | -relay] [-url [-ttl 1h]] [-part-size 8MiB]
+// [-concurrency 4]. Direct (straight from S3 with a presigned URL) is the
+// default when the router uses the s3 backend.
 func downloadCmd(ctx context.Context, c *client.Client, args []string) error {
 	fs := flag.NewFlagSet("download", flag.ExitOnError)
 	out := fs.String("o", "", "output file (default: OUTPUT name)")
 	noVerify := fs.Bool("no-verify", false, "skip the SHA-256 check against the Mac's checksum")
+	relay := fs.Bool("relay", false, "stream through the router even when it uses S3")
+	printURL := fs.Bool("url", false, "print a presigned URL for other tools instead of downloading (s3 backend)")
+	ttl := fs.Duration("ttl", 0, "lifetime of presigned URLs (default: the router's, 1h; max 168h)")
 	tf := addTransferFlags(fs)
 	pos := parseFlags(fs, args)
 	if len(pos) != 2 {
-		return errors.New("usage: umm download TASK OUTPUT [-o FILE] [-part-size 8MiB] [-concurrency 4]")
+		return errors.New("usage: umm download TASK OUTPUT [-o FILE] [-direct | -relay] [-url [-ttl 1h]] [-part-size 8MiB] [-concurrency 4]")
+	}
+	if *printURL {
+		d, err := c.OutputURL(ctx, pos[0], pos[1], *ttl)
+		if err != nil {
+			return err
+		}
+		fmt.Println(d.URL)
+		fmt.Fprintf(os.Stderr, "expires %s, %d bytes, sha256 %s\n", d.ExpiresAt.Local().Format(time.RFC3339), d.Size, d.SHA256)
+		return nil
+	}
+	if tf.direct && *relay {
+		return errors.New("-direct and -relay exclude each other")
+	}
+	direct := tf.direct
+	if !direct && !*relay {
+		me, err := c.Me(ctx)
+		direct = err == nil && me.Storage == "s3"
 	}
 	dst := *out
 	if dst == "" {
 		dst = filepath.Base(pos[1])
 	}
 	opt, done := tf.options("download " + filepath.Base(dst))
-	n, err := c.DownloadOutputFile(ctx, pos[0], pos[1], dst, opt)
+	opt.Direct, opt.URLTTL, opt.SkipVerify = direct, *ttl, *noVerify
+	info, err := c.DownloadOutputFileInfo(ctx, pos[0], pos[1], dst, opt)
 	done()
 	if err != nil {
 		return err
 	}
-	if !*noVerify {
+	how := ""
+	if info.Direct {
+		how = ", direct from S3"
+		if info.ConfirmError != nil {
+			fmt.Fprintf(os.Stderr, "warning: the router did not record the download (after_download cleanup will wait): %v\n", info.ConfirmError)
+		}
+	}
+	verified := info.Verified
+	if !info.Direct && !*noVerify {
 		switch err := c.VerifyOutputFile(ctx, pos[0], pos[1], dst); {
 		case errors.Is(err, client.ErrNoChecksum):
 		case err != nil:
 			return err
 		default:
-			fmt.Fprintf(os.Stderr, "wrote %s (%d bytes, SHA-256 verified)\n", dst, n)
-			return nil
+			verified = true
 		}
 	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes)\n", dst, n)
+	if verified {
+		how += ", SHA-256 verified"
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s (%d bytes%s)\n", dst, info.Size, how)
 	return nil
 }
 

@@ -351,6 +351,30 @@ func PartCount(size, partSize int64) int {
 	return int((size + partSize - 1) / partSize)
 }
 
+// DirectDownload is a presigned URL that fetches a stored output or blob
+// straight from object storage (GET /v1/tasks/{id}/outputs/{name}?direct=1,
+// GET /v1/blobs/{key}?direct=1; s3 backend only). Send a plain GET, with
+// Range headers if you like, and no Authorization header. Size and SHA256
+// (hex) describe the stored file when the router knows them.
+type DirectDownload struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256,omitempty"`
+}
+
+// MaxDirectDownloadTTL is the longest a presigned download URL can live
+// (the SigV4 limit).
+const MaxDirectDownloadTTL = 7 * 24 * time.Hour
+
+// DownloadConfirm tells the router a client fetched an output in full
+// outside the router (POST /v1/tasks/{id}/outputs/{name}/downloaded), so
+// after_download cleanup can count it. SHA256, when set, must match the
+// checksum the Mac recorded.
+type DownloadConfirm struct {
+	SHA256 string `json:"sha256,omitempty"`
+}
+
 // OutputUploadRequest is how an agent starts a multipart upload of a task
 // output (POST /v1/agent/tasks/{id}/outputs/{name}/upload).
 type OutputUploadRequest struct {
@@ -1044,6 +1068,9 @@ type Me struct {
 	Name    string `json:"name"`
 	Role    string `json:"role"` // admin, viewer, app
 	Via     string `json:"via"`  // oidc, apikey
+	// Storage is the router's blob backend (local, s3). Direct transfers
+	// (presigned URLs) need s3.
+	Storage string `json:"storage,omitempty"`
 }
 
 // Roles.

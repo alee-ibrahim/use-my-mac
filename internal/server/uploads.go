@@ -153,3 +153,53 @@ func signedPartAllowed(l *storage.Local, key string) bool {
 	part, live := l.IsPartKey(key)
 	return !part || live
 }
+
+// wantDirect: ?direct=1 (or true) asks for a presigned URL instead of the
+// bytes.
+func wantDirect(r *http.Request) bool {
+	v, _ := strconv.ParseBool(r.URL.Query().Get("direct"))
+	return v
+}
+
+// directTTL reads ?ttl=SECONDS (default: the router's configured lifetime).
+func (s *Server) directTTL(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	ttl := s.DirectDownloadTTL
+	if v := r.URL.Query().Get("ttl"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 60 || time.Duration(n)*time.Second > api.MaxDirectDownloadTTL {
+			writeErr(w, http.StatusBadRequest, "ttl must be seconds between 60 and 604800 (7 days)")
+			return 0, false
+		}
+		ttl = time.Duration(n) * time.Second
+	}
+	return ttl, true
+}
+
+// writeDirect answers a direct download: the URL as JSON, or with
+// ?redirect=1 a 307 to it (for tools that just follow redirects).
+func writeDirect(w http.ResponseWriter, r *http.Request, d *api.DirectDownload) {
+	w.Header().Set("Cache-Control", "no-store")
+	if v, _ := strconv.ParseBool(r.URL.Query().Get("redirect")); v {
+		http.Redirect(w, r, d.URL, http.StatusTemporaryRedirect)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// confirmDownload: a client fetched an output in full outside the router
+// (direct download) and its checksum passed; count it for after_download.
+func (s *Server) confirmDownload(w http.ResponseWriter, r *http.Request) {
+	var req api.DownloadConfirm
+	if r.ContentLength != 0 && !readJSON(w, r, &req, 4096) {
+		return
+	}
+	t := s.loadTask(w, r)
+	if t == nil {
+		return
+	}
+	if err := s.E.ConfirmDownload(r.Context(), t.ID, r.PathValue("name"), req.SHA256); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

@@ -175,6 +175,15 @@ Completion deletes the row; the scheduler loop aborts uploads older than 24 hour
 **Chunked downloads.** The router serves local blobs with `http.ServeContent`, so `Range` works. Agents and
 the CLI download in parallel ranges and fall back to one stream when the server ignores `Range`.
 
+**Direct downloads.** The mirror of direct uploads: with S3, `?direct=1` on an output or blob download returns
+a presigned `GET` (`{url, expires_at, size, sha256}`, or a `307` with `redirect=1`) after the same access check
+as streaming, so apps fetch the bytes from the bucket in parallel ranges with the same downloader agents use.
+The URL lives `storage.direct_download_ttl_minutes` (default 60) or the request's `ttl`, at most the SigV4
+limit of 7 days. It signs only `host`; `Range` is not a signed header and S3/RGW accept it unsigned, and
+clients send nothing else (no `Authorization`, `Content-Type` or `x-amz-*`). The `local` backend answers
+`400`: its signed URLs point at the router itself, so there is nothing to gain over streaming. Clients that
+get a `403` mid-download (an expired URL) ask for a fresh one once.
+
 **Ownership.** The `blobs` table records each stored file's owner, kind, job and task, size and when it was
 first downloaded in full. Uploads are recorded on `PUT /v1/blobs` and on multipart completion; outputs when
 their task succeeds. Reads, overwrites and use as a job input are limited to the owner and admins (an admin
@@ -192,6 +201,11 @@ unfinished job uses go too.
 `after_hours` from `finished_at`, or `after_download` for a succeeded job whose *results* (stored outputs no
 task of the job consumes) have all been downloaded in full and nothing has been downloaded for two minutes.
 Output downloads are counted per file: a `200` covers the file, `206` ranges add up (in memory) to its size.
+Direct downloads bypass the router, so they count only when the client confirms them with `POST
+/v1/tasks/{id}/outputs/{name}/downloaded` after its SHA-256 check (an optional `sha256` must match the Mac's).
+Counting issued URLs instead would delete results that were never fetched, or were still being fetched, after
+a failed or slow download; a confirmation is explicit and cheap, and `after_hours` still covers clients that
+never send one.
 Running it deletes inputs and outputs (unless kept) or the whole job, sets `cleaned_at` and writes
 `job.cleaned` to the activity log.
 

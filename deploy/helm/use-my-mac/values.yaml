@@ -23,6 +23,7 @@ database:
 
 storage:
   backend: local # local | s3
+  directDownloadTTLMinutes: 60 # s3: presigned download URLs for apps (max 10080)
   s3:
     endpoint: ""
     region: us-east-1

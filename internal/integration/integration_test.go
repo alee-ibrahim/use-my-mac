@@ -86,6 +86,9 @@ func helper(args []string) int {
 			b[i], b[j] = b[j], b[i]
 		}
 		return writeOut(args[2], b)
+	case "gen": // gen <bytes> <out>: deterministic pseudo-random content
+		n, _ := strconv.Atoi(args[1])
+		return writeOut(args[2], genBytes(n))
 	case "which": // which <program> <out>: where PATH finds a program
 		p, err := exec.LookPath(args[1])
 		if err != nil {
@@ -148,6 +151,13 @@ func activeTel() api.Telemetry {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWith(t, nil)
+}
+
+// newEnvWith uses the blob backend mk returns (nil: local storage served by
+// the router at routerURL).
+func newEnvWith(t *testing.T, mk func(routerURL string) storage.Backend) *env {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	st, err := store.Open(ctx, "sqlite://"+t.TempDir()+"/umm.db")
 	if err != nil {
@@ -155,8 +165,10 @@ func newEnv(t *testing.T) *env {
 	}
 	var h http.Handler
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h.ServeHTTP(w, r) }))
-	blobs, err := storage.NewLocal(t.TempDir(), ts.URL, []byte("integration-test-secret"))
-	if err != nil {
+	var blobs storage.Backend
+	if mk != nil {
+		blobs = mk(ts.URL)
+	} else if blobs, err = storage.NewLocal(t.TempDir(), ts.URL, []byte("integration-test-secret")); err != nil {
 		t.Fatal(err)
 	}
 	cfg := engine.DefaultConfig()
