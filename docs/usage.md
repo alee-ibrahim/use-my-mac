@@ -631,8 +631,10 @@ What to know:
   variables in the task's `env` fail the task with the reason; mise's output is in the task log. An install
   that fails because of the Mac's network (GitHub's rate limit, HTTP 429, DNS, refused or timed-out
   connections, a download host's 5xx, a rejected admin token) or runs out of disk is a **Mac fault**: the
-  attempt is `unavailable`, no failure is counted and the task moves to another Mac. A mise binary that
-  fails the preflight makes the runtime unavailable on that Mac.
+  attempt is `unavailable`, no failure is counted and the task moves to another Mac. A task can trigger
+  such a fault on purpose (say with a tool whose download host refuses it); that costs it nothing but is
+  bounded: after `max_mac_faults` (5) of them its attempts count as failures. A mise binary that fails
+  the preflight makes the runtime unavailable on that Mac.
 - **GitHub tokens: job code can read them.** `github_token_file` or `github_token_command` give mise a
   GitHub token, for the API rate limit above and for releases in private repositories. The agent reads
   the file, or runs the command (with only `PATH`, `HOME` and `LANG`; 30 s limit; its standard output is
