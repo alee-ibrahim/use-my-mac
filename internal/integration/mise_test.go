@@ -160,7 +160,8 @@ func (e *env) logs(id string) string {
 // logs.
 func TestMiseToolchain(t *testing.T) {
 	skipNoShell(t)
-	// Several task errors in a row on one Mac must not quarantine it here.
+	// These are task errors on purpose, several in a row on one Mac, which
+	// would quarantine it (quarantine_after) like any failing tasks.
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "mise")
@@ -316,6 +317,7 @@ func realMise(t *testing.T) string {
 // allow, before installing anything. No network needed.
 func TestMiseRealChecks(t *testing.T) {
 	bin := realMise(t)
+	// Task errors on purpose, many in a row on one Mac (see TestMiseToolchain).
 	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
 	e.miseMac("real-mise", bin, nil)
 	jq := "[tools]\n\"aqua:jqlang/jq\" = \"1.7.1\"\n"
@@ -369,7 +371,7 @@ func TestMiseRealInstall(t *testing.T) {
 	} else if os.Getenv("GITHUB_ACTIONS") == "true" {
 		t.Fatal("set UMM_TEST_MISE_GITHUB_TOKEN_FILE: unauthenticated GitHub API calls from shared runners hit the rate limit")
 	}
-	e := newEnvCfg(t, func(c *engine.Config) { c.QuarantineAfter = 0 })
+	e := newEnv(t)
 	mac, cache := e.miseMac("real-mise", bin, func(c *agent.Config) {
 		c.Mise.Commands = []string{"jq", "sh"}
 		c.Mise.GitHubTokenFile = tokenFile
@@ -538,4 +540,44 @@ func miseHostChecksOff(c *agent.Config) {
 	off, zero := false, 0.0
 	c.HomeCheck.Disabled, c.WorkVolume.Enabled = true, &off
 	c.MinFreeDisk.Min, c.MinFreeDisk.Percent = "0", &zero
+}
+
+// A Mac whose network fails the install (here GitHub's per-IP rate limit)
+// is at fault, not the task: the attempt is unavailable, no failure is
+// counted, nothing is quarantined, and the task runs on another Mac.
+func TestMiseNetworkFailureIsMacFault(t *testing.T) {
+	skipNoShell(t)
+	e := newEnv(t)
+	bin := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(bin, []byte(fakeMise), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	limited, _ := e.miseMac("limited-mac", bin, func(c *agent.Config) {
+		c.TaskEnv["FAKE_MISE_RECORD"] = t.TempDir()
+		c.TaskEnv["FAKE_MISE_FAIL"] = "Failed to install aqua:example/hello@1.0.0: HTTP status client error " +
+			"(403 Forbidden) for url (https://api.github.com/repos/example/hello/releases/tags/v1.0.0): API rate limit exceeded"
+	})
+	zero := 0
+	job, err := e.app.SubmitJob(e.ctx, api.JobSpec{Name: "mise", Tasks: []api.TaskSpec{{Key: "t", MaxRetries: &zero,
+		Runtime: agent.MiseRuntime, Args: []string{"hello", "x", "{out:o.txt}"},
+		Inputs: e.miseInputs("net", helloToml, "lockfile_version = 4\n"), Outputs: []api.Output{{Name: "o.txt"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var taskID string
+	waitFor(t, "an attempt on limited-mac to end", 10*time.Second, func() bool {
+		j, _ := e.app.Job(e.ctx, job.ID)
+		taskID = j.Tasks[0].ID
+		d, _ := e.app.Task(e.ctx, taskID)
+		return d != nil && len(d.Attempts) > 0 && d.Attempts[0].Outcome != ""
+	})
+	d, _ := e.app.Task(e.ctx, taskID)
+	if a := d.Attempts[0]; a.AgentID != limited.id || a.Outcome != api.OutcomeUnavailable || d.Failures != 0 {
+		t.Fatalf("attempt on limited-mac: %+v, failures %d", a, d.Failures)
+	}
+	good, _ := e.miseMac("good-mac", bin, func(c *agent.Config) { c.TaskEnv["FAKE_MISE_RECORD"] = t.TempDir() })
+	final, err := e.app.WaitJob(e.ctx, job.ID, 100*time.Millisecond, nil)
+	if err != nil || final.State != api.StateSucceeded || final.Tasks[0].AgentID != good.id {
+		t.Fatalf("job: %v %+v", err, final)
+	}
 }

@@ -151,6 +151,7 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 	install := func(names []string, env []string) *api.TaskUpdate {
 		fmt.Fprintf(logs, "[agent] mise: installing %s\n", strings.Join(names, ", "))
 		full := &diskFullTap{}
+		tail := &tailBuffer{max: 64 << 10}
 		args := []string{"install"}
 		if len(names) < len(tools) {
 			args = append(args, names...)
@@ -158,7 +159,9 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 		argv := BuildArgv(a.goos, launchPriority(a.cfg.Priority, a.currentQoS()), mise, args)
 		cmd := exec.CommandContext(ictx, argv[0], argv[1:]...)
 		cmd.Dir, cmd.Env = workdir, env
-		cmd.Stdout, cmd.Stderr = io.MultiWriter(logs, full), io.MultiWriter(logs, full)
+		// One writer for both, so exec.Cmd copies them in one goroutine.
+		w := io.MultiWriter(logs, full, tail)
+		cmd.Stdout, cmd.Stderr = w, w
 		cmd.WaitDelay = a.cfg.StopGrace
 		setupProc(cmd)
 		if err := cmd.Start(); err != nil {
@@ -183,6 +186,10 @@ func (a *Agent) prepareMise(ctx context.Context, r *run, deadline time.Time, wor
 			return &u
 		case werr != nil && full.seen:
 			_, u := macFault("install ran out of disk space (" + werr.Error() + ")")
+			return u
+		case werr != nil && MiseInstallFault(tail.String()) != "":
+			// The Mac's network, not the task: try another Mac.
+			_, u := macFault(MiseInstallFault(tail.String()) + " (" + werr.Error() + "); mise's output is in the task log")
 			return u
 		case werr != nil:
 			if why := CheckProgram(mise[0]); why != "" {
@@ -341,3 +348,19 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = t.b[len(t.b)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string { return string(t.b) }

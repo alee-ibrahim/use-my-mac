@@ -384,3 +384,38 @@ func TestMiseTokenBackend(t *testing.T) {
 		}
 	}
 }
+
+// Install failures that are the Mac's network's, not the task's, are Mac
+// faults. The texts are mise 2026.11.9's.
+func TestMiseInstallFault(t *testing.T) {
+	mac := []string{
+		"mise ERROR Failed to install aqua:jqlang/jq@1.7.1: HTTP status client error (403 Forbidden) for url (https://api.github.com/repos/jqlang/jq/releases/tags/jq-1.7.1)",
+		"API rate limit exceeded for 203.0.113.7. (But here's the good news: Authenticated requests get a higher rate limit.)",
+		"HTTP status client error (429 Too Many Requests) for url (https://nodejs.org/dist/index.json)",
+		"mise ERROR Failed to install aqua:jqlang/jq@1.7.1: error sending request: error sending request: client error (Connect): tunnel error: failed to create underlying connection: dns error: error resolving DNS: failed to lookup address information: Name or service not known",
+		"mise WARN  HTTP GET https://api.github.com/repos/jqlang/jq/releases?per_page=100 attempt 3 failed after 357µs (transient): error sending request; retrying",
+		"client error (Connect): tcp connect error: Connection refused (os error 61)",
+		"operation timed out",
+		"HTTP status server error (502 Bad Gateway) for url (https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64)",
+		"hint: the token in `MISE_GITHUB_TOKEN` was rejected by GitHub (401 Unauthorized).",
+	}
+	for _, out := range mac {
+		if MiseInstallFault(out) == "" {
+			t.Errorf("not a Mac fault: %s", out)
+		}
+	}
+	task := []string{
+		"Checksum mismatch for file /w/x/jq-linux-amd64:\nExpected: sha256:00\nActual:   sha256:59",
+		"HTTP status client error (404 Not Found) for url (https://github.com/jqlang/jq/releases/download/jq-9/jq)",
+		"aqua:BurntSushi/ripgrep@14.1.1 is not in the lockfile",
+		"running tool-level postinstall hooks for aqua:jqlang/jq is disabled in safe mode (MISE_SAFE=1)",
+		"No lockfile URL found for aqua:jqlang/jq@1.7.1 on platform macos-arm64 (--locked mode)",
+		// A wrong checksum wins over the network noise around it.
+		"error sending request; retrying\nChecksum mismatch for file /w/x/jq",
+	}
+	for _, out := range task {
+		if why := MiseInstallFault(out); why != "" {
+			t.Errorf("Mac fault %q for: %s", why, out)
+		}
+	}
+}

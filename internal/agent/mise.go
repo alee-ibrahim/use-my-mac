@@ -426,3 +426,43 @@ func MiseTokenBackend(backend string) bool {
 	}
 	return false
 }
+
+// MiseInstallFault returns why a failed `mise install` is the Mac's fault
+// (its network: unreachable or rate-limited hosts, DNS, a rejected admin
+// token), or "" when it is the task's (a wrong checksum, a missing file or
+// lockfile entry).
+func MiseInstallFault(output string) string {
+	low := strings.ToLower(output)
+	for _, m := range miseTaskFaults {
+		if strings.Contains(low, m) {
+			return ""
+		}
+	}
+	for _, m := range miseMacFaults {
+		if strings.Contains(low, m.text) {
+			return m.why
+		}
+	}
+	return ""
+}
+
+// What mise prints when the task's own inputs are wrong; these win.
+var miseTaskFaults = []string{"checksum mismatch", "not in the lockfile", "no lockfile url found", "(404 not found)",
+	"disabled in safe mode"}
+
+// What mise prints when the Mac's network or settings failed the install.
+var miseMacFaults = []struct{ text, why string }{
+	{"rate limit", "GitHub API rate limit for this Mac's address (set mise.github_token_file)"},
+	{"(403 forbidden) for url (https://api.github.com", "GitHub API refused this Mac (rate limit)"},
+	{"(429 too many requests)", "a download host is rate-limiting this Mac"},
+	{"token in `mise_github_token` was rejected", "this Mac's GitHub token was rejected"},
+	{"dns error", "DNS lookup failed on this Mac"},
+	{"failed to lookup address", "DNS lookup failed on this Mac"},
+	{"connection refused", "a download host refused the connection (network policy?)"},
+	{"timed out", "a download timed out on this Mac"},
+	{"error sending request", "a download failed on this Mac's network"},
+	{"(500 internal server error)", "a download host failed"},
+	{"(502 bad gateway)", "a download host failed"},
+	{"(503 service unavailable)", "a download host failed"},
+	{"(504 gateway timeout)", "a download host failed"},
+}
