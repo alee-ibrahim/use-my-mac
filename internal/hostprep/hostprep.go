@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -34,6 +35,9 @@ type Config struct {
 	StatusFile string
 	// StateDir is a root-only directory for generated files (pf rules).
 	StateDir string
+	// Keep names entries of the work dir the agent keeps between tasks
+	// (its mise download cache): they do not make the work dir busy.
+	Keep []string
 }
 
 // VolumeConfig configures the dedicated work volume.
@@ -276,7 +280,7 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 		// Mounting over a work dir that holds a running task's files would
 		// hide them from it. The agent removes each task dir when the task
 		// ends, so an empty dir means no task is running.
-		busy, err := dirBusy(cfg.WorkDir)
+		busy, err := dirBusy(cfg.WorkDir, cfg.Keep)
 		if err != nil {
 			return fallback("work dir: %v", err)
 		}
@@ -330,7 +334,7 @@ func ensureVolume(ctx context.Context, cfg Config, h Host, prev VolumeStatus) Vo
 }
 
 // dirBusy reports whether dir holds anything but Finder droppings.
-func dirBusy(dir string) (bool, error) {
+func dirBusy(dir string, keep []string) (bool, error) {
 	ents, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -339,11 +343,12 @@ func dirBusy(dir string) (bool, error) {
 		return false, err
 	}
 	for _, e := range ents {
-		// Task dirs never start with a dot; dot-entries are file system
-		// litter (.DS_Store, .fseventsd, ...) or the agent's own (the mise
-		// download cache), which the mount may hide.
-		if strings.HasPrefix(e.Name(), ".") {
+		switch e.Name() {
+		case ".DS_Store", ".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems":
 			continue
+		}
+		if slices.Contains(keep, e.Name()) {
+			continue // the agent's own, which the mount may hide
 		}
 		return true, nil
 	}

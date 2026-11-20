@@ -430,23 +430,28 @@ func TestMiseCacheOnWorkVolume(t *testing.T) {
 	work := t.TempDir()
 	cache := filepath.Join(work, ".mise-cache", "downloads-cas")
 	task := filepath.Join(work, "tsk_1-1")
-	for _, d := range []string{cache, task} {
+	other := filepath.Join(work, ".left-by-a-task") // only the cache is special
+	for _, d := range []string{cache, task, other} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	os.WriteFile(filepath.Join(cache, "blob"), make([]byte, 1000), 0o600)
 	os.WriteFile(filepath.Join(task, "out"), make([]byte, 10), 0o600)
-	a := &Agent{cfg: &Config{WorkDir: work}}
-	if got := a.workUsed(); got != 10 {
-		t.Errorf("workUsed = %d, want 10 (the cache is not a task's)", got)
+	os.WriteFile(filepath.Join(other, "x"), make([]byte, 5), 0o600)
+	cfg := &Config{WorkDir: work, Mise: MiseConfig{Enabled: true, CacheDir: filepath.Join(work, ".mise-cache")}}
+	a := &Agent{cfg: cfg}
+	if got := a.workUsed(); got != 15 {
+		t.Errorf("workUsed = %d, want 15 (the cache is not a task's; other dot-dirs are)", got)
 	}
 	a.cleanStaleWorkDirs()
 	if _, err := os.Stat(filepath.Join(cache, "blob")); err != nil {
 		t.Errorf("cache removed at startup: %v", err)
 	}
-	if _, err := os.Stat(task); !os.IsNotExist(err) {
-		t.Errorf("stale task dir kept: %v", err)
+	for _, d := range []string{task, other} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("stale dir %s kept: %v", d, err)
+		}
 	}
 }
 

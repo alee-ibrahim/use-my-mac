@@ -502,6 +502,7 @@ func (c *Config) HostPrep(stateDir string) (hostprep.Config, error) {
 			Reserve: c.Reserve()},
 		Network:    hostprep.NetworkConfig{Mode: c.TaskNetwork, Allow: allow},
 		StatusFile: c.HostStatusFile, StateDir: stateDir,
+		Keep: nonEmpty(c.miseCacheEntry()),
 	}, nil
 }
 
@@ -545,4 +546,27 @@ func (c *Config) LoadCredential() (string, error) {
 		return "", fmt.Errorf("read credential: %w (run `umm-agent enrol` first)", err)
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// miseCacheEntry is the name of the mise download cache's directory when
+// it lives directly in the work dir ("" otherwise): the one entry there
+// that is not a task's and stays between tasks.
+func (c *Config) miseCacheEntry() string {
+	if !c.Mise.Enabled || c.Mise.CacheDir == "" {
+		return ""
+	}
+	if filepath.Dir(filepath.Clean(c.Mise.CacheDir)) != filepath.Clean(c.WorkDir) {
+		return ""
+	}
+	return filepath.Base(c.Mise.CacheDir)
+}
+
+func nonEmpty(s ...string) []string {
+	var out []string
+	for _, v := range s {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }

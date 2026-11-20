@@ -470,7 +470,7 @@ checks what mise reports:
   and only with a lockfile: in locked mode mise keeps and reuses only downloads with a locked checksum and
   checks them again before use, so a tampered entry is dropped and fetched again. It lives in
   `<work_dir>/.mise-cache` on the work volume (its quota and work space; startup and the busy-dir check
-  leave dot-directories alone), and mise evicts least recently used downloads above `max_cache`.
+  leave that one directory alone, nothing else), and mise evicts least recently used downloads above `max_cache`.
 - **Tokens.** An optional admin token (`github_token_file`, or `github_token_command` run with only
   `PATH`, `HOME` and `LANG`) is given, as `MISE_GITHUB_TOKEN`, only to the install of tools whose backend
   just downloads release files (`aqua:`, `github:`, `ubi:`); other tools install in a separate step
