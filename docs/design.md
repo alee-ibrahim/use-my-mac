@@ -221,7 +221,8 @@ notifications are dropped rather than ever blocking the engine, and a keep-alive
   token from `UMM_ENROL_TOKEN` or stdin. The CLI reads its key from `UMM_API_KEY`, a key file or
   `~/.config/umm/api-key`.
 - **What a task can do:** run one of the Mac's allowlisted runtimes (a fixed argv prefix with an absolute
-  path) plus arguments. It cannot choose the executable. Allowlist specific scripts rather than bare
+  path) plus arguments. It cannot choose the executable. On Macs whose admin enabled mise toolchains, a
+  `mise` task chooses its tools and runs a program they provide ([mise toolchains](#mise-toolchains)). Allowlist specific scripts rather than bare
   interpreters. The environment is minimal: tasks cannot set `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` or
   `LD_*`. Tasks run as the non-admin `_umm` user in a fresh `0700` work dir that is deleted afterwards, on a
   volume of their own, and the Mac refuses work while any user's home folder is open to `_umm` (see
@@ -367,6 +368,39 @@ comment names that package and version; the Mac's own check is the one that matt
 - **Scheduling.** A Mac that can install a runtime passes the hard filter; its score is multiplied by 0.7 so
   Macs that already have it win. A failed install becomes an unavailable runtime (source `install`) with a
   retry backoff, and the attempt ends `unavailable` like a missing program (no failure counted).
+
+## mise toolchains
+
+A task with runtime `mise` brings its toolchain as a `mise.toml` and `mise.lock`. The agent does not
+interpret either file; the admin's mise binary does all of it, under settings the agent fixes:
+
+- **Opt-in per Mac.** `mise.enabled` in the root-owned `agent.yaml` (default off) adds the runtime `mise`,
+  backed by `mise.binary` (or a `runtimes`/managed runtime named `mise`), so the scheduler only places these
+  tasks on Macs that enabled it, through the normal runtime filter and preflight. A task never chooses the
+  mise binary.
+- **What mise reads.** Config files are copied into the task's work dir. Every directory mise reads config,
+  state or tools from (`MISE_DATA_DIR`, `MISE_CACHE_DIR`, `MISE_STATE_DIR`, `MISE_CONFIG_DIR`,
+  `MISE_SYSTEM_DATA_DIR`, the global and system config files) points inside the work dir, and
+  `MISE_CEILING_PATHS` stops the search for parent configs, so only the task's files count (the agent checks
+  `mise ls` says so). `MISE_SAFE=1` loads them without letting them run code (env templates, hooks,
+  `postinstall`, `install_env`); the agent also refuses anything but `[tools]` and `min_version`, from
+  `mise config explain --json`. Auto-install, sudo, netrc, gh CLI tokens and mise's version host are off;
+  task `env` may not set `MISE_*`.
+- **Install, then exec.** `mise install` runs (locked by default: URLs and checksums from `mise.lock`) as
+  `_umm` with the task's priority and process group, so its CPU counts as ours and yields stop it. The
+  program is resolved with `mise which` and must lie under the task's installs; it runs through
+  `mise exec --` like any task. Exit codes from the program are the task's; only a missing mise binary is a
+  Mac fault.
+- **Sharing.** Installs are per task and deleted with the work dir: the agent and its tasks are the same
+  user, so a shared install tree would let one task change what the next one runs. Only mise's
+  content-addressed download cache (`downloads-cas`) is shared, through a link from each task's cache dir,
+  and only with a lockfile: in locked mode mise keeps and reuses only downloads with a locked checksum and
+  checks them again on every use, so a tampered entry is dropped and fetched again. mise evicts least
+  recently used downloads above `max_cache`.
+- **Tokens.** An optional admin token (`github_token_file` or `github_token_command`) is added to the
+  environment of `mise install` only, as `MISE_GITHUB_TOKEN`. Because tasks run as the agent's user, this
+  keeps the token out of the task's environment and logs but not out of reach of a task that goes looking
+  for the file; a separate installing user would close that, and is not done yet.
 
 ## Agent self-update
 

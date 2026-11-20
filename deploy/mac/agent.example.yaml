@@ -117,3 +117,19 @@ managed_runtimes:
   allow: ["*"]            # package names this Mac may install
   # public_keys: ["RW..."] # default: the release key (update.public_key, else built in)
   retry_after: 10m        # wait after a failed install before trying again
+
+# mise toolchains (docs/usage.md "Toolchains with mise"): tasks with runtime
+# "mise" bring a mise.toml and mise.lock; this Mac's mise installs those tools
+# into the task's work dir and runs a program they provide. Off by default:
+# such a task picks its tools (from any mise backend) and runs their programs.
+mise:
+  enabled: false
+  binary: /usr/local/bin/mise   # verify it against the release checksums; tested with mise 2026.11.9
+  # commands: [node, ffmpeg]    # optional: the only programs tasks may run
+  require_lockfile: true        # locked installs; only checksummed downloads are shared
+  # cache_dir: /usr/local/var/umm/mise-cache
+  max_cache: 2GiB
+  # For tools released from private GitHub repositories (at most one; the token
+  # reaches `mise install` only, but tasks run as _umm and could read the file):
+  # github_token_file: /usr/local/etc/umm/github-token   # mode 0600, owned by _umm
+  # github_token_command: ["/usr/local/bin/your-secrets-cli", "kv", "get", "-field=token", "secret/github-read"]

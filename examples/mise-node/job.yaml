@@ -1,0 +1,22 @@
+# umm submit examples/mise-node/job.yaml -wait
+#
+# Runs a Node.js script with the Node.js version pinned in mise.toml and
+# mise.lock, on Macs whose admin enabled mise toolchains in agent.yaml:
+#   mise:
+#     enabled: true
+#     binary: /usr/local/bin/mise
+# Regenerate the lockfile after changing mise.toml:
+#   mise lock --platform macos-arm64
+name: mise-node
+tasks:
+  - key: count
+    runtime: mise
+    args: ["node", "{in:main.js}", "{in:text}", "{out:count.json}"]
+    inputs:
+      - {name: mise.toml, file: mise.toml}
+      - {name: mise.lock, file: mise.lock}
+      - {name: main.js, file: main.js}
+      - {name: text, file: ../../README.md}
+    outputs: [{name: count.json}]
+    # Node.js is unpacked into the task's work dir (about 200 MB).
+    resources: {disk_estimate_mb: 512, expected_seconds: 30}

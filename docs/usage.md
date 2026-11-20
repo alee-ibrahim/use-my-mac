@@ -141,7 +141,7 @@ umm download TASK_ID enc.mp4
 | Field | Meaning |
 | --- | --- |
 | `key` | unique name inside the job; other tasks refer to it |
-| `runtime` | an allowlisted runtime name, or a command of a managed runtime (see [Runtimes](#runtimes)) |
+| `runtime` | an allowlisted runtime name, a command of a managed runtime (see [Runtimes](#runtimes)), or `mise` for a toolchain the task brings (see [Toolchains with mise](#toolchains-with-mise)) |
 | `requires` | managed runtime packages to install before the task runs; their `bin` directories go first on `PATH` (see [Managed runtimes](#managed-runtimes)) |
 | `args` | appended to the runtime's fixed argv. Placeholders: `{in:NAME}` input path, `{out:NAME}` where output NAME must be written, `{workdir}` the task's private directory |
 | `env` | extra environment variables. `PATH`, `HOME`, `TMPDIR`, `UMM_*`, `DYLD_*` and `LD_*` are not allowed |
@@ -421,6 +421,106 @@ use (see [design.md](design.md#managed-runtimes)).
 - Turn it off per Mac with `managed_runtimes: {enabled: false}` in `agent.yaml`; the static `runtimes`
   allowlist works as before and wins when both define a command. The helper logs to
   `/usr/local/var/log/umm-runtimes.log`; `sudo umm-agent runtimes-sync` runs a pass by hand.
+
+### Toolchains with mise
+
+A job that needs several tools at exact versions (say a Node.js script that calls ffmpeg) can bring them
+itself, as a [mise](https://mise.jdx.dev) config, instead of an admin installing each tool on every Mac.
+The task names the tools and versions; the Mac's own mise installs them for that task and runs the task's
+program with them. This is **off by default**. The admin turns it on per Mac in `agent.yaml`:
+
+```yaml
+mise:
+  enabled: true
+  binary: /usr/local/bin/mise    # installed and verified by the admin; tested with mise 2026.11.9
+  # commands: [node, ffmpeg]     # optional: the only programs tasks may run (default: any program a tool provides)
+  # require_lockfile: true       # default: installs are locked to mise.lock's URLs and checksums
+  # cache_dir: /usr/local/var/umm/mise-cache   # shared download cache
+  # max_cache: 2GiB              # least recently used downloads go first
+  # Optional, for tools released from private GitHub repositories (at most one of the two):
+  # github_token_file: /usr/local/etc/umm/github-token          # mode 0600, owned by _umm
+  # github_token_command: ["/usr/local/bin/your-secrets-cli", "kv", "get", "-field=token", "secret/github-read"]
+```
+
+The Mac then offers the runtime `mise`, so only Macs that enabled it get such tasks. Instead of `binary`,
+the program can come from a `runtimes: {mise: [...]}` entry or a [managed runtime](#managed-runtimes) with a
+`mise` command, so a signed mise reaches every Mac without hand installs. Install mise from its GitHub
+release and check it against the release's checksums (or publish it as a managed runtime); the agent runs
+whatever `binary` points at.
+
+A task sends `mise.toml` and `mise.lock` as inputs and names a program in its first argument:
+
+```toml
+# mise.toml
+[tools]
+node = "24.22.3"
+ffmpeg = "8.0"
+```
+
+```sh
+mise lock --platform macos-arm64   # writes mise.lock with each download's URL and checksum
+```
+
+```yaml
+name: report
+tasks:
+  - key: render
+    runtime: mise
+    args: ["node", "{in:render.js}", "{out:report.html}"]
+    inputs:
+      - {name: mise.toml, file: ./mise.toml}
+      - {name: mise.lock, file: ./mise.lock}
+      - {name: render.js, file: ./render.js}
+    outputs: [{name: report.html}]
+    resources: {disk_estimate_mb: 2048}
+```
+
+`examples/mise-node/` in the repository is a complete job.
+
+How it runs, on the Mac, in the task's own work dir:
+
+1. The agent copies `mise.toml` and `mise.lock` into the work dir and asks mise what they contain
+   (`mise config explain --json`, `mise ls --current --json`). Only `[tools]` and `min_version` are
+   accepted: `[env]`, `[tasks]`, `[hooks]`, `[settings]` and the rest fail the task. mise reads the config
+   in safe mode (`MISE_SAFE=1`), so nothing in it runs code: tool options such as `postinstall` or
+   `install_env` make the install fail. Global, system and parent-directory mise config is ignored.
+2. `mise install` installs the tools into the work dir (its output is in the task log). With
+   `require_lockfile` it runs locked: every tool must be in `mise.lock` with a URL and checksum for the
+   Mac's platform (`macos-arm64`), and mise checks each download against it.
+3. The program must be one the installed tools provide (`mise which`), never a system program such as
+   `/bin/sh`, and in `commands` when that is set. The agent runs it with `mise exec --`, at the task's
+   priority, as `_umm`, like any other task.
+
+What to know:
+
+- **Any backend.** Tools can come from any mise backend (the registry, `github:`, `aqua:`, `ubi:`, `npm:`,
+  `pipx:`, `cargo:`, `go:` and so on). Some backends build or run package installers (npm, pip, cargo, go),
+  which runs code from the package while installing. Tools installed through `pipx:` need `uv` (or
+  `pipx`) as a pinned tool in the same `mise.toml`.
+- **The work dir holds everything.** Tools are installed per task and deleted with the work dir, so count
+  them in `resources.disk_estimate_mb` (Node.js is about 200 MB unpacked). Downloads a tool makes by itself
+  later (uv's own Pythons, a browser a test framework fetches) go under the task's `HOME`, which is its work
+  dir, too. Only mise's download cache is shared between tasks: with `require_lockfile` mise keeps only
+  downloads with a locked checksum and checks them on every install, so a task cannot plant a file for the
+  next one. It is capped by `max_cache`; without a lockfile nothing is shared.
+- **Network.** Installs download from wherever the tools are published (e.g. `nodejs.org`, `github.com`
+  and `release-assets.githubusercontent.com`). With `task_network: deny`, list those hosts in
+  `task_network_allow`, since the agent installs as `_umm`. A download in the shared cache is used without
+  fetching it again, though mise may still ask the host whether it changed.
+- **Timeout.** `timeout_seconds` covers installing and running.
+- **Errors.** A config the Mac refuses, a tool mise cannot install (a wrong checksum, a platform missing
+  from the lockfile, a prebuilt binary that needs a library the Mac lacks), a program the tools do not
+  provide and `MISE_*` or `GITHUB_TOKEN` variables in the task's `env` fail the task with the reason; mise's
+  own output is in the task log. Running out of disk while installing is a Mac fault, as is a missing mise
+  binary (the runtime is then unavailable on that Mac).
+- **Private tools.** `github_token_file` or `github_token_command` give mise a GitHub token for releases in
+  private repositories. The agent reads the file, or runs the command (30 s limit; its standard output is
+  the token, its standard error is discarded), before each install, and passes the token to `mise install`
+  only, as `MISE_GITHUB_TOKEN`: never to the task's program and never to the log. Tasks run as the same
+  user as the agent, though, so a task could read the token file or run the command itself: use a
+  fine-grained token that can only read the repositories you need, and enable it only on Macs that run jobs
+  you trust with it. If only one job needs a private program, ship the program as a task input instead.
+  Never put a token in a task's `env`: it is stored with the job (the agent refuses `GITHUB_TOKEN` there).
 
 ## Storage
 
@@ -722,5 +822,6 @@ the Macs check the signature themselves.
 | Mac shows offline | `umm-agent telemetry` and the agent log on the Mac | network or proxy to the router, a revoked credential, or the daemon is not loaded |
 | Mac never `ready` | the Mac's state and reason in the dashboard | paused (`paused` file), drained, quarantined after repeated failures, on battery, or its user is busy |
 | Program not found or permission denied; a runtime is struck through on the **Macs** page or listed under *Unavailable runtimes* in `umm macs` | the reason in its tooltip / `umm macs`, and the runtime path in `agent.yaml` | the program is not installed on that Mac (e.g. Homebrew `ffmpeg` missing), or the path or a parent directory is not readable and executable by `_umm`. Install or fix it; the agent re-checks every minute (or run `sudo launchctl kill HUP system/io.github.alee-ibrahim.umm-agent` after editing `agent.yaml`). No task is placed there meanwhile |
+| A `mise` task fails before it runs | the task's error and `umm logs TASK` (mise's output) | the config has more than `[tools]`, a tool is missing from `mise.lock` (or has no entry for `macos-arm64`), a checksum does not match, the program is not one the tools provide, or the download host is blocked by `task_network: deny` |
 | Attempts with outcome `unavailable` (exit 127) | `umm logs TASK`, the **Activity** page (`mac.runtime_unavailable`) | the Mac could not execute the runtime. The task moved to another Mac without using a retry, and that Mac lost the runtime until its program is fixed |
 | Mac stays on an old version | its update state and history (click the version on the **Macs** page) | updates paused, a downgrade without a pinned version (`refused`), a version that rolled back (retried after 1 h, then 2 h, ... up to a day), or "no updater" on Macs installed before self-update |
