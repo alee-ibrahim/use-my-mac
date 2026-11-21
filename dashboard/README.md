@@ -4,11 +4,11 @@ React + Vite + official [shadcn/ui](https://ui.shadcn.com) components. It is ser
 `web_dir`.
 
 ```sh
-npm ci
-npm run dev     # http://localhost:5173, proxies /v1 and /auth to a umm-server on :8080
-npm run build   # dist/
-npm run lint
+pnpm install
+pnpm dev        # http://localhost:5173, proxies /v1 and /auth to a umm-server on :8080
+pnpm build      # dist/
+pnpm lint
 ```
 
-Add UI components only through the shadcn CLI (`npx shadcn@latest add <component>`). The files in
+Add UI components only through the shadcn CLI (`pnpm dlx shadcn@latest add <component>`). The files in
 `src/components/ui` are vendored registry code.

@@ -17,7 +17,7 @@ vet:
 	GOOS=darwin GOARCH=arm64 $(GO) vet ./...
 
 web:
-	cd dashboard && npm ci && npm run build
+	cd dashboard && pnpm install --frozen-lockfile && pnpm build
 
 # The agent binary for Apple Silicon Macs (pure Go, no cgo needed).
 agent-darwin:
